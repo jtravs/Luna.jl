@@ -7,6 +7,7 @@ import LinearAlgebra: mul!, ldiv!
 import NumericalIntegration: integrate, SimpsonEven
 import Luna: PhysData, Modes, Maths, Grid
 import Luna.PhysData: wlfreq
+import Base: Threads
 
 """
     to_time!(Ato, Aω, Aωo, IFTplan)
@@ -141,6 +142,25 @@ end
 function Et_to_Pt!(Pt, Ptbuf, Et, responses, density, idcs)
     for i in idcs
         Et_to_Pt!(view(Pt, :, i), Ptbuf, view(Et, :, i), responses, density)
+    end
+end
+
+
+struct NonlinearResp{rT}
+    responses::Vector{rT}
+    function NonlinearResp(responses::rT) where rT
+        new{rT}([deepcopy(responses) for i = 1:Threads.nthreads()])
+    end
+end
+
+function (n::NonlinearResp)(Pt, Ptbuf, Et, density)
+    Et_to_Pt!(Pt, Ptbuf, Et, n.responses[Threads.threadid()], density)
+end
+
+function (n::NonlinearResp)(Pt, Ptbuf, Et, density, idcs)
+    Threads.@threads for i in idcs
+        error("not yet thread safe with Ptbuf, wait for pressure PR to be merged")
+        Et_to_Pt!(view(Pt, :, i), Ptbuf, view(Et, :, i), n.responses[Threads.threadid()], density)
     end
 end
 
