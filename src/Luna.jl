@@ -355,7 +355,7 @@ end
 function (l::LunaSim)(Eω, min_dz=0, max_dz=nothing, init_dz=1e-4, z0=0.0,
                       rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
                       status_period=1, reset=false)
-    isnothing(max_dz) && max_dz = l.grid.zmax/2
+    max_dz = isnothing(max_dz) ? l.grid.zmax/2 : max_dz
     # check_cache does nothing except for HDF5Outputs
     Eωc, zc, dzc = Output.check_cache(l.output, Eω, z0, init_dz)
     if zc > z0
