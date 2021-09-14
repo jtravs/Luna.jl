@@ -44,6 +44,13 @@ function initialise(o::MemoryOutput, y)
     o.data[o.tname] = Array{Float64}(undef, (dims[end],))
 end
 
+function reset(o::MemoryOutput)
+    o.saved = 0
+    o.data["stats"] = Dict{String, Any}()
+    o.data[o.yname] = Array{ComplexF64}(undef, size(o.data[o.yname]))
+    o.data[o.tname] = Array{Float64}(undef, size(o.data[o.tname]))
+end
+
 "getindex works interchangeably so when switching from one Output to
 another, subsequent code can stay the same"
 getindex(o::MemoryOutput, ds::AbstractString) = o.data[ds]
