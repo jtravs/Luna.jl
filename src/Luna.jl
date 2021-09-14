@@ -328,14 +328,17 @@ function dumps(t, l)
     Dict("transform" => tr, "linop" => lo)
 end
 
-function run(Eω, grid,
-             linop, transform, FT, output;
-             min_dz=0, max_dz=grid.zmax/2, init_dz=1e-4, z0=0.0,
-             rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
-             status_period=1)
+struct LunaSim{gT, lT, tT, fftT, oT, sfT}
+    grid::gT
+    linop::lT
+    transform::tT
+    FT::fftT
+    output::oT
+    stepfun::sfT
+end
 
+function LunaSim(Eω, grid, linop, transform, FT, output)
     Et = FT \ Eω
-
     function stepfun(Eω, z, dz, interpolant)
         Eω .*= grid.ωwin
         ldiv!(Et, FT, Eω)
@@ -343,23 +346,42 @@ function run(Eω, grid,
         mul!(Eω, FT, Et)
         output(Eω, z, dz, interpolant)
     end
-
-    # check_cache does nothing except for HDF5Outputs
-    Eωc, zc, dzc = Output.check_cache(output, Eω, z0, init_dz)
-    if zc > z0
-        Logging.@info("Found cached propagation. Resuming...")
-        Eω, z0, init_dz = Eωc, zc, dzc
-    end
-
     output(Grid.to_dict(grid), group="grid")
     output(simtype(grid, transform, linop), group="simulation_type")
     output(dumps(transform, linop), group="dumps")
+    LunaSim(grid, linop, transform, FT, output, stepfun)
+end
 
+function (l::LunaSim)(Eω, min_dz=0, max_dz=nothing, init_dz=1e-4, z0=0.0,
+                      rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
+                      status_period=1, reset=false)
+    isnothing(max_dz) && max_dz = l.grid.zmax/2
+    # check_cache does nothing except for HDF5Outputs
+    Eωc, zc, dzc = Output.check_cache(l.output, Eω, z0, init_dz)
+    if zc > z0
+        if reset
+            Output.reset(l.output)
+        else
+            Logging.@info("Found cached propagation. Resuming...")
+            Eω, z0, init_dz = Eωc, zc, dzc
+        end
+    end
     RK45.solve_precon(
-        transform, linop, Eω, z0, init_dz, grid.zmax, stepfun=stepfun,
-        max_dt=max_dz, min_dt=min_dz,
-        rtol=rtol, atol=atol, safety=safety, norm=norm,
-        status_period=status_period)
+        l.transform, l.linop, Eω, z0, init_dz, l.grid.zmax, stepfun=l.stepfun,
+        max_dt=max_dz, min_dt=min_dz, rtol=rtol, atol=atol, safety=safety,
+        norm=norm, status_period=status_period)
+    l.output
+end
+
+function run(Eω, grid,
+             linop, transform, FT, output;
+             min_dz=0, max_dz=grid.zmax/2, init_dz=1e-4, z0=0.0,
+             rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
+             status_period=1)
+    l = LunaSim(Eω, grid, linop, transform, FT, output)
+    l(Eω, min_dz=min_dz, max_dz=max_dz, init_dz=init_dz, z0=z0,
+      rtol=rtol, atol=atol, safety=safety, norm=norm,
+      status_period=status_period)
 end
 
 end # module
