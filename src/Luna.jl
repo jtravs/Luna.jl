@@ -335,21 +335,20 @@ struct LunaSim{gT, lT, tT, fftT, oT, sfT}
     FT::fftT
     output::oT
     stepfun::sfT
-end
-
-function LunaSim(Eω, grid, linop, transform, FT, output)
-    Et = FT \ Eω
-    function stepfun(Eω, z, dz, interpolant)
-        Eω .*= grid.ωwin
-        ldiv!(Et, FT, Eω)
-        Et .*= grid.twin
-        mul!(Eω, FT, Et)
-        output(Eω, z, dz, interpolant)
+    function LunaSim{gT, lT, tT, fftT, oT, sfT}(Eω, grid, linop, transform, FT, output)
+        Et = FT \ Eω
+        function stepfun(Eω, z, dz, interpolant)
+            Eω .*= grid.ωwin
+            ldiv!(Et, FT, Eω)
+            Et .*= grid.twin
+            mul!(Eω, FT, Et)
+            output(Eω, z, dz, interpolant)
+        end
+        output(Grid.to_dict(grid), group="grid")
+        output(simtype(grid, transform, linop), group="simulation_type")
+        output(dumps(transform, linop), group="dumps")
+        new(grid, linop, transform, FT, output, stepfun)
     end
-    output(Grid.to_dict(grid), group="grid")
-    output(simtype(grid, transform, linop), group="simulation_type")
-    output(dumps(transform, linop), group="dumps")
-    LunaSim(grid, linop, transform, FT, output, stepfun)
 end
 
 function (l::LunaSim)(Eω, min_dz=0, max_dz=nothing, init_dz=1e-4, z0=0.0,
