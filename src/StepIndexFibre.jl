@@ -116,6 +116,41 @@ function StepIndexMode(a, NA; n=1, m=1, kind=:HE, clad=:SiO2,  parity=:even, pts
     StepIndexMode(a, n, m, kind, parity, coren, cladn, pts, accellims)
 end
 
+"""
+    StepIndexMode(a, NA; n=1, m=1, kind=:HE, core=:SiO2, parity=:even,
+                  pts=100, accellims=nothing)
+
+Create a StepIndexMode based on the NA and specified core material.
+
+# Arguments
+- `a` : Either a `Number` for constant core radius, or a function `a(z)` for variable radius.
+- `NA` : The numerical aperture of the mode.
+- `n::Int=1` : Azimuthal mode index (number of nodes in the field along azimuthal angle).
+- `m::Int=1` : Radial mode index (number of nodes in the field along radial coordinate).
+- `kind::Symbol=:HE` : `:TE` for transverse electric, `:TM` for transverse magnetic,
+                   `:HE` or `:EH`, following Snyder and Love convention.
+- `core=:SiO2` : The core material.
+- `parity::Symbol=:even` : `:even` or `:odd`, following Snyder and Love convention.
+- `pts::Int=100` : number of grid points to use in zero search.
+- `accellims::Tuple=nothing` : can be set to (λmin, λmax, npts) to build a spline to
+   accelerate neff lookup.
+- `searchscale::Float64` : factor to scale the core refractive index down for the
+   lower bound of teh cladding refractive index. 
+
+"""
+function StepIndexMode(a, NA, core; n=1, m=1, kind=:HE, parity=:even, pts=100,
+                       accellims=nothing, searchscale=0.9)
+    rfco = ref_index_fun(core, lookup=false)
+    function rfcl(λ)
+        nco = real(rfco(λ))
+        f(ncl) = nco - ncl - NA^2/(2*ncl)
+        find_zeros(f, searchscale*nco, nco)[1]
+    end
+    coren = (ω; z) -> real(rfco(wlfreq(ω)))
+    cladn = (ω; z) -> real(rfcl(wlfreq(ω)))
+    StepIndexMode(a, n, m, kind, parity, coren, cladn, pts, accellims)
+end
+
 function show(io::IO, m::StepIndexMode)
     a = radius_string(m)
     out = "StepIndexMode{"*join([mode_string(m), a], ", ")*"}"
