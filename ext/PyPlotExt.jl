@@ -76,95 +76,7 @@ function subplotgrid(N, portrait=true; colw=4, rowh=2.5, title=nothing)
     fig, N > 1 ? axs : [axs]
 end
 
-"""
-    get_modes(output)
-
-Determine whether `output` contains a multimode simulation, and if so, return the names
-of the modes.
-"""
-function get_modes(output)
-    t = output["simulation_type"]["transform"]
-    !startswith(t, "TransModal") && return false, nothing
-    lines = split(t, "\n")
-    modeline = findfirst(li -> startswith(li, "  modes:"), lines)
-    endline = findnext(li -> !startswith(li, " "^4), lines, modeline+1)
-    mlines = lines[modeline+1 : endline-1]
-    labels = [match(r"{([^,]*),", li).captures[1] for li in mlines]
-    angles = zeros(length(mlines))
-    for (ii, li) in enumerate(mlines)
-        m = match(r"ϕ=(-?[0-9]+.[0-9]+)π", li)
-        isnothing(m) && continue # no angle information in mode label)
-        angles[ii] = parse(Float64, m.captures[1])
-    end
-    if !all(angles .== 0)
-        for i in eachindex(labels)
-            if startswith(labels[i], "HE")
-                if angles[i] == 0
-                    θs = "x"
-                elseif angles[i] == 0.5
-                    θs = "y"
-                else
-                    θs = "$(angles[i])π"
-                end
-                labels[i] *= " ($θs)"
-            end
-        end
-    end
-    return true, labels
-end
-
-"""
-    stats(output; kwargs...)
-
-Plot all statistics available in `output`. Additional `kwargs` are passed onto `plt.plot()`
-"""
-function stats(output; kwargs...)
-    stats = output["stats"]
-
-    pstats = [] # pulse statistics
-    haskey(stats, "energy") && push!(pstats, (1e6*stats["energy"], "Energy (μJ)"))
-    for (k, v) in pairs(stats)
-        startswith(k, "energy_") || continue
-        str = "Energy "*replace(k[8:end], "_" => " ")*" (μJ)"
-        push!(pstats, (1e6*stats[k], str))
-    end
-    for (k, v) in pairs(stats)
-        startswith(k, "peakpower_") || continue
-        Pfac, unit = power_unit(stats[k])
-        str = "Peak power "*replace(k[11:end], "_" => " ")*" ($unit)"
-        push!(pstats, (Pfac*stats[k], str))
-    end
-    if haskey(stats, "peakpower")
-        Pfac, unit = power_unit(stats["peakpower"])
-        push!(pstats, (Pfac*stats["peakpower"], "Peak power ($unit)"))
-    end
-    haskey(stats, "peakintensity") && push!(
-        pstats, (1e-16*stats["peakintensity"], "Peak Intensity (TW/cm\$^2\$)"))
-    haskey(stats, "fwhm_t_min") && push!(pstats, (1e15*stats["fwhm_t_min"], "min FWHM (fs)"))
-    haskey(stats, "fwhm_t_max") && push!(pstats, (1e15*stats["fwhm_t_max"], "max FWHM (fs)"))
-    haskey(stats, "fwhm_r") && push!(pstats, (1e6*stats["fwhm_r"], "Radial FWHM (μm)"))
-    haskey(stats, "ω0") && push!(pstats, (1e9*wlfreq.(stats["ω0"]), "Central wavelength (nm)"))
-
-    fstats = [] # fibre/waveguide/propagation statistics
-    if haskey(stats, "electrondensity")
-        push!(fstats, (1e-6*stats["electrondensity"], "Electron density (cm\$^{-3}\$)"))
-        if haskey(stats, "density")
-            push!(fstats,
-                 (100*stats["electrondensity"]./stats["density"], "Ionisation fraction (%)"))
-        end
-    end
-    haskey(stats, "density") && push!(
-        fstats, (1e-6*stats["density"], "Density (cm\$^{-3}\$)"))
-    haskey(stats, "pressure") && push!(
-        fstats, (stats["pressure"], "Pressure (bar)"))
-    haskey(stats, "dz") && push!(fstats, (1e6*stats["dz"], "Stepsize (μm)"))
-    haskey(stats, "core_radius") && push!(fstats, (1e6*stats["core_radius"], "Core radius (μm)"))
-    haskey(stats, "zdw") && push!(fstats, (1e9*stats["zdw"], "ZDW (nm)"))
-
-    z = stats["z"]*1e2
-
-    multimode, modes = get_modes(output)
-
+function stats(pstats, fstats, multimode, modes; kwargs...)
     Npl = length(pstats)
     if Npl > 0
         pfig, axs = subplotgrid(Npl, title="Pulse stats")
@@ -198,24 +110,6 @@ function stats(output; kwargs...)
     end
     [pfig, ffig]
 end
-
-"""
-    should_log10(A, tolfac=10)
-
-For multi-line plots, determine whether data for different lines contained in `A` spans
-a sufficiently large range that a logarithmic scale should be used. By default, this is the
-case when there is any point where the lines are different by more than a factor of 10.
-"""
-function should_log10(A, tolfac=10)
-    mi = minimum(A; dims=2)
-    ma = maximum(A; dims=2)
-    any(ma./mi .> 10)
-end
-
-window_str(::Nothing) = ""
-window_str(win::NTuple{4, Number}) = @sprintf("%.1f nm to %.1f nm", 1e9.*win[2:3]...)
-window_str(win::NTuple{2, Number}) = @sprintf("%.1f nm to %.1f nm", 1e9.*win...)
-window_str(window) = "custom bandpass"
 
 """
     prop_2D(output, specaxis=:f)
