@@ -138,6 +138,44 @@ window_str(win::NTuple{4, Number}) = @sprintf("%.1f nm to %.1f nm", 1e9.*win[2:3
 window_str(win::NTuple{2, Number}) = @sprintf("%.1f nm to %.1f nm", 1e9.*win...)
 window_str(window) = "custom bandpass"
 
+modeidcs(m::Int, ml) = [m]
+modeidcs(m::Symbol, ml) = (m == :sum) ? [] : error("modes must be :sum, a single integer, or iterable")
+modeidcs(m::Nothing, ml) = 1:length(ml)
+modeidcs(m, ml) = m
+
+# Helper function to convert λrange to the correct numbers depending on specaxis
+function getspeclims(λrange, specaxis)
+    if specaxis == :f
+        specxfac = 1e-15
+        speclims = (specxfac*c/maximum(λrange), specxfac*c/minimum(λrange))
+        speclabel = "Frequency (PHz)"
+    elseif specaxis == :ω
+        specxfac = 1e-15
+        speclims = (specxfac*wlfreq(maximum(λrange)), specxfac*wlfreq(minimum(λrange)))
+        speclabel = "Angular frequency (rad/fs)"
+    elseif specaxis == :λ
+        specxfac = 1e9
+        speclims = λrange .* specxfac
+        speclabel = "Wavelength (nm)"
+    else
+        error("Unknown specaxis $specaxis")
+    end
+    return speclims, speclabel, specxfac
+end
+
+# Automatically find power unit depending on scale of electric field.
+function power_unit(Pt, y=:Pt)
+    units = ["kW", "MW", "GW", "TW", "PW"]
+    Pmax = maximum(Pt)
+    oom = clamp(floor(Int, log10(Pmax)/3), 1, 5) # maximum unit is PW
+    powerfac = 1/10^(oom*3)
+    if y == :Et
+        sqrt(powerfac), "$(units[oom])\$^{1/2}\$"
+    else
+        return powerfac, units[oom]
+    end
+end   
+
 """
     prop_2D(output, specaxis=:f)
 
