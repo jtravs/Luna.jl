@@ -451,11 +451,14 @@ end
 
 function ionrate_fun!_ParkerHe()
     # "From the UV to the static-field limit: rates and scaling laws of intense-field ionization of helium"
+    # 2009 J. Phys. B: At. Mol. Opt. Phys. 42 134011
     # doi:10.1088/0953-4075/42/13/134011
     function ionrate(E)
         E_au = abs(E)/au_Efield
         if E_au < 0.045
             return 0.0
+        elseif E_au > 0.4
+            error("ParkerHe ionisation rate is only valid for E <= 0.4 a.u.")
         end
         rate = exp(-1/(1.47e-5 + 0.577 * E_au)) / E_au^2
         if E_au > 0.1755
