@@ -449,4 +449,24 @@ function ionrate_PPT(material::Symbol, λ0, E;
     return ionrate_PPT(ip, λ0, Z, l, E; Δα, α_ion, kwargs...)
 end
 
+function ionrate_fun!_ParkerHe()
+    # "From the UV to the static-field limit: rates and scaling laws of intense-field ionization of helium"
+    # doi:10.1088/0953-4075/42/13/134011
+    function ionrate(E)
+        E_au = abs(E)/au_Efield
+        if E_au < 0.045
+            return 0.0
+        end
+        rate = exp(-1/(1.47e-5 + 0.577 * E_au)) / E_au^2
+        if E_au > 0.1755
+            rate += 6.183*(E_au - 0.1755)^4
+        end
+        rate/au_time
+    end
+    function ionrate!(out, E)
+        out .= ionrate.(E)
+    end
+    return ionrate!
+end
+
 end

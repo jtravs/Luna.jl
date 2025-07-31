@@ -561,6 +561,12 @@ function makeplasma!(out, grid, gas, plasma::Symbol, pol,
     elseif plasma == :PPT
         ionrate = Ionisation.ionrate_fun!_PPTcached(gas, grid.referenceλ;
                                                     PPT_options...)
+    elseif plasma == :ParkerHe
+        if gas ∉ (:He, :HeJ)
+            throw(DomainError(gas, "ParkerHe ionisation rate is only available for helium."))
+        end
+        @info("Using ParkerHe ionisation rate.")
+        ionrate = Ionisation.ionrate_fun!_ParkerHe()
     else
         throw(DomainError(plasma, "Unknown ionisation rate $plasma."))
     end
