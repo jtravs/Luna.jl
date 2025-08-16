@@ -524,7 +524,7 @@ function ωwindow_λ(ω, λlims; winwidth=:auto)
 end
 
 """
-    getIω(ω, Eω, specaxis; specrange=nothing, resolution=nothing)
+    getIω(ω, Eω, specaxis; specrange=nothing, resolution=nothing, bandpass=nothing)
 
 Get spectral energy density and x-axis given a frequency array `ω` and frequency-domain field
 `Eω`, assumed to be correctly normalised (see [`getEω`](@ref)). `specaxis` determines the
@@ -537,10 +537,12 @@ x-axis:
 # Keyword arguments
 - `specrange::Tuple` can be set to a pair of limits on the spectral range (in `specaxis` units).
 - `resolution::Real` is set, smooth the spectral energy density as defined by [`specres`](@ref).
+- `bandpass` : method to bandpass the field if required. See [`window_maybe`](@ref)
 
 Note that if `resolution` and `specaxis=:λ` is set it is highly recommended to also set `specrange`.
 """
-function getIω(ω, Eω, specaxis; specrange=nothing, resolution=nothing)
+function getIω(ω, Eω, specaxis; specrange=nothing, resolution=nothing, bandpass=nothing)
+    Eω = window_maybe(ω, Eω, bandpass)
     sortx = false
     if specaxis == :ω || !isnothing(resolution)
         specx = ω
@@ -580,6 +582,7 @@ x-axis:
 # Keyword arguments
 - `specrange::Tuple` can be set to a pair of limits on the spectral range (in `specaxis` units).
 - `resolution::Real` is set, smooth the spectral energy density as defined by [`specres`](@ref).
+- `bandpass` : method to bandpass the field if required. See [`window_maybe`](@ref)
 
 Note that `resolution` is set and `specaxis=:λ` it is highly recommended to also set `specrange`.
 """

@@ -237,9 +237,9 @@ function prop_2D(output, specaxis=:f;
                  kwargs...)
     z = output["z"]*1e2
     if specaxis == :λ
-            specx, Iω = getIω(output, specaxis, specrange=λrange, resolution=resolution)
+            specx, Iω = getIω(output, specaxis, specrange=λrange, resolution=resolution, bandpass=bandpass)
     else
-            specx, Iω = getIω(output, specaxis, resolution=resolution)
+            specx, Iω = getIω(output, specaxis, resolution=resolution, bandpass=bandpass)
     end
 
     t, Et = getEt(output; trange, bandpass, oversampling)
@@ -455,11 +455,12 @@ Other `kwargs` are passed onto `plt.plot`.
 function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
                  modes=nothing, λrange=(150e-9, 1200e-9),
                  log10=true, log10min=1e-6, resolution=nothing,
+                 bandpass=nothing,
                  kwargs...)
     if specaxis == :λ
-        specx, Iω, zactual = getIω(output, specaxis, zslice, specrange=λrange, resolution=resolution)
+        specx, Iω, zactual = getIω(output, specaxis, zslice, specrange=λrange, resolution=resolution, bandpass=bandpass)
     else
-        specx, Iω, zactual = getIω(output, specaxis, zslice, resolution=resolution)
+        specx, Iω, zactual = getIω(output, specaxis, zslice, resolution=resolution, bandpass=bandpass)
     end
     speclims, speclabel, specxfac = getspeclims(λrange, specaxis)
     multimode, modestrs = get_modes(output)
