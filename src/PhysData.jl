@@ -30,12 +30,14 @@ const m_e = ustrip(CODATA2014.m_e)
 const e_ratio = electron^2/m_e
 "Reduced Planck's constant"
 const ħ = ustrip(CODATA2014.ħ)
+"Atomic unit of length (Bohr radius)"
+const a_0 = ustrip(CODATA2014.a_0)
 "Atomic unit of energy"
-const au_energy = ħ*c*ustrip(CODATA2014.α)/ustrip(CODATA2014.a_0)
+const au_energy = ħ*c*ustrip(CODATA2014.α)/a_0
 "Atomic unit of time"
 const au_time = ħ/au_energy
 "Atomic unit of electric field"
-const au_Efield = au_energy/(electron*ustrip(CODATA2014.a_0))
+const au_Efield = au_energy/(electron*a_0)
 "Room temperature in Kelvin (ca 20 deg C)"
 const roomtemp = 293.15
 "Avogadro constant"
@@ -45,7 +47,7 @@ const amg = atm/(k_B*273.15)
 "Atomic mass unit"
 const m_u = ustrip(CODATA2014.m_u)
 "Atomic unit of electric polarisability"
-const au_polarisability = electron^2*ustrip(CODATA2014.a_0)^2/au_energy
+const au_polarisability = electron^2*a_0^2/au_energy
 
 const gas = (:Air, :He, :HeJ, :HeB, :Ne, :Ar, :Kr, :Xe, :N2, :H2, :O2, :CH4, :SF6, :N2O, :D2)
 const gas_str = Dict(
