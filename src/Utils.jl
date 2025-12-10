@@ -74,11 +74,12 @@ function sourcecode()
 end
 
 function FFTWthreads()
-    #if Threads.nthreads() == 1
-        1
-    #else
-    #    settings["fftw_threads"] == 0 ? 4*Threads.nthreads() : settings["fftw_threads"]
-    #end
+    1
+    # if Threads.nthreads() == 1
+    #     1
+    # else
+    #     settings["fftw_threads"] == 0 ? 4*Threads.nthreads() : settings["fftw_threads"]
+    # end
 end
 
 function loadFFTwisdom()
