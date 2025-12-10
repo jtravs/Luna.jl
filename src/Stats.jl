@@ -296,7 +296,7 @@ Create a stats function to calculate and collect the mode reconstruction error i
 induced polarisation on axis at every step.
 """
 function mode_reconstruction_error(t::TransModal)
-    Prω_recon = similar(t.Prω)
+    Prω_recon = similar(t.data.Prω)
     difference = similar(Prω_recon)
     nl = similar(t.Emω)
     function addstat!(d, Eω, Et, z, dz)
@@ -306,8 +306,8 @@ function mode_reconstruction_error(t::TransModal)
         Modes.to_space!(Prω_recon, nl, x, t.ts, z=z)
         # in going to modes and back we've picked up two factors of the mode normalisation
         Prω_recon .*= 1/2*sqrt(PhysData.ε_0/PhysData.μ_0)
-        Erω_to_Prω!(t, x)
-        difference .= Prω_recon .- t.Prω
+        Erω_to_Prω!(t, t.data, x)
+        difference .= Prω_recon .- t.data.Prω
         d["mode_reconstruction_error"] = sqrt(sum(abs2, difference))/sqrt(sum(abs2, Prω_recon))
         d["transverse_points"] = float(t.ncalls) # convert to Float64 to enable NaN padding
         d["transverse_integral_error_abs"] = sqrt(sum(abs2, t.err)/length(t.err))
@@ -545,7 +545,7 @@ function default(grid, Eω, modes::Modes.ModeCollection, linop, transform;
     if mode_error
         push!(funs, mode_reconstruction_error(transform))
     end
-    for resp in transform.resp
+    for resp in transform.data.resp
         if resp isa PlasmaCumtrapz
             ir = resp.ratefunc
             ed = electrondensity(grid, resp.ratefunc, transform.densityfun, modes,

@@ -7,6 +7,7 @@ import LinearAlgebra: mul!, ldiv!
 import NumericalIntegration: integrate, SimpsonEven
 import Luna: PhysData, Modes, Maths, Grid
 import Luna.PhysData: wlfreq
+import OhMyThreads: tforeach, chunks
 
 """
     to_time!(Ato, Aω, Aωo, IFTplan)
@@ -140,6 +141,24 @@ function Et_to_Pt!(Pt, Et, responses, density, idcs)
     end
 end
 
+struct TransModalData{TT, rT}
+    Erω::Array{ComplexF64,2}
+    Erωo::Array{ComplexF64,2}
+    Er::Array{TT,2}
+    Pr::Array{TT,2}
+    Prω::Array{ComplexF64,2}
+    Prωo::Array{ComplexF64,2}
+    Prmω::Array{ComplexF64,2}
+    resp::rT
+end
+
+function Base.copy(d::TransModalData)
+    TransModalData(
+        copy(d.Erω), copy(d.Erωo), copy(d.Er), copy(d.Pr),
+        copy(d.Prω), copy(d.Prωo), copy(d.Prmω), deepcopy(d.resp)
+    )
+end
+
 """
     TransModal
 
@@ -150,15 +169,9 @@ mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT}
     full::Bool
     dimlimits::lT
     Emω::Array{ComplexF64,2}
-    Erω::Array{ComplexF64,2}
-    Erωo::Array{ComplexF64,2}
-    Er::Array{TT,2}
-    Pr::Array{TT,2}
-    Prω::Array{ComplexF64,2}
-    Prωo::Array{ComplexF64,2}
-    Prmω::Array{ComplexF64,2}
+    data::TransModalData{TT, rT}
+    buffers::Channel{TransModalData{TT, rT}}
     FT::FTT
-    resp::rT
     grid::gT
     densityfun::dT
     density::ddT
@@ -177,7 +190,7 @@ function show(io::IO, t::TransModal)
     p = t.ts.indices == 1:2 ? "x,y" : t.ts.indices == 1 ? "x" : "y"
     pol = "polarisation: $p"
     samples = "time grid size: $(length(t.grid.t)) / $(length(t.grid.to))"
-    resp = "responses: "*join([string(typeof(ri)) for ri in t.resp], "\n    ")
+    resp = "responses: "*join([string(typeof(ri)) for ri in t.data.resp], "\n    ")
     full = "full: $(t.full)"
     out = join(["TransModal", modes, pol, grid, samples, full, resp], "\n  ")
     print(io, out)
@@ -211,8 +224,13 @@ function TransModal(tT, grid, ts::Modes.ToSpace, FT, resp, densityfun, norm!;
     Prωo = Array{ComplexF64,2}(undef, length(grid.ωo), ts.npol)
     Prmω = Array{ComplexF64,2}(undef, length(grid.ω), ts.nmodes)
     IFT = inv(FT)
-    TransModal(ts, full, Modes.dimlimits(ts.ms[1]), Emω, Erω, Erωo, Er, Pr, Prω, Prωo, Prmω,
-               FT, resp, grid, densityfun, densityfun(0.0), norm!, 0, 0.0, rtol, atol, mfcn, similar(Prmω))
+    data = TransModalData(Erω, Erωo, Er, Pr, Prω, Prωo, Prmω, resp)
+    buffers = Channel{typeof(data)}(Threads.nthreads())
+    for _ in 1:Threads.nthreads()
+        put!(buffers, deepcopy(data))
+    end
+    TransModal(ts, full, Modes.dimlimits(ts.ms[1]), Emω, data, buffers,
+               FT, grid, densityfun, densityfun(0.0), norm!, 0, 0.0, rtol, atol, mfcn, similar(Prmω))
 end
 
 function TransModal(grid::Grid.RealGrid, args...; kwargs...)
@@ -232,53 +250,59 @@ function reset!(t::TransModal, Emω::Array{ComplexF64,2}, z::Float64)
 end
 
 function pointcalc!(fval, xs, t::TransModal)
-    # TODO: parallelize this in Julia 1.3
-    for i in 1:size(xs, 2)
-        x1 = xs[1, i]
-        # on or outside boundaries are zero
-        if x1 <= t.dimlimits[2][1] || x1 >= t.dimlimits[3][1]
-            fval[:, i] .= 0.0
-            continue
-        end
-        if size(xs, 1) > 1 # full 2-D mode integral
-            x2 = xs[2, i]
-            if t.dimlimits[1] == :polar
-                pre = x1
-            else
-                if x2 <= t.dimlimits[2][2] || x1 >= t.dimlimits[3][2]
+    tforeach(chunks(1:size(xs, 2), n=Threads.nthreads())) do chunk
+        data = take!(t.buffers)
+        try
+            for i in chunk
+                x1 = xs[1, i]
+                # on or outside boundaries are zero
+                if x1 <= t.dimlimits[2][1] || x1 >= t.dimlimits[3][1]
                     fval[:, i] .= 0.0
                     continue
                 end
-                pre = 1.0
+                if size(xs, 1) > 1 # full 2-D mode integral
+                    x2 = xs[2, i]
+                    if t.dimlimits[1] == :polar
+                        pre = x1
+                    else
+                        if x2 <= t.dimlimits[2][2] || x1 >= t.dimlimits[3][2]
+                            fval[:, i] .= 0.0
+                            continue
+                        end
+                        pre = 1.0
+                    end
+                else
+                    if t.dimlimits[1] == :polar
+                        x2 = 0.0
+                        pre = 2π*x1
+                    else
+                        x2 = 0.0
+                        pre = 1.0
+                    end
+                end
+                x = (x1,x2)
+                Erω_to_Prω!(t, data, x)
+                # t.ncalls += 1
+                # now project back to each mode
+                # matrix product (nω x npol) * (npol x nmodes) -> (nω x nmodes)
+                mul!(data.Prmω, data.Prω, transpose(t.ts.Ems))
+                fval[:, i] .= pre.*reshape(reinterpret(Float64, data.Prmω), length(t.Emω)*2)
             end
-        else
-            if t.dimlimits[1] == :polar
-                x2 = 0.0
-                pre = 2π*x1
-            else
-                x2 = 0.0
-                pre = 1.0
-            end
+        finally
+            put!(t.buffers, data)
         end
-        x = (x1,x2)
-        Erω_to_Prω!(t, x)
-        t.ncalls += 1
-        # now project back to each mode
-        # matrix product (nω x npol) * (npol x nmodes) -> (nω x nmodes)
-        mul!(t.Prmω, t.Prω, transpose(t.ts.Ems))
-        fval[:, i] .= pre.*reshape(reinterpret(Float64, t.Prmω), length(t.Emω)*2)
     end
 end
 
-function Erω_to_Prω!(t, x)
-    Modes.to_space!(t.Erω, t.Emω, x, t.ts, z=t.z)
-    to_time!(t.Er, t.Erω, t.Erωo, inv(t.FT))
+function Erω_to_Prω!(t, data, x)
+    Modes.to_space!(data.Erω, t.Emω, x, t.ts, z=t.z)
+    to_time!(data.Er, data.Erω, data.Erωo, inv(t.FT))
     # get nonlinear pol at r,θ
-    Et_to_Pt!(t.Pr, t.Er, t.resp, t.density)
-    @. t.Pr *= t.grid.towin
-    to_freq!(t.Prω, t.Prωo, t.Pr, t.FT)
-    @. t.Prω *= t.grid.ωwin
-    t.norm!(t.Prω)
+    Et_to_Pt!(data.Pr, data.Er, data.resp, t.density)
+    @. data.Pr *= t.grid.towin
+    to_freq!(data.Prω, data.Prωo, data.Pr, t.FT)
+    @. data.Prω *= t.grid.ωwin
+    t.norm!(data.Prω)
 end
 
 function (t::TransModal)(nl, Eω, z)
