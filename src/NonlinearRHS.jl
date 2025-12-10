@@ -252,45 +252,40 @@ end
 
 function pointcalc!(fval, xs, t::TransModal)
     tforeach(1:size(xs, 2)) do i
-        #try
-        #    for i in chunk
-                x1 = xs[1, i]
-                # on or outside boundaries are zero
-                if x1 <= t.dimlimits[2][1] || x1 >= t.dimlimits[3][1]
+        x1 = xs[1, i]
+        # on or outside boundaries are zero
+        if x1 <= t.dimlimits[2][1] || x1 >= t.dimlimits[3][1]
+            fval[:, i] .= 0.0
+            return #continue
+        end
+        if size(xs, 1) > 1 # full 2-D mode integral
+            x2 = xs[2, i]
+            if t.dimlimits[1] == :polar
+                pre = x1
+            else
+                if x2 <= t.dimlimits[2][2] || x1 >= t.dimlimits[3][2]
                     fval[:, i] .= 0.0
                     return #continue
                 end
-                if size(xs, 1) > 1 # full 2-D mode integral
-                    x2 = xs[2, i]
-                    if t.dimlimits[1] == :polar
-                        pre = x1
-                    else
-                        if x2 <= t.dimlimits[2][2] || x1 >= t.dimlimits[3][2]
-                            fval[:, i] .= 0.0
-                            return #continue
-                        end
-                        pre = 1.0
-                    end
-                else
-                    if t.dimlimits[1] == :polar
-                        x2 = 0.0
-                        pre = 2π*x1
-                    else
-                        x2 = 0.0
-                        pre = 1.0
-                    end
-                end
-                x = (x1,x2)
-                data = take!(t.buffers)
-                Erω_to_Prω!(t, data, x)
-                # now project back to each mode
-                # matrix product (nω x npol) * (npol x nmodes) -> (nω x nmodes)
-                mul!(data.Prmω, data.Prω, transpose(data.ts.Ems))
-                fval[:, i] .= pre.*reshape(reinterpret(Float64, data.Prmω), length(t.Emω)*2)
-            #end
-        #finally
-            put!(t.buffers, data)
-        #end
+                pre = 1.0
+            end
+        else
+            if t.dimlimits[1] == :polar
+                x2 = 0.0
+                pre = 2π*x1
+            else
+                x2 = 0.0
+                pre = 1.0
+            end
+        end
+        x = (x1,x2)
+        data = take!(t.buffers)
+        Erω_to_Prω!(t, data, x)
+        # now project back to each mode
+        # matrix product (nω x npol) * (npol x nmodes) -> (nω x nmodes)
+        mul!(data.Prmω, data.Prω, transpose(data.ts.Ems))
+        fval[:, i] .= pre.*reshape(reinterpret(Float64, data.Prmω), length(t.Emω)*2)
+        put!(t.buffers, data)
     end
 end
 
