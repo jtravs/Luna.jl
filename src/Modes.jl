@@ -408,12 +408,16 @@ function orthonormal(modes)
 end
     
 
-struct ToSpace{mT,iT}
+struct ToSpace{mT, iT, EmsT}
     ms::mT
     indices::iT
     nmodes::Int
     npol::Int
-    Ems::Array{Float64,2}
+    Ems::EmsT
+end
+
+function Base.copy(ts::ToSpace)
+    ToSpace(ts.ms, ts.indices, ts.nmodes, ts.npol, copy(ts.Ems))
 end
 
 """

@@ -141,7 +141,7 @@ function Et_to_Pt!(Pt, Et, responses, density, idcs)
     end
 end
 
-struct TransModalData{TT, rT}
+struct TransModalData{TT, rT, tsT}
     Erω::Array{ComplexF64,2}
     Erωo::Array{ComplexF64,2}
     Er::Array{TT,2}
@@ -150,12 +150,13 @@ struct TransModalData{TT, rT}
     Prωo::Array{ComplexF64,2}
     Prmω::Array{ComplexF64,2}
     resp::rT
+    ts::tsT
 end
 
 function Base.copy(d::TransModalData)
     TransModalData(
         copy(d.Erω), copy(d.Erωo), copy(d.Er), copy(d.Pr),
-        copy(d.Prω), copy(d.Prωo), copy(d.Prmω), deepcopy(d.resp)
+        copy(d.Prω), copy(d.Prωo), copy(d.Prmω), deepcopy(d.resp), copy(d.ts)
     )
 end
 
@@ -169,8 +170,8 @@ mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT}
     full::Bool
     dimlimits::lT
     Emω::Array{ComplexF64,2}
-    data::TransModalData{TT, rT}
-    buffers::Channel{TransModalData{TT, rT}}
+    data::TransModalData{TT, rT, tsT}
+    buffers::Channel{TransModalData{TT, rT, tsT}}
     FT::FTT
     grid::gT
     densityfun::dT
@@ -224,10 +225,10 @@ function TransModal(tT, grid, ts::Modes.ToSpace, FT, resp, densityfun, norm!;
     Prωo = Array{ComplexF64,2}(undef, length(grid.ωo), ts.npol)
     Prmω = Array{ComplexF64,2}(undef, length(grid.ω), ts.nmodes)
     IFT = inv(FT)
-    data = TransModalData(Erω, Erωo, Er, Pr, Prω, Prωo, Prmω, resp)
+    data = TransModalData(Erω, Erωo, Er, Pr, Prω, Prωo, Prmω, resp, ts)
     buffers = Channel{typeof(data)}(Threads.nthreads())
     for _ in 1:Threads.nthreads()
-        put!(buffers, deepcopy(data))
+        put!(buffers, copy(data))
     end
     TransModal(ts, full, Modes.dimlimits(ts.ms[1]), Emω, data, buffers,
                FT, grid, densityfun, densityfun(0.0), norm!, 0, 0.0, rtol, atol, mfcn, similar(Prmω))
@@ -282,10 +283,9 @@ function pointcalc!(fval, xs, t::TransModal)
                 end
                 x = (x1,x2)
                 Erω_to_Prω!(t, data, x)
-                # t.ncalls += 1
                 # now project back to each mode
                 # matrix product (nω x npol) * (npol x nmodes) -> (nω x nmodes)
-                mul!(data.Prmω, data.Prω, transpose(t.ts.Ems))
+                mul!(data.Prmω, data.Prω, transpose(data.ts.Ems))
                 fval[:, i] .= pre.*reshape(reinterpret(Float64, data.Prmω), length(t.Emω)*2)
             end
         finally
@@ -295,7 +295,7 @@ function pointcalc!(fval, xs, t::TransModal)
 end
 
 function Erω_to_Prω!(t, data, x)
-    Modes.to_space!(data.Erω, t.Emω, x, t.ts, z=t.z)
+    Modes.to_space!(data.Erω, t.Emω, x, data.ts, z=t.z)
     to_time!(data.Er, data.Erω, data.Erωo, inv(t.FT))
     # get nonlinear pol at r,θ
     Et_to_Pt!(data.Pr, data.Er, data.resp, t.density)
