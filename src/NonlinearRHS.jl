@@ -251,15 +251,14 @@ function reset!(t::TransModal, Emω::Array{ComplexF64,2}, z::Float64)
 end
 
 function pointcalc!(fval, xs, t::TransModal)
-    tforeach(chunks(1:size(xs, 2), n=Threads.nthreads())) do chunk
-        data = take!(t.buffers)
-        try
-            for i in chunk
+    tforeach(1:size(xs, 2)) do i
+        #try
+        #    for i in chunk
                 x1 = xs[1, i]
                 # on or outside boundaries are zero
                 if x1 <= t.dimlimits[2][1] || x1 >= t.dimlimits[3][1]
                     fval[:, i] .= 0.0
-                    continue
+                    return #continue
                 end
                 if size(xs, 1) > 1 # full 2-D mode integral
                     x2 = xs[2, i]
@@ -268,7 +267,7 @@ function pointcalc!(fval, xs, t::TransModal)
                     else
                         if x2 <= t.dimlimits[2][2] || x1 >= t.dimlimits[3][2]
                             fval[:, i] .= 0.0
-                            continue
+                            return #continue
                         end
                         pre = 1.0
                     end
@@ -282,15 +281,16 @@ function pointcalc!(fval, xs, t::TransModal)
                     end
                 end
                 x = (x1,x2)
+                data = take!(t.buffers)
                 Erω_to_Prω!(t, data, x)
                 # now project back to each mode
                 # matrix product (nω x npol) * (npol x nmodes) -> (nω x nmodes)
                 mul!(data.Prmω, data.Prω, transpose(data.ts.Ems))
                 fval[:, i] .= pre.*reshape(reinterpret(Float64, data.Prmω), length(t.Emω)*2)
-            end
-        finally
+            #end
+        #finally
             put!(t.buffers, data)
-        end
+        #end
     end
 end
 
