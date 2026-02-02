@@ -367,7 +367,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         modes=:HE11, model=:full, loss=true,
                         radial_integral_rtol=1e-3,
                         raman=nothing, kerr=true, plasma=nothing,
-                        stats_kwargs=Dict{Symbol, Any}(),
+                        stats_kwargs=Dict{Symbol, Any}(), stats=true,
                         PPT_options=Dict{Symbol, Any}(), preionfrac=0.0,
                         rotation=true, vibration=true, temperature=roomtemp,
                         saveN=201, filepath=nothing,
@@ -389,7 +389,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
     inputs = shotnoise_maybe(inputs, mode_s, shotnoise)
     linop, Eω, transform, FT = setup(grid, mode_s, density, resp, inputs, pol,
                                      radial_integral_rtol, const_linop(radius, pressure))
-    stats = Stats.default(grid, Eω, mode_s, linop, transform; gas=gas, stats_kwargs...)
+    stats = stats ? Stats.default(grid, Eω, mode_s, linop, transform; gas=gas, stats_kwargs...) : Output.nostats
     output = makeoutput(grid, saveN, stats, filepath, scan, scanidx, filename)
 
     saveargs(output; radius, flength, gas, pressure, λlims, trange, envelope, thg, δt,
