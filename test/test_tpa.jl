@@ -58,18 +58,18 @@ end
 end
 
 @testset "TPA energy loss — mode-averaged" begin
-    # Propagate a pulse through a thin medium with TPA only (Kerr off).
+    # Propagate a pulse through a thin medium with TPA only (n2≈0).
     # TPA should cause energy loss.
     λ0 = 240e-9
-    τfwhm = 30e-15
-    energy = 1e-9  # 1 nJ
+    τfwhm = 5e-15
+    energy = 20e-9  # 1 nJ
     flength = 100e-6  # 100 µm
 
-    # Use zero Kerr (γ=0 effectively) but with a small β₂ for dispersion
-    β2 = 1e-27  # small normal dispersion
+    β2 = 1e-30  # small normal dispersion
     βs = [0.0, 0.0, β2]
-    γ = 0.0  # no Kerr
-    λlims = [180e-9, 400e-9]
+    Aeff = π * (12e-6)^2  # realistic effective area
+    n2_val = 1e-25  # very small n2 (effectively no Kerr)
+    λlims = [160e-9, 600e-9]
     trange = 1e-12
 
     # Synthetic TPA: constant β₂_TPA = 1e-11 m/W across band (strong enough to see effect)
@@ -77,27 +77,26 @@ end
     tpa_func = ω -> β₂_tpa_val
 
     # With TPA
-    output_tpa = prop_gnlse(γ, flength, βs; λ0, τfwhm, energy, pulseshape=:gauss,
-                            λlims, trange, raman=false, shock=false, shotnoise=false,
-                            tpa=tpa_func)
+    output_tpa = prop_gnlse(flength, βs; n2=n2_val, Aeff, λ0, τfwhm, energy,
+                            pulseshape=:gauss, λlims, trange,
+                            raman=false, shock=false, shotnoise=false, tpa=tpa_func)
 
     # Without TPA
-    output_notpa = prop_gnlse(γ, flength, βs; λ0, τfwhm, energy, pulseshape=:gauss,
-                              λlims, trange, raman=false, shock=false, shotnoise=false)
+    output_notpa = prop_gnlse(flength, βs; n2=n2_val, Aeff, λ0, τfwhm, energy,
+                              pulseshape=:gauss, λlims, trange,
+                              raman=false, shock=false, shotnoise=false)
 
     # Energy comparison
-    grid_tpa = Processing.makegrid(output_tpa)
     Eω_in_tpa = output_tpa["Eω"][:, 1]
     Eω_out_tpa = output_tpa["Eω"][:, end]
     energy_in = sum(abs2.(Eω_in_tpa))
     energy_out_tpa = sum(abs2.(Eω_out_tpa))
 
-    grid_notpa = Processing.makegrid(output_notpa)
     Eω_out_notpa = output_notpa["Eω"][:, end]
     energy_out_notpa = sum(abs2.(Eω_out_notpa))
 
-    # Without TPA, energy should be conserved (no Kerr, no loss, no Raman)
-    @test isapprox(energy_out_notpa, sum(abs2.(output_notpa["Eω"][:, 1])), rtol=1e-4)
+    # Without TPA, energy should be conserved (no loss, no Raman)
+    @test isapprox(energy_out_notpa, sum(abs2.(output_notpa["Eω"][:, 1])), rtol=1e-13)
 
     # With TPA, output energy should be less than input
     @test energy_out_tpa < energy_in
@@ -106,42 +105,40 @@ end
 
     # Fractional loss should be positive and reasonable (not 100%)
     frac_loss = 1 - energy_out_tpa / energy_in
-    @test 0 < frac_loss < 1
+    @test 0.7 < frac_loss < 1
 end
 
 @testset "TPA spectral suppression" begin
     # Broadband pulse: TPA with frequency-dependent β₂ should suppress
     # short-wavelength components more than long-wavelength ones.
     λ0 = 240e-9
-    τfwhm = 10e-15  # short pulse = broad bandwidth
-    energy = 1e-9
-    flength = 50e-6
-    β2 = 1e-27
+    τfwhm = 5e-15  # short pulse = broad bandwidth
+    energy = 20e-9
+    flength = 100e-6
+    β2 = 1e-30
     βs = [0.0, 0.0, β2]
-    γ = 0.0
-    λlims = [180e-9, 400e-9]
+    Aeff = π * (12e-6)^2
+    n2_val = PhysData.n2(:SiO2)
+    λlims = [160e-9, 600e-9]
     trange = 1e-12
 
-    # Frequency-dependent TPA: stronger at higher frequencies (shorter λ)
-    # Mimic a material where β₂ increases with ω
-    ω_edge = 2π * PhysData.c / 280e-9  # TPA edge at 280 nm
-    tpa_func = ω -> abs(ω) > ω_edge ? 1e-11 * ((abs(ω) - ω_edge) / ω_edge)^2 : 0.0
+    tpa_func = ω -> PhysData.β₂_TPA(ω, :SiO2)
 
-    output_tpa = prop_gnlse(γ, flength, βs; λ0, τfwhm, energy, pulseshape=:gauss,
-                            λlims, trange, raman=false, shock=false, shotnoise=false,
-                            tpa=tpa_func)
+    output_tpa = prop_gnlse(flength, βs; n2=n2_val, Aeff, λ0, τfwhm, energy,
+                            pulseshape=:gauss, λlims, trange,
+                            raman=false, shock=false, shotnoise=false, tpa=tpa_func)
 
-    output_notpa = prop_gnlse(γ, flength, βs; λ0, τfwhm, energy, pulseshape=:gauss,
-                              λlims, trange, raman=false, shock=false, shotnoise=false)
+    output_notpa = prop_gnlse(flength, βs; n2=n2_val, Aeff, λ0, τfwhm, energy,
+                              pulseshape=:gauss, λlims, trange,
+                              raman=false, shock=false, shotnoise=false)
 
     ω = output_tpa["grid"]["ω"]
     spec_tpa = abs2.(output_tpa["Eω"][:, end])
     spec_notpa = abs2.(output_notpa["Eω"][:, end])
 
     # Find spectral ratio (TPA / no-TPA) at two frequencies:
-    # one well above the TPA edge (strong absorption) and one below (no absorption)
-    ω_below = 2π * PhysData.c / 300e-9  # below TPA edge
-    ω_above = 2π * PhysData.c / 220e-9  # well above TPA edge
+    ω_below = 2π * PhysData.c / 250e-9  # less TPA
+    ω_above = 2π * PhysData.c / 220e-9  # more TPA
 
     idx_below = argmin(abs.(ω .- ω_below))
     idx_above = argmin(abs.(ω .- ω_above))
@@ -226,7 +223,7 @@ end
         ratio_above = spec_tpa[idx_above] / spec_notpa[idx_above]
         # Above-edge suppression should be stronger (lower ratio)
         @test ratio_above < ratio_below
-        @test ratio_above < 0.5  # strong suppression above edge
+        @test ratio_above < 0.6  # significant suppression above edge
     end
 end
 
