@@ -387,13 +387,23 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         saveN=201, filepath=nothing,
                         scan=nothing, scanidx=nothing, filename=nothing)
 
-    pol = needpol(polarisation, pulses) || needpol_modes(modes)
-    @info "X+Y polarisation "* (pol ? "required." : "not required.")
+    # do we have energy in the orthogonal polarisation states, or just the fundamental?
+    # if so, we need to treat double the number of modes
+    both_modes = needpol(polarisation, pulses)
+    @info "Orthogonal polarisation modes are "* (both_modes ? "required." : "not required.")
+    #= need to treat vector fields if:
+        a) we have both polarisation states in the field AND/OR
+        b) the modes themselves contain x and y polarisation components
+    =#
+    pol = both_modes || needpol_modes(modes)
+    @info "Vector fields are "* (pol ? "required." : "not required.")
+
     plasma = isnothing(plasma) ? !envelope : plasma
     thg = isnothing(thg) ? !envelope : thg
 
     grid = makegrid(flength, λ0, λlims, trange, envelope, thg, δt)
-    mode_s = makemode_s(modes, flength, radius, gas, pressure, temperature, model, loss, pol)
+    mode_s = makemode_s(
+        modes, flength, radius, gas, pressure, temperature, model, loss, both_modes)
     check_orth(mode_s)
     density = makedensity(flength, gas, pressure, temperature)
     resp = makeresponse(grid, gas, raman, kerr, plasma, thg, pol, rotation, vibration,
@@ -490,12 +500,12 @@ end
 
 parse_mode(mode::Dict) = mode
 
-function makemodes_pol(pol, args...; kwargs...)
-    if pol
+function makemodes_pol(both, args...; kwargs...)
+    if both
         if kwargs[:kind] == :HE
             return [Capillary.MarcatiliMode(args...; ϕ=0.0, kwargs...),
                     Capillary.MarcatiliMode(args...; ϕ=π/(2*kwargs[:n]), kwargs...)]
-        else
+        else # TE/TM: there is only one mode
             return [Capillary.MarcatiliMode(args...; ϕ=0.0, kwargs...)]
         end
     else
@@ -503,20 +513,20 @@ function makemodes_pol(pol, args...; kwargs...)
     end
 end
 
-function makemode_s(mode::Union{Symbol, Dict}, flength, radius, gas, pressure::Number, temperature, model, loss, pol)
-    makemodes_pol(pol, radius, gas, pressure; T=temperature, model, loss, parse_mode(mode)...)
+function makemode_s(mode::Union{Symbol, Dict}, flength, radius, gas, pressure::Number, temperature, model, loss, both)
+    makemodes_pol(both, radius, gas, pressure; T=temperature, model, loss, parse_mode(mode)...)
 end
 
 function makemode_s(mode::Union{Symbol, Dict}, flength, radius, gas, pressure::Tuple{<:Number, <:Number},
-                    temperature, model, loss, pol)
+                    temperature, model, loss, both)
     coren, _ = Capillary.gradient(gas, flength, pressure..., T=temperature)
-    makemodes_pol(pol, radius, coren; model, loss, parse_mode(mode)...)
+    makemodes_pol(both, radius, coren; model, loss, parse_mode(mode)...)
 end
 
-function makemode_s(mode::Union{Symbol, Dict}, flength, radius, gas, pressure, temperature, model, loss, pol)
+function makemode_s(mode::Union{Symbol, Dict}, flength, radius, gas, pressure, temperature, model, loss, both)
     Z, P = pressure
     coren, _ = Capillary.gradient(gas, Z, P, T=temperature)
-    makemodes_pol(pol, radius, coren; model, loss, parse_mode(mode)...)
+    makemodes_pol(both, radius, coren; model, loss, parse_mode(mode)...)
 end
 
 function makemode_s(modes::Int, args...)
