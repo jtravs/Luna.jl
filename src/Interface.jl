@@ -492,9 +492,9 @@ parse_mode(mode::Dict) = mode
 
 function makemodes_pol(pol, args...; kwargs...)
     if pol
-        if kwargs[:kind] == :HE && kwargs[:n] == 1
+        if kwargs[:kind] == :HE
             return [Capillary.MarcatiliMode(args...; ϕ=0.0, kwargs...),
-                    Capillary.MarcatiliMode(args...; ϕ=π/2, kwargs...)]
+                    Capillary.MarcatiliMode(args...; ϕ=π/(2*kwargs[:n]), kwargs...)]
         else
             return [Capillary.MarcatiliMode(args...; ϕ=0.0, kwargs...)]
         end

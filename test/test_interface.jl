@@ -102,6 +102,18 @@ end
         @test Processing.energy(o)[2midx-1, 1] ≈ pkwargs.energy/2
         @test Processing.energy(o)[2midx, 1] ≈ pkwargs.energy/2
     end
+    modes = (:HE21, :HE22, :HE23, :HE24)
+    @testset "input into $m, modal" for (midx, m) in enumerate(modes)
+        ip = Pulses.GaussPulse(;mode=m, pkwargs...)
+        o = prop_capillary(args...; pulses=ip, modes, kwargs...)
+        @test Processing.energy(o)[midx, 1] ≈ pkwargs.energy
+    end
+    @testset "input into $m, modal circular" for (midx, m) in enumerate(modes)
+        ip = Pulses.GaussPulse(;mode=m, polarisation=:circular, pkwargs...)
+        o = prop_capillary(args...; pulses=ip, modes, kwargs...)
+        @test Processing.energy(o)[2midx-1, 1] ≈ pkwargs.energy/2
+        @test Processing.energy(o)[2midx, 1] ≈ pkwargs.energy/2
+    end
     modes = (:TE01, :TE02, :TE03, :TE04, :TM01, :TM02, :TM03, :TM04)
     @testset "input into $m, modal" for (midx, m) in enumerate((modes))
         ip = Pulses.GaussPulse(;mode=m, pkwargs...)
