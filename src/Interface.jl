@@ -785,14 +785,24 @@ function ellfields(pulse::Union{Pulses.CustomPulse, Pulses.GaussPulse, Pulses.Se
     f1, f2
 end
 
-function ellfields(pulse::Pulses.DataPulse)
-    f = pulse.field.field
-    pf = pulse.field
+ellfields(pulse::Pulse.DataPulse) = ellfields(pulse, pulse.field)
+
+function ellfields(pulse::Pulses.DataPulse, pf::Fields.PropagatedField)
+    f = pf.field
     py, px = ellfac(pulse.polarisation)
     f1 = Fields.DataField(f.ω, f.Iω, f.ϕω, nmult(f.energy, py), f.ϕ, f.λ0)
     f2 = Fields.DataField(f.ω, f.Iω, f.ϕω, nmult(f.energy, px),
                           ellphase(f.ϕ, pulse.polarisation), f.λ0)
     Fields.PropagatedField(pf.propagator!, f1), Fields.PropagatedField(pf.propagator!, f2)
+end
+
+function ellfields(pulse::Pulses.DataPulse, pf)
+    f = pf.field
+    py, px = ellfac(pulse.polarisation)
+    f1 = Fields.DataField(f.ω, f.Iω, f.ϕω, nmult(f.energy, py), f.ϕ, f.λ0)
+    f2 = Fields.DataField(f.ω, f.Iω, f.ϕω, nmult(f.energy, px),
+                          ellphase(f.ϕ, pulse.polarisation), f.λ0)
+    f1, f2
 end
 
 function makenoise(grid, mode_s, inputs, shotnoise::Bool, rng)
