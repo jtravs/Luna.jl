@@ -785,7 +785,7 @@ function ellfields(pulse::Union{Pulses.CustomPulse, Pulses.GaussPulse, Pulses.Se
     f1, f2
 end
 
-ellfields(pulse::Pulse.DataPulse) = ellfields(pulse, pulse.field)
+ellfields(pulse::Pulses.DataPulse) = ellfields(pulse, pulse.field)
 
 function ellfields(pulse::Pulses.DataPulse, pf::Fields.PropagatedField)
     f = pf.field
