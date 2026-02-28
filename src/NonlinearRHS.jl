@@ -113,6 +113,12 @@ function _cpscb_core(dest, source, N, scale, idcs)
     end
 end
 
+# Note on noise and ionization/plasma: when the modified shot-noise model is active,
+# Et_to_Pt! receives the combined field (field + noise). The noise amplitude is of order
+# √(ħω·Δν) ≈ 5×10⁻⁴ √W per mode — roughly 10⁻¹⁴ of typical pulse peak power. This is
+# completely negligible for the highly nonlinear ionization rate and plasma
+# response, so including noise in the field passed to all response functions is physically
+# reasonable. The noise meaningfully affects only Kerr and Raman processes, as intended.
 """
     Et_to_Pt!(Pt, Et, responses, density)
 
