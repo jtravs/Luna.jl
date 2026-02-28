@@ -290,8 +290,8 @@ In this case, all keyword arguments except for `λ0` are ignored.
                 apply an arbitrary propagation to the pulse before the simulation starts.
 - `shotnoise`:  If `true` (default), one-photon-per-mode quantum noise is included.
     Ignored when `noise_model=:modified` (noise enters via the nonlinear operator instead).
-- `noise_model`: Noise seeding model. `:input` (default) adds traditional shot noise to the
-    input field at `z = 0`. `:modified` uses the modified shot-noise model of Chen & Wise
+- `noise_model`: Noise seeding model. `:input` adds traditional shot noise to the
+    input field at `z = 0`. `:modified` (default) uses the modified shot-noise model of Chen & Wise
     (arXiv:2410.20567), where a constant noise field enters the nonlinear operator at every
     step but is excluded from dispersion. This prevents artificial FWM phase-matching and
     elevated noise floor artefacts. See the [Noise model](@ref) documentation for details.
@@ -374,7 +374,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         pulseshape=:gauss, polarisation=:linear, propagator=nothing,
                         pulses=nothing,
                         shotnoise=true,
-                        noise_model=:input,
+                        noise_model=:modified,
                         rng=GLOBAL_RNG,
                         modes=:HE11, model=:full, loss=true,
                         radial_integral_rtol=1e-3,
@@ -399,8 +399,8 @@ function prop_capillary_args(radius, flength, gas, pressure;
     inputs = makeinputs(mode_s, λ0, pulses, τfwhm, τw, ϕ,
                         power, energy, pulseshape, polarisation, propagator)
     # Noise model selection:
-    # :input (default) — traditional shot noise added to the input field at z=0.
-    # :modified — modified shot-noise model (Chen & Wise, arXiv:2410.20567): noise enters
+    # :input — traditional shot noise added to the input field at z=0.
+    # :modified (default) — modified shot-noise model (Chen & Wise, arXiv:2410.20567): noise enters
     #   the nonlinear operator only, excluding dispersion, preventing artificial FWM
     #   phase-matching and elevated noise floor artefacts.
     if noise_model == :modified
@@ -910,8 +910,8 @@ Note that the current GNLSE model is single mode only.
                 apply an arbitrary propagation to the pulse before the simulation starts.
 - `shotnoise`:  If `true` (default), one-photon-per-mode quantum noise is included.
     Ignored when `noise_model=:modified` (noise enters via the nonlinear operator instead).
-- `noise_model`: Noise seeding model. `:input` (default) adds traditional shot noise to the
-    input field at `z = 0`. `:modified` uses the modified shot-noise model of Chen & Wise
+- `noise_model`: Noise seeding model. `:input` adds traditional shot noise to the
+    input field at `z = 0`. `:modified` (default) uses the modified shot-noise model of Chen & Wise
     (arXiv:2410.20567). See the [Noise model](@ref) documentation for details.
 - `rng`: Random number generator for noise field generation. Defaults to `GLOBAL_RNG`.
 
@@ -962,7 +962,7 @@ function prop_gnlse_args(γ, flength, βs; λ0, λlims, trange,
                         pulseshape=:gauss, propagator=nothing,
                         pulses=nothing,
                         shotnoise=true, shock=true,
-                        noise_model=:input,
+                        noise_model=:modified,
                         rng=GLOBAL_RNG,
                         loss=0.0, raman=true, fr=0.18,
                         ramanmodel=:sdo, τ1=12.2e-15, τ2=32e-15,
