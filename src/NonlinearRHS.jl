@@ -143,9 +143,17 @@ end
 """
     TransModal
 
-Transform E(ω) -> Pₙₗ(ω) for modal fields.
+Transform E(ω) -> Pₙₗ(ω) for multimode propagation via spatial integration.
+
+# Fields
+- `Emω_noise`: modal noise field `(nω, nmodes)` for the modified shot-noise model, or
+  `nothing`. When present, the noise is projected to real space at each integration point
+  and combined with the field in a separate buffer (`Er_nl`) for nonlinear evaluation.
+  The propagating field (`Er`) is never modified.
+- `Er_noise`: preallocated buffer for the real-space time-domain noise, same shape as `Er`.
+- `Er_nl`: preallocated buffer for the combined field + noise, passed to `Et_to_Pt!`.
 """
-mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT}
+mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT, eT, enT, enlT}
     ts::tsT
     full::Bool
     dimlimits::lT
@@ -169,6 +177,9 @@ mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT}
     atol::Float64
     mfcn::Int
     err::Array{ComplexF64,2}
+    Emω_noise::eT # modal noise field for modified shot-noise model, or nothing
+    Er_noise::enT # buffer for real-space time-domain noise, or nothing
+    Er_nl::enlT # buffer for field+noise passed to Et_to_Pt!, or nothing
 end
 
 function show(io::IO, t::TransModal)
@@ -184,7 +195,7 @@ function show(io::IO, t::TransModal)
 end
 
 """
-    TransModal(grid, ts, FT, resp, densityfun, norm!; rtol=1e-3, atol=0.0, mfcn=300, full=false)
+    TransModal(grid, ts, FT, resp, densityfun, norm!; rtol=1e-3, atol=0.0, mfcn=300, full=false, noise_field=nothing)
 
 Construct a `TransModal`, transform E(ω) -> Pₙₗ(ω) for modal fields.
 
@@ -199,9 +210,12 @@ Construct a `TransModal`, transform E(ω) -> Pₙₗ(ω) for modal fields.
 - `atol::Float=0.0` : absolute tolerance on the `HCubature` integration
 - `mfcn::Int=512` : maximum number of function evaluations for one modal integration
 - `full::Bool=false` : if `true`, use full 2-D mode integral, if `false`, only do radial integral
+- `noise_field=nothing` : optional `(nω, nmodes)` noise field for the modified shot-noise
+  model. Each mode column should contain independent noise with the one-photon-per-mode
+  spectral density. Generate with [`Fields.generate_noise_field`](@ref).
 """
 function TransModal(tT, grid, ts::Modes.ToSpace, FT, resp, densityfun, norm!;
-                    rtol=1e-3, atol=0.0, mfcn=512, full=false)
+                    rtol=1e-3, atol=0.0, mfcn=512, full=false, noise_field=nothing)
     Emω = Array{ComplexF64,2}(undef, length(grid.ω), ts.nmodes)
     Erω = Array{ComplexF64,2}(undef, length(grid.ω), ts.npol)
     Erωo = Array{ComplexF64,2}(undef, length(grid.ωo), ts.npol)
@@ -211,8 +225,21 @@ function TransModal(tT, grid, ts::Modes.ToSpace, FT, resp, densityfun, norm!;
     Prωo = Array{ComplexF64,2}(undef, length(grid.ωo), ts.npol)
     Prmω = Array{ComplexF64,2}(undef, length(grid.ω), ts.nmodes)
     IFT = inv(FT)
+    # For the modified shot-noise model, store the modal noise field and allocate a buffer
+    # for the real-space time-domain noise. The noise is projected to space at each
+    # integration point in Erω_to_Prω!, so we store it in the modal domain.
+    if noise_field !== nothing
+        Emω_noise = copy(noise_field)
+        Er_noise = Array{tT,2}(undef, length(grid.to), ts.npol)
+        Er_nl = Array{tT,2}(undef, length(grid.to), ts.npol)
+    else
+        Emω_noise = nothing
+        Er_noise = nothing
+        Er_nl = nothing
+    end
     TransModal(ts, full, Modes.dimlimits(ts.ms[1]), Emω, Erω, Erωo, Er, Pr, Prω, Prωo, Prmω,
-               FT, resp, grid, densityfun, densityfun(0.0), norm!, 0, 0.0, rtol, atol, mfcn, similar(Prmω))
+               FT, resp, grid, densityfun, densityfun(0.0), norm!, 0, 0.0, rtol, atol, mfcn,
+               similar(Prmω), Emω_noise, Er_noise, Er_nl)
 end
 
 function TransModal(grid::Grid.RealGrid, args...; kwargs...)
@@ -273,8 +300,17 @@ end
 function Erω_to_Prω!(t, x)
     Modes.to_space!(t.Erω, t.Emω, x, t.ts, z=t.z)
     to_time!(t.Er, t.Erω, t.Erωo, inv(t.FT))
-    # get nonlinear pol at r,θ
+    # Modified shot-noise model: project noise modes to real space at this spatial point,
+    # convert to oversampled time domain, and combine with field in a separate buffer (Er_nl)
+    # so the propagating field (Er) is never contaminated.
+    if t.Emω_noise !== nothing
+        Modes.to_space!(t.Erω, t.Emω_noise, x, t.ts, z=t.z)
+        to_time!(t.Er_noise, t.Erω, t.Erωo, inv(t.FT))
+        @. t.Er_nl = t.Er + t.Er_noise
+        Et_to_Pt!(t.Pr, t.Er_nl, t.resp, t.density)
+    else
     Et_to_Pt!(t.Pr, t.Er, t.resp, t.density)
+    end
     @. t.Pr *= t.grid.towin
     to_freq!(t.Prω, t.Prωo, t.Pr, t.FT)
     @. t.Prω *= t.grid.ωwin
