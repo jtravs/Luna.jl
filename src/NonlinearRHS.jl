@@ -630,7 +630,18 @@ function norm_radial(grid, q, nfun)
     return norm
 end
 
-mutable struct TransFree{TT, FTT, nT, rT, gT, xygT, dT, iT}
+"""
+    TransFree
+
+Transform E(ω) -> Pₙₗ(ω) for 3D free-space propagation.
+
+# Fields
+- `Et_noise`: precomputed time-domain noise on the oversampled real-space grid `(nto, ny, nx)`
+  for the modified shot-noise model, or `nothing`.
+- `Et_nl`: preallocated buffer for the combined field + noise, passed to `Et_to_Pt!`. The
+  propagating field (`Eto`) is never modified.
+"""
+mutable struct TransFree{TT, FTT, nT, rT, gT, xygT, dT, iT, eT, nlT}
     FT::FTT # 3D Fourier transform (space to k-space and time to frequency)
     normfun::nT # Function which returns normalisation factor
     resp::rT # nonlinear responses (tuple of callables)
@@ -643,6 +654,8 @@ mutable struct TransFree{TT, FTT, nT, rT, gT, xygT, dT, iT}
     Pωo::Array{ComplexF64, 3} # buffer for oversampled frequency-domain NL polarisation
     scale::Float64 # scale factor to be applied during oversampling
     idcs::iT # iterating over these slices Eto/Pto into Vectors, one at each position
+    Et_noise::eT # time-domain noise for modified shot-noise model, or nothing
+    Et_nl::nlT # buffer for field+noise passed to Et_to_Pt!, or nothing
 end
 
 function show(io::IO, t::TransFree)
@@ -655,7 +668,20 @@ function show(io::IO, t::TransFree)
     print(io, out)
 end
 
-function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun)
+"""
+    TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun; noise_field=nothing)
+
+Construct a `TransFree` to calculate the reciprocal-domain nonlinear polarisation for 3D
+free-space propagation.
+
+# Keyword arguments
+- `noise_field=nothing`: optional `(nω, ny, nx)` frequency/k-space noise field for the
+  modified shot-noise model. When provided, it is converted to the real-space oversampled
+  time domain `(nto, ny, nx)` via `copy_scale!` and 3D inverse FFT, and stored as `Et_noise`.
+  Generate with [`Fields.generate_noise_field`](@ref).
+"""
+function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
+                   noise_field=nothing)
     Ny = length(xygrid.y)
     Nx = length(xygrid.x)
     Eωo = zeros(ComplexF64, (length(grid.ωo), Ny, Nx))
@@ -663,35 +689,35 @@ function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun)
     Pto = similar(Eto)
     Pωo = similar(Eωo)
     idcs = CartesianIndices((Ny, Nx))
+    # Precompute time-domain noise in real space:
+    # copy_scale! into oversampled spectral grid, then 3D IFFT: (ω,ky,kx) → (t,y,x)
+    if noise_field !== nothing
+        Eωo_noise = zeros(ComplexF64, (length(grid.ωo), Ny, Nx))
+        N = length(grid.ω)
+        copy_scale!(Eωo_noise, noise_field, N, scale)
+        Et_noise = zeros(TT, (length(grid.to), Ny, Nx))
+        ldiv!(Et_noise, FT, Eωo_noise)
+        Et_nl = zeros(TT, (length(grid.to), Ny, Nx))
+    else
+        Et_noise = nothing
+        Et_nl = nothing
+    end
     TransFree(FT, normfun, responses, grid, xygrid, densityfun,
-              Pto, Eto, Eωo, Pωo, scale, idcs)
+              Pto, Eto, Eωo, Pωo, scale, idcs, Et_noise, Et_nl)
 end
 
-"""
-    TransFree(grid, xygrid, FT, responses, densityfun, normfun)
-
-Construct a `TransFree` to calculate the reciprocal-domain nonlinear polarisation.
-
-# Arguments
-- `grid::AbstractGrid` : the grid used in the simulation
-- `xygrid` : the spatial grid (instances of [`Grid.FreeGrid`](@ref))
-- `FT::FFTW.Plan` : the full 3D (t-y-x) Fourier transform for the oversampled time grid
-- `responses` : `Tuple` of response functions
-- `densityfun` : callable which returns the gas density as a function of `z`
-- `normfun` : normalisation factor as fctn of `z`, can be created via [`norm_free`](@ref)
-"""
-function TransFree(grid::Grid.RealGrid, args...)
+function TransFree(grid::Grid.RealGrid, args...; kwargs...)
     N = length(grid.ω)
     No = length(grid.ωo)
     scale = (No-1)/(N-1)
-    TransFree(Float64, scale, grid, args...)
+    TransFree(Float64, scale, grid, args...; kwargs...)
 end
 
-function TransFree(grid::Grid.EnvGrid, args...)
+function TransFree(grid::Grid.EnvGrid, args...; kwargs...)
     N = length(grid.ω)
     No = length(grid.ωo)
     scale = No/N
-    TransFree(ComplexF64, scale, grid, args...)
+    TransFree(ComplexF64, scale, grid, args...; kwargs...)
 end
 
 """
@@ -704,7 +730,14 @@ function (t::TransFree)(nl, Eωk, z)
     fill!(t.Eωo, 0)
     copy_scale!(t.Eωo, Eωk, length(t.grid.ω), t.scale)
     ldiv!(t.Eto, t.FT, t.Eωo) # transform (ω, ky, kx) -> (t, y, x)
-    Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z), t.idcs) # add up responses
+    # Modified shot-noise: compute field+noise in separate buffer (Et_nl) so the
+    # propagating field (Eto) is never contaminated.
+    if t.Et_noise !== nothing
+        @. t.Et_nl = t.Eto + t.Et_noise
+        Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z), t.idcs)
+    else
+        Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z), t.idcs)
+    end
     @. t.Pto *= t.grid.towin # apodisation
     mul!(t.Pωo, t.FT, t.Pto) # transform (t, y, x) -> (ω, ky, kx)
     copy_scale!(nl, t.Pωo, length(t.grid.ω), 1/t.scale)
