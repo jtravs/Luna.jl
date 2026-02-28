@@ -315,7 +315,7 @@ function Erω_to_Prω!(t, x)
         @. t.Er_nl = t.Er + t.Er_noise
         Et_to_Pt!(t.Pr, t.Er_nl, t.resp, t.density)
     else
-    Et_to_Pt!(t.Pr, t.Er, t.resp, t.density)
+        Et_to_Pt!(t.Pr, t.Er, t.resp, t.density)
     end
     @. t.Pr *= t.grid.towin
     to_freq!(t.Prω, t.Prωo, t.Pr, t.FT)
@@ -444,7 +444,7 @@ function (t::TransModeAvg)(nl, Eω, z)
         @. t.Et_nl = t.Eto + t.Et_noise / sc
         Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z))
     else
-    Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z))
+        Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z))
     end
     @. t.Pto *= t.grid.towin
     to_freq!(nl, t.Pωo, t.Pto, t.FT)
