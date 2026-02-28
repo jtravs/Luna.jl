@@ -484,9 +484,15 @@ end
 """
     TransRadial
 
-Transform E(ω) -> Pₙₗ(ω) for radially symetric free-space propagation
+Transform E(ω) -> Pₙₗ(ω) for radially symmetric free-space propagation.
+
+# Fields
+- `Et_noise`: precomputed time-domain noise on the oversampled real-space grid `(nto, nr)`
+  for the modified shot-noise model, or `nothing`.
+- `Et_nl`: preallocated buffer for the combined field + noise, passed to `Et_to_Pt!`. The
+  propagating field (`Eto`) is never modified.
 """
-struct TransRadial{TT, HTT, FTT, nT, rT, gT, dT, iT}
+struct TransRadial{TT, HTT, FTT, nT, rT, gT, dT, iT, eT, nlT}
     QDHT::HTT # Hankel transform (space to k-space)
     FT::FTT # Fourier transform (time to frequency)
     normfun::nT # Function which returns normalisation factor
@@ -498,6 +504,8 @@ struct TransRadial{TT, HTT, FTT, nT, rT, gT, dT, iT}
     Eωo::Array{ComplexF64,2} # Buffer array for field on oversampled frequency grid
     Pωo::Array{ComplexF64,2} # Buffer array for NL polarisation on oversampled frequency grid
     idcs::iT # CartesianIndices for Et_to_Pt! to iterate over
+    Et_noise::eT # time-domain noise for modified shot-noise model, or nothing
+    Et_nl::nlT # buffer for field+noise passed to Et_to_Pt!, or nothing
 end
 
 function show(io::IO, t::TransRadial)
@@ -510,34 +518,43 @@ function show(io::IO, t::TransRadial)
     print(io, out)
 end
 
-function TransRadial(TT, grid, HT, FT, responses, densityfun, normfun)
+"""
+    TransRadial(TT, grid, HT, FT, responses, densityfun, normfun; noise_field=nothing)
+
+Construct a `TransRadial` to calculate the reciprocal-domain nonlinear polarisation.
+
+# Keyword arguments
+- `noise_field=nothing`: optional `(nω, nk)` frequency/k-space noise field for the modified
+  shot-noise model. When provided, it is converted to the real-space time domain `(nto, nr)`
+  via inverse FFT and inverse Hankel transform, and stored as `Et_noise`.
+  Generate with [`Fields.generate_noise_field`](@ref).
+"""
+function TransRadial(TT, grid, HT, FT, responses, densityfun, normfun; noise_field=nothing)
     Eωo = zeros(ComplexF64, (length(grid.ωo), HT.N))
     Eto = zeros(TT, (length(grid.to), HT.N))
     Pto = similar(Eto)
     Pωo = similar(Eωo)
     idcs = CartesianIndices(size(Pto)[2:end])
-    TransRadial(HT, FT, normfun, responses, grid, densityfun, Pto, Eto, Eωo, Pωo, idcs)
+    # Precompute time-domain noise in real space: ω→t via to_time!, then k→r via QDHT⁻¹
+    if noise_field !== nothing
+        Eωo_noise = zeros(ComplexF64, (length(grid.ωo), HT.N))
+        Et_noise = zeros(TT, (length(grid.to), HT.N))
+        to_time!(Et_noise, noise_field, Eωo_noise, inv(FT))
+        ldiv!(Et_noise, HT, Et_noise)
+        Et_nl = zeros(TT, (length(grid.to), HT.N))
+    else
+        Et_noise = nothing
+        Et_nl = nothing
+    end
+    TransRadial(HT, FT, normfun, responses, grid, densityfun, Pto, Eto, Eωo, Pωo, idcs, Et_noise, Et_nl)
 end
 
-"""
-    TransRadial(grid, HT, FT, responses, densityfun, normfun)
-
-Construct a `TransRadial` to calculate the reciprocal-domain nonlinear polarisation.
-
-# Arguments
-- `grid::AbstractGrid` : the grid used in the simulation
-- `HT::QDHT` : the Hankel transform which defines the spatial grid
-- `FT::FFTW.Plan` : the time-frequency Fourier transform for the oversampled time grid
-- `responses` : `Tuple` of response functions
-- `densityfun` : callable which returns the gas density as a function of `z`
-- `normfun` : normalisation factor as fctn of `z`, can be created via [`norm_radial`](@ref)
-"""
-function TransRadial(grid::Grid.RealGrid, args...)
-    TransRadial(Float64, grid, args...)
+function TransRadial(grid::Grid.RealGrid, args...; kwargs...)
+    TransRadial(Float64, grid, args...; kwargs...)
 end
 
-function TransRadial(grid::Grid.EnvGrid, args...)
-    TransRadial(ComplexF64, grid, args...)
+function TransRadial(grid::Grid.EnvGrid, args...; kwargs...)
+    TransRadial(ComplexF64, grid, args...; kwargs...)
 end
 
 """
@@ -549,7 +566,14 @@ place the result in `nl`
 function (t::TransRadial)(nl, Eω, z)
     to_time!(t.Eto, Eω, t.Eωo, inv(t.FT)) # transform ω -> t
     ldiv!(t.Eto, t.QDHT, t.Eto) # transform k -> r
-    Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z), t.idcs) # add up responses
+    # Modified shot-noise: compute field+noise in separate buffer (Et_nl) so the
+    # propagating field (Eto) is never contaminated.
+    if t.Et_noise !== nothing
+        @. t.Et_nl = t.Eto + t.Et_noise
+        Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z), t.idcs)
+    else
+        Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z), t.idcs)
+    end
     @. t.Pto *= t.grid.towin # apodisation
     mul!(t.Pto, t.QDHT, t.Pto) # transform r -> k
     to_freq!(nl, t.Pωo, t.Pto, t.FT) # transform t -> ω
