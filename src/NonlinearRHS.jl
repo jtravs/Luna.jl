@@ -361,8 +361,15 @@ end
     TransModeAvg
 
 Transform E(ω) -> Pₙₗ(ω) for mode-averaged single-mode propagation.
+
+# Fields
+- `Et_noise`: precomputed time-domain noise on the oversampled grid for the modified
+  shot-noise model (Chen & Wise, arXiv:2410.20567), or `nothing` for the traditional model.
+- `Et_nl`: preallocated buffer for the combined field + noise. When `Et_noise` is present,
+  `Et_nl = Eto + Et_noise` is computed at each step and passed to `Et_to_Pt!`. The
+  propagating field (`Eto`) is never modified; dispersion acts only on the physical field.
 """
-struct TransModeAvg{TT, FTT, rT, gT, dT, nT, aT}
+struct TransModeAvg{TT, FTT, rT, gT, dT, nT, aT, eT, nlT}
     Pto::Vector{TT}
     Eto::Vector{TT}
     Eωo::Vector{ComplexF64}
@@ -373,6 +380,8 @@ struct TransModeAvg{TT, FTT, rT, gT, dT, nT, aT}
     densityfun::dT
     norm!::nT
     aeff::aT # function which returns effective area
+    Et_noise::eT # time-domain noise for modified shot-noise model, or nothing
+    Et_nl::nlT # buffer for field+noise passed to Et_to_Pt!, or nothing
 end
 
 function show(io::IO, t::TransModeAvg)
@@ -383,28 +392,60 @@ function show(io::IO, t::TransModeAvg)
     print(io, out)
 end
 
-function TransModeAvg(TT, grid, FT, resp, densityfun, norm!, aeff)
+"""
+    TransModeAvg(TT, grid, FT, resp, densityfun, norm!, aeff; noise_field=nothing)
+
+Construct a `TransModeAvg` transform for mode-averaged propagation.
+
+# Keyword arguments
+- `noise_field=nothing`: optional frequency-domain noise field (on the normal grid) for the
+  modified shot-noise model. When provided, it is converted to the oversampled time grid and
+  stored as `Et_noise` for injection into the nonlinear operator at every propagation step.
+  Generate with [`Fields.generate_noise_field`](@ref).
+"""
+function TransModeAvg(TT, grid, FT, resp, densityfun, norm!, aeff; noise_field=nothing)
     Eωo = zeros(ComplexF64, length(grid.ωo))
     Eto = zeros(TT, length(grid.to))
     Pto = similar(Eto)
     Pωo = similar(Eωo)
-    TransModeAvg(Pto, Eto, Eωo, Pωo, FT, resp, grid, densityfun, norm!, aeff)
+    # Precompute time-domain noise on the oversampled grid if noise_field is provided.
+    # Uses the same ω→t conversion path as to_time!: copy_scale! into oversampled spectral
+    # array, then inverse FFT. The result is constant throughout propagation.
+    if noise_field !== nothing
+        Eωo_noise = zeros(ComplexF64, length(grid.ωo))
+        Et_noise = zeros(TT, length(grid.to))
+        to_time!(Et_noise, noise_field, Eωo_noise, inv(FT))
+        Et_nl = zeros(TT, length(grid.to))
+    else
+        Et_noise = nothing
+        Et_nl = nothing
+    end
+    TransModeAvg(Pto, Eto, Eωo, Pωo, FT, resp, grid, densityfun, norm!, aeff, Et_noise, Et_nl)
 end
 
-function TransModeAvg(grid::Grid.RealGrid, FT, resp, densityfun, norm!, aeff)
-    TransModeAvg(Float64, grid, FT, resp, densityfun, norm!, aeff)
+function TransModeAvg(grid::Grid.RealGrid, FT, resp, densityfun, norm!, aeff; kwargs...)
+    TransModeAvg(Float64, grid, FT, resp, densityfun, norm!, aeff; kwargs...)
 end
 
-function TransModeAvg(grid::Grid.EnvGrid, FT, resp, densityfun, norm!, aeff)
-    TransModeAvg(ComplexF64, grid, FT, resp, densityfun, norm!, aeff)
+function TransModeAvg(grid::Grid.EnvGrid, FT, resp, densityfun, norm!, aeff; kwargs...)
+    TransModeAvg(ComplexF64, grid, FT, resp, densityfun, norm!, aeff; kwargs...)
 end
 
 const nlscale = sqrt(PhysData.ε_0*PhysData.c/2)
 
 function (t::TransModeAvg)(nl, Eω, z)
     to_time!(t.Eto, Eω, t.Eωo, inv(t.FT))
-    @. t.Eto /= nlscale*sqrt(t.aeff(z))
+    sc = nlscale*sqrt(t.aeff(z))
+    @. t.Eto /= sc
+    # Modified shot-noise model: compute field+noise in a separate buffer (Et_nl) so that
+    # the propagating field (Eto) is never contaminated. The noise is scaled by the same
+    # normalisation factor (nlscale × √Aeff) so it enters in physical units.
+    if t.Et_noise !== nothing
+        @. t.Et_nl = t.Eto + t.Et_noise / sc
+        Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z))
+    else
     Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z))
+    end
     @. t.Pto *= t.grid.towin
     to_freq!(nl, t.Pωo, t.Pto, t.FT)
     t.norm!(nl, z)
