@@ -39,6 +39,6 @@ jobs:
           PYTHON:
         uses: julia-actions/julia-buildpkg@v1
       - name: Verify FFTW provider is MKL
-        run: julia --project -e 'using FFTW; prov = FFTW.fftw_provider; println("FFTW provider: ", prov); @assert prov == "mkl" "Expected MKL but got $prov"'
+        run: julia --project -e 'using FFTW; prov = FFTW.fftw_provider; println("FFTW provider: ", prov); @assert prov == "mkl" "Expected MKL but got $(prov)"'
       - name: Run tests
         uses: julia-actions/julia-runtest@v1
