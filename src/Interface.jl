@@ -288,16 +288,18 @@ In this case, all keyword arguments except for `λ0` are ignored.
     elliptical polarisation is always the y-axis.
 - `propagator`: A function `propagator!(Eω, grid)` which **mutates** its first argument to
                 apply an arbitrary propagation to the pulse before the simulation starts.
-- `shotnoise`:  If `true` (default), one-photon-per-mode quantum noise is included.
-    Ignored when `noise_model=:modified` (noise enters via the nonlinear operator instead).
+- `shotnoise`:  If `true` (default), quantum noise is included. If `false`, noise is
+    disabled regardless of `noise_model`. For `noise_model=:input`, this adds
+    one-photon-per-mode shot noise to the input field. For `noise_model=:modified`, this
+    generates a noise field that enters the nonlinear operator at every step.
 - `noise_model`: Noise seeding model. `:input` adds traditional shot noise to the
     input field at `z = 0`. `:modified` (default) uses the modified shot-noise model of Chen & Wise
     (arXiv:2410.20567), where a constant noise field enters the nonlinear operator at every
     step but is excluded from dispersion. This prevents artificial FWM phase-matching and
     elevated noise floor artefacts. See the [Noise model](@ref) documentation for details.
-- `rng`: Random number generator for noise field generation. Defaults to `GLOBAL_RNG`.
-    Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible noise realisations,
-    or different seeds for ensemble/shot-to-shot statistics.
+- `rng`: Random number generator for noise field generation (used with `noise_model=:modified`).
+    Defaults to `GLOBAL_RNG`. Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible
+    noise realisations, or different seeds for ensemble/shot-to-shot statistics.
 
 # Modes options
 - `modes`: Defines which modes are included in the propagation. Can be any of:
@@ -911,12 +913,16 @@ Note that the current GNLSE model is single mode only.
     elliptical polarisation is always the y-axis.
 - `propagator`: A function `propagator!(Eω, grid)` which **mutates** its first argument to
                 apply an arbitrary propagation to the pulse before the simulation starts.
-- `shotnoise`:  If `true` (default), one-photon-per-mode quantum noise is included.
-    Ignored when `noise_model=:modified` (noise enters via the nonlinear operator instead).
+- `shotnoise`:  If `true` (default), quantum noise is included. If `false`, noise is
+    disabled regardless of `noise_model`. For `noise_model=:input`, this adds
+    one-photon-per-mode shot noise to the input field. For `noise_model=:modified`, this
+    generates a noise field that enters the nonlinear operator at every step.
 - `noise_model`: Noise seeding model. `:input` adds traditional shot noise to the
     input field at `z = 0`. `:modified` (default) uses the modified shot-noise model of Chen & Wise
     (arXiv:2410.20567). See the [Noise model](@ref) documentation for details.
-- `rng`: Random number generator for noise field generation. Defaults to `GLOBAL_RNG`.
+- `rng`: Random number generator for noise field generation (used with `noise_model=:modified`).
+    Defaults to `GLOBAL_RNG`. Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible
+    noise realisations, or different seeds for ensemble/shot-to-shot statistics.
 
 # GNLSE options
 - `shock::Bool`: Whether to include the shock derivative term. Default is `true`.
