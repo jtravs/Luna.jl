@@ -404,11 +404,13 @@ function prop_capillary_args(radius, flength, gas, pressure;
     #   the nonlinear operator only, excluding dispersion, preventing artificial FWM
     #   phase-matching and elevated noise floor artefacts.
     if noise_model == :modified
-        nm = mode_s isa AbstractArray ? length(mode_s) : 1
-        noise_field = Fields.generate_noise_field(grid; rng, nmodes=nm)
         if shotnoise
+            nm = mode_s isa AbstractArray ? length(mode_s) : 1
+            noise_field = Fields.generate_noise_field(grid; rng, nmodes=nm)
             @info("Modified shot-noise model enabled. Traditional input shot noise is " *
                   "disabled (noise enters through nonlinear operator instead).")
+        else
+            noise_field = nothing
         end
     elseif noise_model == :input
         noise_field = nothing
@@ -1007,10 +1009,12 @@ function prop_gnlse_args(γ, flength, βs; λ0, λlims, trange,
                         power, energy, pulseshape, polarisation, propagator)
     # Noise model selection (same logic as prop_capillary_args)
     if noise_model == :modified
-        noise_field = Fields.generate_noise_field(grid; rng)
         if shotnoise
+            noise_field = Fields.generate_noise_field(grid; rng)
             @info("Modified shot-noise model enabled. Traditional input shot noise is " *
                   "disabled (noise enters through nonlinear operator instead).")
+        else
+            noise_field = nothing
         end
     elseif noise_model == :input
         noise_field = nothing

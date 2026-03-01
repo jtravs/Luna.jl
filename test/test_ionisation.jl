@@ -121,7 +121,9 @@ end
     ir2 = Ionisation.ionrate_fun!_PPTaccel(gas, λ0; PPT_options...)
 
     @test ir2.cspl.x == ir.cspl.x
-    @test ir2.cspl.y == ir.cspl.y
+    # Use approximate equality for y values: the cached PPT rate (loaded from
+    # disk by ionrate_fun!_PPTcached) may have tiny floating-point differences.
+    @test ir2.cspl.y ≈ ir.cspl.y
 end
 
 @testset "preionisation" begin
