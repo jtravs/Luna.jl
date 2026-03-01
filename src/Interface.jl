@@ -797,7 +797,7 @@ function ellfields(pulse::Pulses.DataPulse, pf::Fields.PropagatedField)
 end
 
 function ellfields(pulse::Pulses.DataPulse, pf)
-    f = pf.field
+    f = pf
     py, px = ellfac(pulse.polarisation)
     f1 = Fields.DataField(f.ω, f.Iω, f.ϕω, nmult(f.energy, py), f.ϕ, f.λ0)
     f2 = Fields.DataField(f.ω, f.Iω, f.ϕω, nmult(f.energy, px),
