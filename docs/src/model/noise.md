@@ -12,8 +12,8 @@ a role.
 Luna.jl supports two noise models, selected via the `noise_model` keyword argument in
 [`prop_capillary`](@ref) and [`prop_gnlse`](@ref):
 
-- **`:input`** (default) --- the traditional shot-noise approach.
-- **`:modified`** --- the modified shot-noise approach of Chen & Wise [1].
+- **`:input`** --- the traditional shot-noise approach.
+- **`:modified`** (default) --- the modified shot-noise approach of Chen & Wise [1].
 
 ## Traditional shot noise (`:input`)
 
@@ -76,14 +76,14 @@ soliton dynamics with self-frequency shift, and combined Kerr--Raman broadening.
 
 ## Usage
 
-To use the modified shot-noise model, pass `noise_model=:modified` to `prop_capillary` or
-`prop_gnlse`:
+The modified shot-noise model is used by default (`noise_model=:modified`). To use the
+traditional model instead, pass `noise_model=:input`:
 
 ```julia
+# Default: modified shot-noise model
 output = prop_capillary(radius, flength, gas, pressure;
     λ0=800e-9, λlims=(200e-9, 4000e-9), trange=400e-15,
     τfwhm=30e-15, energy=1e-6,
-    noise_model=:modified  # use modified shot-noise model
 )
 ```
 
@@ -102,9 +102,9 @@ for shot in 1:100
 end
 ```
 
-When `noise_model=:modified` is used, the `shotnoise` keyword is automatically ignored
-(traditional input shot noise is disabled, since noise enters through the nonlinear
-operator instead).
+Setting `shotnoise=false` disables noise regardless of `noise_model`. When
+`noise_model=:modified`, it prevents generation of the noise field; when
+`noise_model=:input`, it prevents adding shot noise to the input spectrum.
 
 ## Ionization and plasma
 
