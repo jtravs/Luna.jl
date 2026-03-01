@@ -55,6 +55,63 @@ const noise_kwargs = (λ0=800e-9, τfwhm=10e-15, energy=1e-12,
         nf_e = Fields.generate_noise_field(grid_e; rng=Random.MersenneTwister(99))
         @test abs.(nf_e) ≈ abs.(snf_e)
     end
+    @testset "Multimode RealGrid" begin
+        grid = Grid.RealGrid(0.1, 800e-9, (200e-9, 4e-6), 400e-15)
+        nm = 3
+        nf = Fields.generate_noise_field(grid; nmodes=nm)
+        # Shape: (nω, nmodes)
+        @test size(nf) == (length(grid.ω), nm)
+        @test eltype(nf) == ComplexF64
+        # All columns non-zero
+        @test all(any(!iszero, nf[:, j]) for j in 1:nm)
+        # Columns are independent (different random phases)
+        @test nf[:, 1] != nf[:, 2]
+        @test nf[:, 2] != nf[:, 3]
+        # Amplitude identical across modes (same one-photon-per-mode formula)
+        @test abs.(nf[:, 1]) ≈ abs.(nf[:, 2])
+        @test abs.(nf[:, 2]) ≈ abs.(nf[:, 3])
+        # Reproducible with same seed
+        rng1 = Random.MersenneTwister(42)
+        rng2 = Random.MersenneTwister(42)
+        @test Fields.generate_noise_field(grid; rng=rng1, nmodes=nm) ==
+              Fields.generate_noise_field(grid; rng=rng2, nmodes=nm)
+        # nmodes=1 still returns 1D array (no regression)
+        nf1 = Fields.generate_noise_field(grid; nmodes=1)
+        @test ndims(nf1) == 1
+    end
+    @testset "Multimode EnvGrid" begin
+        grid = Grid.EnvGrid(0.1, 800e-9, (200e-9, 4e-6), 400e-15)
+        nm = 3
+        nf = Fields.generate_noise_field(grid; nmodes=nm)
+        @test size(nf) == (length(grid.ω), nm)
+        @test eltype(nf) == ComplexF64
+        # Non-signal bins should be zero in all modes
+        for j in 1:nm
+            @test all(iszero, nf[.!grid.sidx, j])
+            @test any(!iszero, nf[grid.sidx, j])
+        end
+        # Columns are independent
+        @test nf[:, 1] != nf[:, 2]
+        # Amplitude identical across modes
+        @test abs.(nf[:, 1]) ≈ abs.(nf[:, 2])
+    end
+end
+
+@testset "Multimode modified noise integration" begin
+    # prop_capillary with modes=2 and noise_model=:modified exercises the
+    # multimode noise path (nmodes > 1) in generate_noise_field.
+    out_mm = prop_capillary(noise_args...; noise_kwargs...,
+                            noise_model=:modified, modes=2,
+                            rng=Random.MersenneTwister(42))
+    # Reproducibility: same seed → identical output
+    out_mm2 = prop_capillary(noise_args...; noise_kwargs...,
+                             noise_model=:modified, modes=2,
+                             rng=Random.MersenneTwister(42))
+    @test out_mm["Eω"] == out_mm2["Eω"]
+    # Clean input: z=0 field is identical to a no-noise run
+    ref_mm = prop_capillary(noise_args...; noise_kwargs...,
+                            shotnoise=false, modes=2)
+    @test out_mm["Eω"][:, :, 1] == ref_mm["Eω"][:, :, 1]
 end
 
 @testset "Invalid noise_model" begin
