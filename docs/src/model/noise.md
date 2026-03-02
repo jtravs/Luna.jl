@@ -10,7 +10,7 @@ model is therefore essential for any simulation where noise-initiated nonlinear 
 a role.
 
 Luna.jl supports two noise models, selected via the `noise_model` keyword argument in
-[`prop_capillary`](@ref) and [`prop_gnlse`](@ref):
+[`prop_capillary`](@ref Interface.prop_capillary) and [`prop_gnlse`](@ref Interface.prop_gnlse):
 
 - **`:input`** --- the traditional shot-noise approach.
 - **`:modified`** (default) --- the modified shot-noise approach of Chen & Wise [1].
