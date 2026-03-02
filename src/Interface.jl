@@ -288,18 +288,19 @@ In this case, all keyword arguments except for `λ0` are ignored.
     elliptical polarisation is always the y-axis.
 - `propagator`: A function `propagator!(Eω, grid)` which **mutates** its first argument to
                 apply an arbitrary propagation to the pulse before the simulation starts.
-- `shotnoise`:  If `true` (default), quantum noise is included. If `false`, noise is
-    disabled regardless of `noise_model`. For `noise_model=:input`, this adds
-    one-photon-per-mode shot noise to the input field. For `noise_model=:modified`, this
-    generates a noise field that enters the nonlinear operator at every step.
-- `noise_model`: Noise seeding model. `:input` adds traditional shot noise to the
-    input field at `z = 0`. `:modified` (default) uses the modified shot-noise model of Chen & Wise
-    (arXiv:2410.20567), where a constant noise field enters the nonlinear operator at every
-    step but is excluded from dispersion. This prevents artificial FWM phase-matching and
-    elevated noise floor artefacts. See the [Noise model](@ref) documentation for details.
-- `rng`: Random number generator for noise field generation (used with `noise_model=:modified`).
-    Defaults to `GLOBAL_RNG`. Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible
-    noise realisations, or different seeds for ensemble/shot-to-shot statistics.
+- `shotnoise`: Whether and how to include quantum noise. Can be one of:
+    - `true` (default) -- same as `:modified`.
+    - `false` -- disable all noise.
+    - `:modified` -- use the modified shot-noise model of Chen & Wise
+      (arXiv:2410.20567), where a constant noise field enters the nonlinear operator
+      at every step but is excluded from dispersion. This prevents artificial FWM
+      phase-matching and elevated noise floor artefacts.
+    - `:input` -- use traditional one-photon-per-mode shot noise added to the input
+      field at `z = 0`.
+    See the [Noise model](@ref) documentation for details.
+- `rng`: Random number generator for noise field generation. Defaults to `GLOBAL_RNG`.
+    Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible noise realisations,
+    or different seeds for ensemble/shot-to-shot statistics.
 
 # Modes options
 - `modes`: Defines which modes are included in the propagation. Can be any of:
@@ -376,7 +377,6 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         pulseshape=:gauss, polarisation=:linear, propagator=nothing,
                         pulses=nothing,
                         shotnoise=true,
-                        noise_model=:modified,
                         rng=GLOBAL_RNG,
                         modes=:HE11, model=:full, loss=true,
                         radial_integral_rtol=1e-3,
@@ -400,26 +400,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         PPT_options, preionfrac, temperature)
     inputs = makeinputs(mode_s, λ0, pulses, τfwhm, τw, ϕ,
                         power, energy, pulseshape, polarisation, propagator)
-    # Noise model selection:
-    # :input — traditional shot noise added to the input field at z=0.
-    # :modified (default) — modified shot-noise model (Chen & Wise, arXiv:2410.20567): noise enters
-    #   the nonlinear operator only, excluding dispersion, preventing artificial FWM
-    #   phase-matching and elevated noise floor artefacts.
-    if noise_model == :modified
-        if shotnoise
-            nm = mode_s isa AbstractArray ? length(mode_s) : 1
-            noise_field = Fields.generate_noise_field(grid; rng, nmodes=nm)
-            @info("Modified shot-noise model enabled. Traditional input shot noise is " *
-                  "disabled (noise enters through nonlinear operator instead).")
-        else
-            noise_field = nothing
-        end
-    elseif noise_model == :input
-        noise_field = nothing
-        inputs = shotnoise_maybe(inputs, mode_s, shotnoise)
-    else
-        error("Unknown noise_model=$noise_model. Use :input or :modified.")
-    end
+    inputs, noise_field = makenoise(grid, mode_s, inputs, shotnoise, rng)
     linop, Eω, transform, FT = setup(grid, mode_s, density, resp, inputs, pol,
                                      radial_integral_rtol, const_linop(radius, pressure);
                                      noise_field)
@@ -428,7 +409,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
 
     saveargs(output; radius, flength, gas, pressure, λlims, trange, envelope, thg, δt,
         λ0, τfwhm, τw, ϕ, power, energy, pulseshape, polarisation, propagator, pulses,
-        shotnoise, noise_model, modes, model, loss, raman, kerr, plasma, PPT_options,
+        shotnoise, modes, model, loss, raman, kerr, plasma, PPT_options,
         temperature, saveN, filepath, filename)
 
     return Eω, grid, linop, transform, FT, output
@@ -804,14 +785,31 @@ function ellfields(pulse::Pulses.DataPulse)
     Fields.PropagatedField(pf.propagator!, f1), Fields.PropagatedField(pf.propagator!, f2)
 end
 
-function shotnoise_maybe(inputs, mode::Modes.AbstractMode, shotnoise::Bool)
-    shotnoise || return inputs
-    (inputs..., (mode=1, fields=(Fields.ShotNoise(),)))
+function makenoise(grid, mode_s, inputs, shotnoise::Bool, rng)
+    shotnoise ? makenoise(grid, mode_s, inputs, :modified, rng) : (inputs, nothing)
 end
 
-function shotnoise_maybe(inputs, modes, shotnoise::Bool)
-    shotnoise || return inputs
-    (inputs..., [(mode=ii, fields=(Fields.ShotNoise(),)) for ii in eachindex(modes)]...)
+function makenoise(grid, mode_s, inputs, shotnoise::Symbol, rng)
+    if shotnoise == :modified
+        nm = mode_s isa AbstractArray ? length(mode_s) : 1
+        noise_field = Fields.generate_noise_field(grid; rng, nmodes=nm)
+        @info("Modified shot-noise model enabled. Traditional input shot noise is " *
+              "disabled (noise enters through nonlinear operator instead).")
+        return (inputs, noise_field)
+    elseif shotnoise == :input
+        inputs = _add_input_shotnoise(inputs, mode_s, rng)
+        return (inputs, nothing)
+    else
+        throw(DomainError(shotnoise, "Unknown shotnoise=$shotnoise. Use true, false, :modified, or :input."))
+    end
+end
+
+function _add_input_shotnoise(inputs, mode::Modes.AbstractMode, rng)
+    (inputs..., (mode=1, fields=(Fields.ShotNoise(rng),)))
+end
+
+function _add_input_shotnoise(inputs, modes, rng)
+    (inputs..., [(mode=ii, fields=(Fields.ShotNoise(rng),)) for ii in eachindex(modes)]...)
 end
 
 function setup(grid, mode::Modes.AbstractMode, density, responses, inputs, pol, rtol,
@@ -913,16 +911,19 @@ Note that the current GNLSE model is single mode only.
     elliptical polarisation is always the y-axis.
 - `propagator`: A function `propagator!(Eω, grid)` which **mutates** its first argument to
                 apply an arbitrary propagation to the pulse before the simulation starts.
-- `shotnoise`:  If `true` (default), quantum noise is included. If `false`, noise is
-    disabled regardless of `noise_model`. For `noise_model=:input`, this adds
-    one-photon-per-mode shot noise to the input field. For `noise_model=:modified`, this
-    generates a noise field that enters the nonlinear operator at every step.
-- `noise_model`: Noise seeding model. `:input` adds traditional shot noise to the
-    input field at `z = 0`. `:modified` (default) uses the modified shot-noise model of Chen & Wise
-    (arXiv:2410.20567). See the [Noise model](@ref) documentation for details.
-- `rng`: Random number generator for noise field generation (used with `noise_model=:modified`).
-    Defaults to `GLOBAL_RNG`. Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible
-    noise realisations, or different seeds for ensemble/shot-to-shot statistics.
+- `shotnoise`: Whether and how to include quantum noise. Can be one of:
+    - `true` (default) -- same as `:modified`.
+    - `false` -- disable all noise.
+    - `:modified` -- use the modified shot-noise model of Chen & Wise
+      (arXiv:2410.20567), where a constant noise field enters the nonlinear operator
+      at every step but is excluded from dispersion. This prevents artificial FWM
+      phase-matching and elevated noise floor artefacts.
+    - `:input` -- use traditional one-photon-per-mode shot noise added to the input
+      field at `z = 0`.
+    See the [Noise model](@ref) documentation for details.
+- `rng`: Random number generator for noise field generation. Defaults to `GLOBAL_RNG`.
+    Pass a seeded RNG (e.g. `MersenneTwister(seed)`) for reproducible noise realisations,
+    or different seeds for ensemble/shot-to-shot statistics.
 
 # GNLSE options
 - `shock::Bool`: Whether to include the shock derivative term. Default is `true`.
@@ -971,7 +972,6 @@ function prop_gnlse_args(γ, flength, βs; λ0, λlims, trange,
                         pulseshape=:gauss, propagator=nothing,
                         pulses=nothing,
                         shotnoise=true, shock=true,
-                        noise_model=:modified,
                         rng=GLOBAL_RNG,
                         loss=0.0, raman=true, fr=0.18,
                         ramanmodel=:sdo, τ1=12.2e-15, τ2=32e-15,
@@ -1013,21 +1013,7 @@ function prop_gnlse_args(γ, flength, βs; λ0, λlims, trange,
 
     inputs = makeinputs(mode_s, λ0, pulses, τfwhm, τw, ϕ,
                         power, energy, pulseshape, polarisation, propagator)
-    # Noise model selection (same logic as prop_capillary_args)
-    if noise_model == :modified
-        if shotnoise
-            noise_field = Fields.generate_noise_field(grid; rng)
-            @info("Modified shot-noise model enabled. Traditional input shot noise is " *
-                  "disabled (noise enters through nonlinear operator instead).")
-        else
-            noise_field = nothing
-        end
-    elseif noise_model == :input
-        noise_field = nothing
-        inputs = shotnoise_maybe(inputs, mode_s, shotnoise)
-    else
-        error("Unknown noise_model=$noise_model. Use :input or :modified.")
-    end
+    inputs, noise_field = makenoise(grid, mode_s, inputs, shotnoise, rng)
 
     norm! = NonlinearRHS.norm_mode_average_gnlse(grid, aeff; shock)
     Eω, transform, FT = Luna.setup(grid, density, resp, inputs, βfun!, aeff;
@@ -1037,7 +1023,7 @@ function prop_gnlse_args(γ, flength, βs; λ0, λlims, trange,
 
     saveargs(output; γ, flength, βs, λlims, trange, envelope, thg, δt,
         λ0, τfwhm, τw, ϕ, power, energy, pulseshape, polarisation, propagator, pulses,
-        shotnoise, noise_model, shock, loss, raman, ramanmodel, fr, τ1, τ2,
+        shotnoise, shock, loss, raman, ramanmodel, fr, τ1, τ2,
         saveN, filepath, filename)
 
     return Eω, grid, linop, transform, FT, output

@@ -98,14 +98,14 @@ const noise_kwargs = (λ0=800e-9, τfwhm=10e-15, energy=1e-12,
 end
 
 @testset "Multimode modified noise integration" begin
-    # prop_capillary with modes=2 and noise_model=:modified exercises the
+    # prop_capillary with modes=2 and shotnoise=:modified exercises the
     # multimode noise path (nmodes > 1) in generate_noise_field.
     out_mm = prop_capillary(noise_args...; noise_kwargs...,
-                            noise_model=:modified, modes=2,
+                            shotnoise=:modified, modes=2,
                             rng=Random.MersenneTwister(42))
     # Reproducibility: same seed → identical output
     out_mm2 = prop_capillary(noise_args...; noise_kwargs...,
-                             noise_model=:modified, modes=2,
+                             shotnoise=:modified, modes=2,
                              rng=Random.MersenneTwister(42))
     @test out_mm["Eω"] == out_mm2["Eω"]
     # Clean input: z=0 field is identical to a no-noise run
@@ -114,17 +114,17 @@ end
     @test out_mm["Eω"][:, :, 1] == ref_mm["Eω"][:, :, 1]
 end
 
-@testset "Invalid noise_model" begin
-    @test_throws ErrorException prop_capillary(
-        noise_args...; noise_kwargs..., shotnoise=false, noise_model=:invalid)
+@testset "Invalid shotnoise" begin
+    @test_throws DomainError prop_capillary(
+        noise_args...; noise_kwargs..., shotnoise=:invalid)
 end
 
 @testset "Clean input spectrum" begin
-    # With noise_model=:modified, the field at z=0 should be identical to a no-noise run
+    # With shotnoise=:modified, the field at z=0 should be identical to a no-noise run
     # because noise only enters the nonlinear operator, not the initial field.
     ref = prop_capillary(noise_args...; noise_kwargs..., shotnoise=false)
     mod = prop_capillary(noise_args...; noise_kwargs...,
-                         noise_model=:modified,
+                         shotnoise=:modified,
                          rng=Random.MersenneTwister(42))
     @test ref["Eω"][:, 1] == mod["Eω"][:, 1]
 end
@@ -134,7 +134,7 @@ end
     # (noise energy is negligible: ~ħω per bin)
     ref = prop_capillary(noise_args...; noise_kwargs..., shotnoise=false)
     mod = prop_capillary(noise_args...; noise_kwargs...,
-                         noise_model=:modified,
+                         shotnoise=:modified,
                          rng=Random.MersenneTwister(42))
     eref = Processing.energy(ref)[end]
     emod = Processing.energy(mod)[end]
@@ -142,11 +142,11 @@ end
 end
 
 @testset "Backward compatibility" begin
-    # noise_model=:input with shotnoise=false should produce identical results
-    # to the default (no noise_model kwarg) with shotnoise=false
+    # shotnoise=false should produce identical results regardless of how it's
+    # specified (Bool false or explicit shotnoise=false)
     out1 = prop_capillary(noise_args...; noise_kwargs..., shotnoise=false)
     out2 = prop_capillary(noise_args...; noise_kwargs...,
-                          shotnoise=false, noise_model=:input)
+                          shotnoise=false)
     @test out1["Eω"] == out2["Eω"]
 end
 
@@ -155,10 +155,10 @@ end
     # (Chen & Wise §A2: z-dependent random noise gives step-size-dependent results).
     # Same seed must produce bit-identical output.
     out1 = prop_capillary(noise_args...; noise_kwargs...,
-                          noise_model=:modified,
+                          shotnoise=:modified,
                           rng=Random.MersenneTwister(42))
     out2 = prop_capillary(noise_args...; noise_kwargs...,
-                          noise_model=:modified,
+                          shotnoise=:modified,
                           rng=Random.MersenneTwister(42))
     @test out1["Eω"] == out2["Eω"]
 end
@@ -182,14 +182,14 @@ const anti_stokes_band = (500e-9, 680e-9)  # H₂ vibrational anti-Stokes region
 @testset "Noise model physics with Raman" begin
     # Modified noise model: no noise floor at z=0 in the Stokes region.
     mod = prop_capillary(raman_args...; raman_kwargs...,
-                         noise_model=:modified,
+                         shotnoise=:modified,
                          rng=Random.MersenneTwister(42))
     E_stokes_mod = Processing.energy(mod; bandpass=stokes_band)
 
     # Traditional shot noise: one-photon-per-mode noise is added to the input field,
     # creating a measurable noise floor across all frequencies at z=0.
     trad = prop_capillary(raman_args...; raman_kwargs...,
-                          noise_model=:input, shotnoise=true)
+                          shotnoise=:input)
     E_stokes_trad = Processing.energy(trad; bandpass=stokes_band)
 
     # Key physics check: the traditional model has an elevated noise floor at z=0
@@ -224,13 +224,13 @@ end
                          plasma=false, saveN=51)
 
     mod = prop_capillary(raman_args...; raman_kwargs_kerr...,
-                         noise_model=:modified,
+                         shotnoise=:modified,
                          rng=Random.MersenneTwister(42))
     E_s_mod = Processing.energy(mod; bandpass=stokes_band)
     E_as_mod = Processing.energy(mod; bandpass=anti_stokes_band)
 
     trad = prop_capillary(raman_args...; raman_kwargs_kerr...,
-                          noise_model=:input, shotnoise=true)
+                          shotnoise=:input)
     E_s_trad = Processing.energy(trad; bandpass=stokes_band)
     E_as_trad = Processing.energy(trad; bandpass=anti_stokes_band)
 
@@ -252,7 +252,7 @@ end
     # noise successfully seeds Raman gain even though it enters only the nonlinear
     # operator (not the input field).
     mod = prop_capillary(raman_args...; raman_kwargs...,
-                         noise_model=:modified,
+                         shotnoise=:modified,
                          rng=Random.MersenneTwister(42))
     E_s = Processing.energy(mod; bandpass=stokes_band)
 

@@ -9,11 +9,11 @@ shot-to-shot fluctuations characteristic of supercontinuum generation. An accura
 model is therefore essential for any simulation where noise-initiated nonlinear dynamics play
 a role.
 
-Luna.jl supports two noise models, selected via the `noise_model` keyword argument in
+Luna.jl supports two noise models, selected via the `shotnoise` keyword argument in
 [`prop_capillary`](@ref Interface.prop_capillary) and [`prop_gnlse`](@ref Interface.prop_gnlse):
 
 - **`:input`** --- the traditional shot-noise approach.
-- **`:modified`** (default) --- the modified shot-noise approach of Chen & Wise [1].
+- **`:modified`** or **`true`** (default) --- the modified shot-noise approach of Chen & Wise [1].
 
 ## Traditional shot noise (`:input`)
 
@@ -76,11 +76,11 @@ soliton dynamics with self-frequency shift, and combined Kerr--Raman broadening.
 
 ## Usage
 
-The modified shot-noise model is used by default (`noise_model=:modified`). To use the
-traditional model instead, pass `noise_model=:input`:
+The modified shot-noise model is used by default (`shotnoise=true`, equivalent to
+`shotnoise=:modified`). To use the traditional model instead, pass `shotnoise=:input`:
 
 ```julia
-# Default: modified shot-noise model
+# Default: modified shot-noise model (shotnoise=true)
 output = prop_capillary(radius, flength, gas, pressure;
     λ0=800e-9, λlims=(200e-9, 4000e-9), trange=400e-15,
     τfwhm=30e-15, energy=1e-6,
@@ -96,15 +96,15 @@ for shot in 1:100
     output = prop_capillary(radius, flength, gas, pressure;
         λ0=800e-9, λlims=(200e-9, 4000e-9), trange=400e-15,
         τfwhm=30e-15, energy=1e-6,
-        noise_model=:modified, rng=rng
+        shotnoise=:modified, rng=rng
     )
     # ... process output ...
 end
 ```
 
-Setting `shotnoise=false` disables noise regardless of `noise_model`. When
-`noise_model=:modified`, it prevents generation of the noise field; when
-`noise_model=:input`, it prevents adding shot noise to the input spectrum.
+Setting `shotnoise=false` disables noise entirely. This prevents generation of the noise
+field when using the modified model, and prevents adding shot noise to the input spectrum
+when using the traditional model.
 
 ## Ionization and plasma
 
