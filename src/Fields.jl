@@ -773,35 +773,61 @@ prop_mode!(Eω, grid::Grid.AbstractGrid, args...) = prop_mode!(Eω, grid.ω, arg
 prop_mode(Eω, args...) = prop_mode!(copy(Eω), args...)
 
 """
-    prop_gratings!(Eω, ω, Λ, L, m, θi)
-    prop_gratings!(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi)
+    prop_gratings!(Eω, ω, Λ, L, m, θi, λ0=nothing)
+    prop_gratings!(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi, λ0=nothing)
 
 Add the spectral phase acquired after passing through a four grating compressor
-with grating period `Λ`, grating separation `L`, diffraction order `m` and angle
-of incidence `θi`. The sampling axis of `Eω` can be given either as an
-`AbstractGrid` or the frequency axis `ω`.
+with grating period `Λ` (in metres), grating separation `L` (in metres),
+diffraction order `m` (dimensionless integer) and angle of incidence `θi`
+(in radians). The sampling axis of `Eω` can be given either as an
+`AbstractGrid` or the angular frequency axis `ω` (in rad/s).
+
+If the central wavelength `λ0` (in metres) is given, the overall phase and group
+delay at `λ0` are removed so that only the dispersive part of the phase remains.
+
+Frequency components outside the grating diffraction bandwidth are set to zero.
 """
-function prop_gratings!(Eω, ω, Λ, L, m, θi)
+function prop_gratings!(Eω, ω, Λ, L, m, θi, λ0=nothing)
     λ = PhysData.wlfreq.(ω)
     mask = @. abs(m*λ/Λ + sin(θi)) <= 1
     θm = @. asin(m*λ[mask]/Λ + sin(θi))
-    x = @. L*tan(θm)
-    ϕg = @. π - m*2*π*x/Λ
     ϕ = zero(λ)
-    ϕ[mask] .= @. 2*(ω[mask]*L/PhysData.c + ϕg)
-    Eω .*= exp.(-1im.*ϕ)
+    ϕ[mask] .= @. 2*ω[mask]*L*cos(θm)/PhysData.c
+    if !isnothing(λ0)
+        # Remove constant phase and group delay at λ0
+        ω0 = wlfreq(λ0)
+        θm0 = asin(m*λ0/Λ + sin(θi))
+        ϕ0 = 2*ω0*L*cos(θm0)/PhysData.c
+        # dϕ/dω via finite difference
+        δω = ω0 * 1e-8
+        λp = wlfreq(ω0 + δω)
+        θmp = asin(m*λp/Λ + sin(θi))
+        ϕp = 2*(ω0 + δω)*L*cos(θmp)/PhysData.c
+        dϕdω = (ϕp - ϕ0)/δω
+        ϕ[mask] .-= ϕ0 .+ dϕdω .* (ω[mask] .- ω0)
+    end
+    # Zero out-of-band frequencies (no diffracted order exists)
+    Eω[mask] .*= exp.(-1im.*ϕ[mask])
+    Eω[.!mask] .= 0
+    Eω
 end
 
-prop_gratings!(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi) = prop_gratings!(Eω, grid.ω, Λ, L, m, θi)
+prop_gratings!(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi, λ0=nothing) = prop_gratings!(Eω, grid.ω, Λ, L, m, θi, λ0)
 
 """
-    prop_gratings(Eω, ω, Λ, L, m, θi)
-    prop_gratings(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi)
+    prop_gratings(Eω, ω, Λ, L, m, θi, λ0=nothing)
+    prop_gratings(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi, λ0=nothing)
 
 Return a copy of the frequency-domain field `Eω` with the additional spectral phase
-acquired after passing through a four grating compressor with grating period `Λ`, grating
-separation `L`, diffraction order `m` and angle of incidence `θi`.
-The sampling axis of `Eω` can be given either as an `AbstractGrid` or the frequency axis `ω`.
+acquired after passing through a four grating compressor with grating period `Λ` (in
+metres), grating separation `L` (in metres), diffraction order `m` (dimensionless integer)
+and angle of incidence `θi` (in radians). The sampling axis of `Eω` can be given either as
+an `AbstractGrid` or the angular frequency axis `ω` (in rad/s).
+
+If the central wavelength `λ0` (in metres) is given, the overall phase and group
+delay at `λ0` are removed so that only the dispersive part of the phase remains.
+
+Frequency components outside the grating diffraction bandwidth are set to zero.
 """
 prop_gratings(Eω, args...) = prop_gratings!(copy(Eω), args...)
 
@@ -868,7 +894,6 @@ function optcomp_material(Eω::AbstractVecOrMat, grid, material, λ0,
     τ = length(grid.t) * (grid.t[2] - grid.t[1])/2
     EωFTL = abs.(Eω) .* exp.(-1im .* grid.ω .* τ)
     ItFTL = _It(iFT(EωFTL, grid), grid)
-    target = 1/maximum(ItFTL)
 
     Eωnorm = Eω ./ sqrt(maximum(ItFTL))
 
@@ -903,40 +928,42 @@ end
 
 
 """
-    optcomp_gratings(Eω, grid, Λ, m, θi, min_separation, max_separation)
+    optcomp_gratings(Eω, grid, Λ, m, θi, min_separation, max_separation; λ0=nothing)
 
 Maximise the peak power of the field `Eω` by compression through a four grating
-compressor with grating period `Λ`, diffraction order `m` and angle of incidence `θi`.
-The optimum grating separation is returned, lying between `min_separation` and
-`max_separation`. 
+compressor with grating period `Λ` (in metres), diffraction order `m` (dimensionless
+integer) and angle of incidence `θi` (in radians). The optimum grating separation (in
+metres) is returned, lying between `min_separation` and `max_separation`.
+
+If the central wavelength `λ0` (in metres) is given, the overall phase and group delay
+at `λ0` are removed from the grating phase (see [`prop_gratings!`](@ref)).
 """
 function optcomp_gratings(Eω::AbstractVecOrMat, grid, Λ, m, θi,
-                          min_separation, max_separation)
+                          min_separation, max_separation; λ0=nothing)
     τ = length(grid.t) * (grid.t[2] - grid.t[1])/2
     EωFTL = abs.(Eω) .* exp.(-1im .* grid.ω .* τ)
     ItFTL = _It(iFT(EωFTL, grid), grid)
-    target = 1/maximum(ItFTL)
 
     Eωnorm = Eω ./ sqrt(maximum(ItFTL))
 
     function f(L)
         # L is the grating separation
         Eωp = copy(Eωnorm)
-        prop_gratings!(Eωp, grid.ω, Λ, L, m, θi)
+        prop_gratings!(Eωp, grid.ω, Λ, L, m, θi, λ0)
         Itp = _It(iFT(Eωp, grid), grid)
         1/maximum(Itp)
     end
 
     res = Optim.optimize(f, min_separation, max_separation)
-    res.minimizer, prop_gratings(Eω, grid, Λ, res.minimizer, m, θi)
+    res.minimizer, prop_gratings(Eω, grid, Λ, res.minimizer, m, θi, λ0)
 end
 
-function optcomp_gratings(Eω, args...)
+function optcomp_gratings(Eω, args...; kwargs...)
     out = similar(Eω)
     cidcs = CartesianIndices(size(Eω)[3:end])
     dout = zeros(size(cidcs))
     for ci in cidcs
-        di, Eωi = optcomp_gratings(Eω[:, :, ci], args...)
+        di, Eωi = optcomp_gratings(Eω[:, :, ci], args...; kwargs...)
         out[:, :, ci] .= Eωi
         dout[ci] = di
     end

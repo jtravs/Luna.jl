@@ -624,6 +624,115 @@ Etcomp = FT \ Eωcomp
 @test isapprox(Maths.fwhm(grid.t, abs2.(Maths.hilbert(Etcomp))), τfwhm; rtol=1e-3)
 end
 
+@testset "Gratings" begin
+# Common grating parameters: 1200 lines/mm, order -1, Littrow angle at 1030 nm
+λ0 = 1030e-9
+Λ = 1/(1200e3) # grating period in metres
+m = -1
+θi = asin(λ0/(2Λ)) # Littrow angle
+
+# Treacy GDD formula for a four-grating compressor:
+# GDD = -m²λ³L / (π c² Λ² cos³θm)
+θm_ref = asin(m*λ0/Λ + sin(θi))
+GDD_per_L = -m^2*λ0^3 / (π * PhysData.c^2 * Λ^2 * cos(θm_ref)^3) # GDD per unit separation
+
+# Helper: compute phase from the code's formula for independent GDD reference
+function _grating_phase(ω, L, Λ, m, θi)
+    λ = PhysData.wlfreq(ω)
+    sinθm = m*λ/Λ + sin(θi)
+    2*(ω*L/PhysData.c)*cos(asin(sinθm))
+end
+
+function _grating_GDD(ω0, L, Λ, m, θi)
+    δω = ω0 * 1e-5
+    ϕm = _grating_phase(ω0 - δω, L, Λ, m, θi)
+    ϕ0 = _grating_phase(ω0, L, Λ, m, θi)
+    ϕp = _grating_phase(ω0 + δω, L, Λ, m, θi)
+    (ϕp - 2*ϕ0 + ϕm) / δω^2
+end
+
+ω0 = PhysData.wlfreq(λ0)
+
+# -- GDD matches Treacy formula --
+GDD_num = _grating_GDD(ω0, 1.0, Λ, m, θi)
+@test isapprox(GDD_num, GDD_per_L, rtol=1e-4)
+
+# -- Sign test: gratings should add negative chirp --
+τfwhm = 50e-15
+grid = Grid.RealGrid(1, λ0, (900e-9, 1200e-9), 10e-12)
+x = Array{Float64}(undef, length(grid.t))
+FT = FFTW.plan_rfft(x, 1)
+input = Fields.GaussField(λ0=λ0, τfwhm=τfwhm, energy=1e-6)
+Eω = input(grid, FT)
+
+Eωgrat = Fields.prop_gratings(Eω, grid, Λ, 5e-3, m, θi, λ0)
+Et = FT \ Eωgrat
+gab = Maths.gabor(grid.t, Et, [-200e-15, 200e-15], 50e-15)
+ω0g = Maths.moment(grid.ω, abs2.(gab))
+@test ω0g[1] > ω0g[2] # negative chirp: frequency decreases with time
+
+# -- Out-of-band zeroing test --
+λgrid = PhysData.wlfreq.(grid.ω)
+inmask = @. abs(m*λgrid/Λ + sin(θi)) <= 1
+@test all(Eωgrat[.!inmask] .== 0)
+
+# -- Spectral magnitude preservation (phase-only within bandwidth) --
+@test isapprox(abs.(Eωgrat[inmask]), abs.(Eω[inmask]), rtol=1e-10)
+
+# -- GDD magnitude vs Treacy formula for two separations --
+grid = Grid.RealGrid(1, λ0, (900e-9, 1200e-9), 20e-12)
+x = Array{Float64}(undef, length(grid.t))
+FT = FFTW.plan_rfft(x, 1)
+Eω = input(grid, FT)
+
+@testset "Treacy GDD, L=$L" for L in [5e-3, 0.02]
+    Eωgrat = Fields.prop_gratings(Eω, grid, Λ, L, m, θi, λ0)
+    ϕs, Eωcomp = Fields.optcomp_taylor(Eωgrat, grid, λ0)
+    GDD_expected = GDD_per_L * L
+    @test isapprox(ϕs[3], -GDD_expected, rtol=0.02)
+end
+
+# -- optcomp_gratings: compress a chirped pulse --
+# Use narrow-bandwidth pulse (200 fs) to minimise higher-order dispersion effects
+τfwhm = 200e-15
+grid = Grid.RealGrid(1, λ0, (950e-9, 1100e-9), 10e-12)
+x = Array{Float64}(undef, length(grid.t))
+FT = FFTW.plan_rfft(x, 1)
+input = Fields.GaussField(λ0=λ0, τfwhm=τfwhm, energy=1e-6)
+Eω = input(grid, FT)
+
+# Apply known positive GDD, then compress with gratings
+L_target = 5e-3
+GDD_applied = abs(GDD_per_L) * L_target
+Eωchirped = Fields.prop_taylor(Eω, grid, [0, 0, GDD_applied], λ0)
+
+L_opt, Eωcomp = Fields.optcomp_gratings(Eωchirped, grid, Λ, m, θi, 0.0, 0.05; λ0=λ0)
+@test isapprox(L_opt, L_target, rtol=0.05)
+
+Etcomp = FT \ Eωcomp
+@test isapprox(Maths.fwhm(grid.t, abs2.(Maths.hilbert(Etcomp))), τfwhm; rtol=0.05)
+
+# -- optcomp_gratings: round-trip (apply gratings then undo) --
+# Apply gratings, add double positive GDD, then use optcomp_gratings to recompress
+τfwhm = 200e-15
+grid = Grid.RealGrid(1, λ0, (950e-9, 1100e-9), 10e-12)
+x = Array{Float64}(undef, length(grid.t))
+FT = FFTW.plan_rfft(x, 1)
+input = Fields.GaussField(λ0=λ0, τfwhm=τfwhm, energy=1e-6)
+Eω = input(grid, FT)
+
+L_applied = 5e-3
+GDD_grating = GDD_per_L * L_applied
+Eωchirped = Fields.prop_taylor(
+    Fields.prop_gratings(Eω, grid, Λ, L_applied, m, θi, λ0),
+    grid, [0, 0, -2*GDD_grating], λ0)
+
+L_opt, Eωcomp = Fields.optcomp_gratings(Eωchirped, grid, Λ, m, θi, 0.0, 0.05; λ0=λ0)
+@test isapprox(L_opt, L_applied, rtol=0.05)
+Etcomp = FT \ Eωcomp
+@test isapprox(Maths.fwhm(grid.t, abs2.(Maths.hilbert(Etcomp))), τfwhm; rtol=0.05)
+end
+
 @testset "Gaussian beam initialisation" begin
     a = 16e-6
     gas = :Kr
