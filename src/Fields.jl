@@ -796,14 +796,9 @@ function prop_gratings!(Eω, ω, Λ, L, m, θi, λ0=nothing)
     if !isnothing(λ0)
         # Remove constant phase and group delay at λ0
         ω0 = wlfreq(λ0)
-        θm0 = asin(m*λ0/Λ + sin(θi))
-        ϕ0 = 2*ω0*L*cos(θm0)/PhysData.c
-        # dϕ/dω via finite difference
-        δω = ω0 * 1e-8
-        λp = wlfreq(ω0 + δω)
-        θmp = asin(m*λp/Λ + sin(θi))
-        ϕp = 2*(ω0 + δω)*L*cos(θmp)/PhysData.c
-        dϕdω = (ϕp - ϕ0)/δω
+        ϕ_at(ω_val) = 2*ω_val*L*cos(asin(m*wlfreq(ω_val)/Λ + sin(θi)))/PhysData.c
+        ϕ0 = ϕ_at(ω0)
+        dϕdω = Maths.derivative(ϕ_at, ω0, 1)
         ϕ[mask] .-= ϕ0 .+ dϕdω .* (ω[mask] .- ω0)
     end
     # Zero out-of-band frequencies (no diffracted order exists)

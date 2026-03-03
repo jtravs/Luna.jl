@@ -643,13 +643,7 @@ function _grating_phase(ω, L, Λ, m, θi)
     2*(ω*L/PhysData.c)*cos(asin(sinθm))
 end
 
-function _grating_GDD(ω0, L, Λ, m, θi)
-    δω = ω0 * 1e-5
-    ϕm = _grating_phase(ω0 - δω, L, Λ, m, θi)
-    ϕ0 = _grating_phase(ω0, L, Λ, m, θi)
-    ϕp = _grating_phase(ω0 + δω, L, Λ, m, θi)
-    (ϕp - 2*ϕ0 + ϕm) / δω^2
-end
+_grating_GDD(ω0, L, Λ, m, θi) = Maths.derivative(ω -> _grating_phase(ω, L, Λ, m, θi), ω0, 2)
 
 ω0 = PhysData.wlfreq(λ0)
 
