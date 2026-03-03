@@ -1,13 +1,12 @@
 #= In this example we simulate single-stage SPM broadening of a Yb-laser-like pulse
-(1030 nm, 300 fs, 200 µJ) in an argon-filled hollow capillary fibre, followed by
+(1030 nm, 300 fs, 600 µJ) in an argon-filled hollow capillary fibre, followed by
 compression using a four-grating compressor.
 
-The fibre parameters (125 µm core radius, 1 m length, 4 bar Ar) give a B-integral of
-roughly 6-7 rad with negligible dispersion, so the broadening is dominated by SPM and
-the resulting chirp is approximately linear—well suited for grating compression to ~50 fs.
+The fibre parameters (125 µm core radius, 1 m length, 4 bar Ar) give significant SPM
+broadening, and the resulting chirp is approximately linear—well suited for grating
+compression.
 
-The grating compressor uses 1200 lines/mm gratings at Littrow angle (order m = -1)
-which is a standard configuration for Yb-laser systems around 1030 nm. =#
+The grating compressor uses 300 lines/mm gratings at Littrow angle (order m = -1). =#
 using Luna
 
 ## -- Fibre parameters --
@@ -27,7 +26,7 @@ output = prop_capillary(a, flength, gas, pressure;
     λlims=(800e-9, 1300e-9), trange=2e-12)
 
 ## -- Grating compressor parameters --
-Λ = 1/(300e3)            # grating period [m] (300 lines/mm)
+Λ = 1/(300e3)             # grating period [m] (300 lines/mm)
 m = -1                     # diffraction order
 θi = Fields.littrow_angle(λ0, Λ; m)  # Littrow angle of incidence [rad]
 

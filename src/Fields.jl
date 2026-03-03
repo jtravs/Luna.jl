@@ -824,9 +824,11 @@ function prop_gratings!(Eω, ω, Λ, L, m, θi, λ0=nothing)
         dϕdω = Maths.derivative(ϕ_at, ω0, 1)
         ϕ[mask] .-= ϕ0 .+ dϕdω .* (ω[mask] .- ω0)
     end
-    # Zero out-of-band frequencies (no diffracted order exists)
-    Eω[mask] .*= exp.(-1im.*ϕ[mask])
-    Eω[.!mask] .= 0
+    # Apply phase to in-band and zero out-of-band frequencies
+    # transfer is 0 for out-of-band (zeroing those components) and exp(-iϕ) for in-band
+    transfer = zeros(ComplexF64, length(ω))
+    transfer[mask] .= exp.(-1im.*ϕ[mask])
+    Eω .*= transfer
     Eω
 end
 
@@ -996,6 +998,12 @@ function optcomp_gratings(Eω::AbstractVecOrMat, grid, Λ, m, θi;
     ϕs, _ = optcomp_taylor(Eω, grid, λc; order=2)
     GDD_needed = ϕs[3]
     GDD_per_L = grating_GDD(λc, Λ, m, θi)
+    if !isfinite(GDD_per_L) || GDD_per_L == 0
+        throw(ArgumentError(
+            "grating GDD per unit separation is zero or non-finite "
+            * "(Λ=$Λ, m=$m, θi=$θi); cannot estimate separation automatically. "
+            * "Use the explicit (min_separation, max_separation) method instead."))
+    end
     L_est = abs(GDD_needed / GDD_per_L)
     L_est = max(L_est, 1e-4) # at least 0.1 mm to avoid degenerate bounds
     min_separation = max(0.0, L_est / bounds_factor)
