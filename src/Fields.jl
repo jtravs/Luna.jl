@@ -773,6 +773,29 @@ prop_mode!(Eω, grid::Grid.AbstractGrid, args...) = prop_mode!(Eω, grid.ω, arg
 prop_mode(Eω, args...) = prop_mode!(copy(Eω), args...)
 
 """
+    littrow_angle(λ, Λ; m=-1)
+
+Calculate the Littrow angle of incidence (in radians) for wavelength `λ` (in metres),
+grating period `Λ` (in metres) and diffraction order `m` (dimensionless integer, default -1).
+
+At Littrow, the diffracted beam returns along the incident direction (`θm = -θi`).
+"""
+littrow_angle(λ, Λ; m=-1) = asin(-m*λ/(2Λ))
+
+"""
+    grating_GDD(λ, Λ, m, θi)
+
+Calculate the group-delay dispersion per unit separation (in s²/m) of a double-pass
+grating pair using the Treacy formula, for wavelength `λ` (in metres), grating period `Λ`
+(in metres), diffraction order `m` (dimensionless integer) and angle of incidence `θi`
+(in radians).
+"""
+function grating_GDD(λ, Λ, m, θi)
+    θm = asin(m*λ/Λ + sin(θi))
+    -m^2*λ^3 / (π * PhysData.c^2 * Λ^2 * cos(θm)^3)
+end
+
+"""
     prop_gratings!(Eω, ω, Λ, L, m, θi, λ0=nothing)
     prop_gratings!(Eω, grid::Grid.AbstractGrid, Λ, L, m, θi, λ0=nothing)
 
@@ -924,11 +947,18 @@ end
 
 """
     optcomp_gratings(Eω, grid, Λ, m, θi, min_separation, max_separation; λ0=nothing)
+    optcomp_gratings(Eω, grid, Λ, m, θi; λ0=nothing, bounds_factor=3)
 
 Maximise the peak power of the field `Eω` by compression through a four grating
 compressor with grating period `Λ` (in metres), diffraction order `m` (dimensionless
 integer) and angle of incidence `θi` (in radians). The optimum grating separation (in
-metres) is returned, lying between `min_separation` and `max_separation`.
+metres) is returned.
+
+If `min_separation` and `max_separation` are given, the optimiser searches within these
+bounds directly. If they are omitted, [`optcomp_taylor`](@ref) is used to estimate the
+required GDD and the Treacy formula ([`grating_GDD`](@ref)) converts this to an estimated
+grating separation; the search bounds are then set to `L_est / bounds_factor` and
+`L_est * bounds_factor`.
 
 If the central wavelength `λ0` (in metres) is given, the overall phase and group delay
 at `λ0` are removed from the grating phase (see [`prop_gratings!`](@ref)).
@@ -951,6 +981,26 @@ function optcomp_gratings(Eω::AbstractVecOrMat, grid, Λ, m, θi,
 
     res = Optim.optimize(f, min_separation, max_separation)
     res.minimizer, prop_gratings(Eω, grid, Λ, res.minimizer, m, θi, λ0)
+end
+
+function optcomp_gratings(Eω::AbstractVecOrMat, grid, Λ, m, θi;
+                          λ0=nothing, bounds_factor=3)
+    # Determine central wavelength for Taylor estimate
+    if isnothing(λ0)
+        Eω1 = Eω isa AbstractVector ? Eω : @view Eω[:, 1]
+        λc = wlfreq(grid.ω[argmax(abs.(Eω1))])
+    else
+        λc = λ0
+    end
+    # Use Taylor expansion to estimate the required GDD
+    ϕs, _ = optcomp_taylor(Eω, grid, λc; order=2)
+    GDD_needed = ϕs[3]
+    GDD_per_L = grating_GDD(λc, Λ, m, θi)
+    L_est = abs(GDD_needed / GDD_per_L)
+    L_est = max(L_est, 1e-4) # at least 0.1 mm to avoid degenerate bounds
+    min_separation = max(0.0, L_est / bounds_factor)
+    max_separation = L_est * bounds_factor
+    optcomp_gratings(Eω, grid, Λ, m, θi, min_separation, max_separation; λ0)
 end
 
 function optcomp_gratings(Eω, args...; kwargs...)

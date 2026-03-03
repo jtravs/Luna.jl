@@ -629,12 +629,15 @@ end
 λ0 = 1030e-9
 Λ = 1/(1200e3) # grating period in metres
 m = -1
-θi = asin(λ0/(2Λ)) # Littrow angle
+θi = Fields.littrow_angle(λ0, Λ; m)
 
-# Treacy GDD formula for a four-grating compressor:
-# GDD = -m²λ³L / (π c² Λ² cos³θm)
+# -- littrow_angle gives the right answer --
+@test isapprox(θi, asin(λ0/(2Λ)))
+
+# -- grating_GDD matches Treacy formula --
 θm_ref = asin(m*λ0/Λ + sin(θi))
-GDD_per_L = -m^2*λ0^3 / (π * PhysData.c^2 * Λ^2 * cos(θm_ref)^3) # GDD per unit separation
+GDD_per_L = -m^2*λ0^3 / (π * PhysData.c^2 * Λ^2 * cos(θm_ref)^3)
+@test isapprox(Fields.grating_GDD(λ0, Λ, m, θi), GDD_per_L)
 
 # Helper: compute phase from the code's formula for independent GDD reference
 function _grating_phase(ω, L, Λ, m, θi)
@@ -705,6 +708,10 @@ L_opt, Eωcomp = Fields.optcomp_gratings(Eωchirped, grid, Λ, m, θi, 0.0, 0.05
 
 Etcomp = FT \ Eωcomp
 @test isapprox(Maths.fwhm(grid.t, abs2.(Maths.hilbert(Etcomp))), τfwhm; rtol=0.05)
+
+# -- optcomp_gratings: auto-estimate (no explicit bounds) --
+L_opt_auto, Eωcomp_auto = Fields.optcomp_gratings(Eωchirped, grid, Λ, m, θi; λ0=λ0)
+@test isapprox(L_opt_auto, L_target, rtol=0.05)
 
 # -- optcomp_gratings: round-trip (apply gratings then undo) --
 # Apply gratings, add double positive GDD, then use optcomp_gratings to recompress
