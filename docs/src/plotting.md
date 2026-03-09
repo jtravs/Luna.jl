@@ -278,7 +278,7 @@ ax.set_ylabel("Spectral energy density")
 | FWHM legend annotations | Yes | Yes (inline in labels) |
 | `cmap_colours` | Yes | Yes |
 | `subplotgrid` | Returns `(fig, axs)` | Returns `(indices, width, height)` |
-| `auto_fwhm_arrows` | Yes | No |
+| `auto_fwhm_arrows` | Yes | Yes |
 | `cornertext` | Yes | Yes |
 
 ## API Reference

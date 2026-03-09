@@ -220,7 +220,7 @@ function time_1D(output, zslice=maximum(output["z"]);
     ylabel = y == :Et ? "Field ($unit)" : "Power ($unit)"
     if multimode && nmodes > 1
         sfig = _plot_slice_mm(t * 1e15, yfac * yt, zactual, modestrs, xlabel, ylabel,
-                              fwlabel=true)
+                              fwlabel=true; kwargs...)
     else
         sfig = newfig()
         zs = [@sprintf("%.2f cm", zi * 100) for zi in zactual]
@@ -229,7 +229,7 @@ function time_1D(output, zslice=maximum(output["z"]);
         for iz in eachindex(zactual)
             fw = Maths.fwhm(t * 1e15, yfac * yt[:, iz])
             lbl = labels[iz] * @sprintf(" [%.2f fs]", fw)
-            Makie.lines!(ax, t * 1e15, yfac * yt[:, iz]; label=lbl)
+            Makie.lines!(ax, t * 1e15, yfac * yt[:, iz]; label=lbl, kwargs...)
         end
         Makie.axislegend(ax, framevisible=false)
         Makie.xlims!(ax, (1e15 .* trange)...)
@@ -267,7 +267,7 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
 
     if multimode && nmodes > 1
         sfig = _plot_slice_mm(specx, Iω, zactual, modestrs, speclabel,
-                              "Spectral energy density", log10)
+                              "Spectral energy density", log10; kwargs...)
     else
         sfig = newfig()
         zs = [@sprintf("%.2f cm", zi * 100) for zi in zactual]
@@ -276,7 +276,7 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
         ax = Makie.Axis(sfig[1, 1], yscale=scale, xlabel=speclabel,
                         ylabel="Spectral energy density")
         for iz in eachindex(zactual)
-            Makie.lines!(ax, specx, Iω[:, iz], label=labels[iz])
+            Makie.lines!(ax, specx, Iω[:, iz]; label=labels[iz], kwargs...)
         end
         Makie.axislegend(ax, framevisible=false)
         log10 && Makie.ylims!(ax, 3 * maximum(Iω) * log10min, 3 * maximum(Iω))
@@ -285,7 +285,17 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
     sfig
 end
 
-function _plot_slice_mm(x, y, z, modestrs, xlabel, ylabel, log10=false; fwlabel=false)
+# Linestyle patterns for distinguishing modes in multi-mode plots
+const _mm_linestyles = [
+    :solid,
+    :dash,
+    :dot,
+    :dashdot,
+    :dashdotdot,
+]
+
+function _plot_slice_mm(x, y, z, modestrs, xlabel, ylabel, log10=false;
+                       fwlabel=false, kwargs...)
     pfig = newfig()
     scale = log10 ? Base.log10 : identity
     ax = Makie.Axis(pfig[1, 1], yscale=scale, xlabel=xlabel, ylabel=ylabel)
@@ -296,15 +306,17 @@ function _plot_slice_mm(x, y, z, modestrs, xlabel, ylabel, log10=false; fwlabel=
             fw = Maths.fwhm(x, y[:, 1, sidx])
             label *= @sprintf(" [%.2f fs]", fw)
         end
-        line = Makie.lines!(ax, x, y[:, 1, sidx]; label)
+        line = Makie.lines!(ax, x, y[:, 1, sidx]; label,
+                            linestyle=_mm_linestyles[1], kwargs...)
         for midx = 2:size(y, 2) # iterate over modes
             label = "$zs ($(modestrs[midx]))"
             if fwlabel
                 fw = Maths.fwhm(x, y[:, midx, sidx])
                 label *= @sprintf(" [%.2f fs]", fw)
             end
+            ls = _mm_linestyles[mod1(midx, length(_mm_linestyles))]
             Makie.lines!(ax, x, y[:, midx, sidx]; label,
-                         color=line.color, linestyle=:dash)
+                         color=line.color, linestyle=ls, kwargs...)
         end
     end
     Makie.axislegend(ax, framevisible=false)
@@ -325,9 +337,12 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
     specy, Ig = getIω(ω, g * Maths.rfftnorm(t[2] - t[1]), specaxis,
                       specrange=speclims ./ specyfac)
 
-    Ig = Maths.normbymax(Ig)
-    log && (Ig = 10 * log10.(Ig))
-    clims = log ? (dBmin, 0) : extrema(Ig)
+    if log
+        Ig = 10 * Base.log10.(Maths.normbymax(Ig))
+        clims = (dBmin, 0)
+    else
+        clims = extrema(Ig)
+    end
 
     cmap = get(kwargs, :cmap, :viridis)
 
@@ -378,14 +393,18 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     z = output["z"] * 100
     edata = ndims(e) > 1 ? e' : reshape(e, :, 1)
 
-    fig = newfig()
+    labels = multimode ? (modestrs isa AbstractString ? [modestrs] : modestrs) : nothing
+
+    fig = newfig(size=(round(Int, figsize[1]*100), round(Int, figsize[2]*100)))
     ax = Makie.Axis(fig[1, 1], xlabel="Distance (cm)", ylabel="Energy (μJ)")
     rax = Makie.Axis(fig[1, 1], yaxisposition=:right, ylabel="Conversion efficiency (%)")
     Makie.hidespines!(rax)
     Makie.hidexdecorations!(rax)
     for i in axes(edata, 2)
-        Makie.lines!(ax, z, 1e6 * edata[:, i])
+        lbl = isnothing(labels) ? nothing : labels[i]
+        Makie.lines!(ax, z, 1e6 * edata[:, i]; label=lbl)
     end
+    !isnothing(labels) && length(labels) > 1 && Makie.axislegend(ax, framevisible=false)
 
     maxe = maximum(1e6 * e)
     Makie.xlims!(ax, extrema(z)...)
@@ -393,6 +412,37 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     Makie.ylims!(rax, 0, 100 * maxe / 1e6 / e0)
     Makie.xlims!(rax, extrema(z)...)
     fig
+end
+
+"""
+    auto_fwhm_arrows(ax, x, y; color=:black, arrowlength=nothing, hpad=0, linewidth=1,
+                     text=nothing, units="fs", kwargs...)
+
+Draw FWHM arrows on an axis, indicating the full-width at half-maximum of the data `y(x)`.
+"""
+function auto_fwhm_arrows(ax, x, y; color=:black, arrowlength=nothing, hpad=0, linewidth=1,
+                                    text=nothing, units="fs", kwargs...)
+    left, right = Maths.level_xings(x, y; kwargs...)
+    fw = abs(right - left)
+    halfmax = maximum(y) / 2
+    arrowlength = isnothing(arrowlength) ? 2 * fw : arrowlength
+
+    # Left arrow
+    Makie.arrows!(ax, [left - hpad - arrowlength], [halfmax], [arrowlength], [0.0];
+                  color=color, linewidth=linewidth)
+    # Right arrow
+    Makie.arrows!(ax, [right + hpad + arrowlength], [halfmax], [-arrowlength], [0.0];
+                  color=color, linewidth=linewidth)
+
+    if text == :left
+        Makie.text!(ax, left - arrowlength / 2, 1.1 * halfmax;
+                    text=@sprintf("%.2f %s", fw, units),
+                    align=(:right, :bottom), color=color)
+    elseif text == :right
+        Makie.text!(ax, right + arrowlength / 2, 1.1 * halfmax;
+                    text=@sprintf("%.2f %s", fw, units),
+                    align=(:left, :bottom), color=color)
+    end
 end
 
 """
