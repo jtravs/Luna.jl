@@ -234,7 +234,7 @@ function TransModal(tT, grid, ts::Modes.ToSpace, FT, resp, densityfun, norm!;
     # For the modified shot-noise model, store the modal noise field and allocate a buffer
     # for the real-space time-domain noise. The noise is projected to space at each
     # integration point in Erω_to_Prω!, so we store it in the modal domain.
-    if noise_field !== nothing
+    if !isnothing(noise_field)
         Emω_noise = copy(noise_field)
         Er_noise = Array{tT,2}(undef, length(grid.to), ts.npol)
         Er_nl = Array{tT,2}(undef, length(grid.to), ts.npol)
@@ -309,7 +309,7 @@ function Erω_to_Prω!(t, x)
     # Modified shot-noise model: project noise modes to real space at this spatial point,
     # convert to oversampled time domain, and combine with field in a separate buffer (Er_nl)
     # so the propagating field (Er) is never contaminated.
-    if t.Emω_noise !== nothing
+    if !isnothing(t.Emω_noise)
         Modes.to_space!(t.Erω, t.Emω_noise, x, t.ts, z=t.z)
         to_time!(t.Er_noise, t.Erω, t.Erωo, inv(t.FT))
         @. t.Er_nl = t.Er + t.Er_noise
@@ -411,7 +411,7 @@ function TransModeAvg(TT, grid, FT, resp, densityfun, norm!, aeff; noise_field=n
     # Precompute time-domain noise on the oversampled grid if noise_field is provided.
     # Uses the same ω→t conversion path as to_time!: copy_scale! into oversampled spectral
     # array, then inverse FFT. The result is constant throughout propagation.
-    if noise_field !== nothing
+    if !isnothing(noise_field)
         Eωo_noise = zeros(ComplexF64, length(grid.ωo))
         Et_noise = zeros(TT, length(grid.to))
         to_time!(Et_noise, noise_field, Eωo_noise, inv(FT))
@@ -440,7 +440,7 @@ function (t::TransModeAvg)(nl, Eω, z)
     # Modified shot-noise model: compute field+noise in a separate buffer (Et_nl) so that
     # the propagating field (Eto) is never contaminated. The noise is scaled by the same
     # normalisation factor (nlscale × √Aeff) so it enters in physical units.
-    if t.Et_noise !== nothing
+    if !isnothing(t.Et_noise)
         @. t.Et_nl = t.Eto + t.Et_noise / sc
         Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z))
     else
@@ -536,7 +536,7 @@ function TransRadial(TT, grid, HT, FT, responses, densityfun, normfun; noise_fie
     Pωo = similar(Eωo)
     idcs = CartesianIndices(size(Pto)[2:end])
     # Precompute time-domain noise in real space: ω→t via to_time!, then k→r via QDHT⁻¹
-    if noise_field !== nothing
+    if !isnothing(noise_field)
         Eωo_noise = zeros(ComplexF64, (length(grid.ωo), HT.N))
         Et_noise = zeros(TT, (length(grid.to), HT.N))
         to_time!(Et_noise, noise_field, Eωo_noise, inv(FT))
@@ -568,7 +568,7 @@ function (t::TransRadial)(nl, Eω, z)
     ldiv!(t.Eto, t.QDHT, t.Eto) # transform k -> r
     # Modified shot-noise: compute field+noise in separate buffer (Et_nl) so the
     # propagating field (Eto) is never contaminated.
-    if t.Et_noise !== nothing
+    if !isnothing(t.Et_noise)
         @. t.Et_nl = t.Eto + t.Et_noise
         Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z), t.idcs)
     else
@@ -691,7 +691,7 @@ function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
     idcs = CartesianIndices((Ny, Nx))
     # Precompute time-domain noise in real space:
     # copy_scale! into oversampled spectral grid, then 3D IFFT: (ω,ky,kx) → (t,y,x)
-    if noise_field !== nothing
+    if !isnothing(noise_field)
         Eωo_noise = zeros(ComplexF64, (length(grid.ωo), Ny, Nx))
         N = length(grid.ω)
         copy_scale!(Eωo_noise, noise_field, N, scale)
@@ -732,7 +732,7 @@ function (t::TransFree)(nl, Eωk, z)
     ldiv!(t.Eto, t.FT, t.Eωo) # transform (ω, ky, kx) -> (t, y, x)
     # Modified shot-noise: compute field+noise in separate buffer (Et_nl) so the
     # propagating field (Eto) is never contaminated.
-    if t.Et_noise !== nothing
+    if !isnothing(t.Et_noise)
         @. t.Et_nl = t.Eto + t.Et_noise
         Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z), t.idcs)
     else
