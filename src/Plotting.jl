@@ -14,11 +14,12 @@ Return the currently loaded plotting backend extension. Tries PythonPlotExt, PyP
 and MakieExt in order.
 """
 function getext()
-    ext = Base.get_extension(@__MODULE__, :PythonPlotExt)
+    pkg = parentmodule(@__MODULE__)
+    ext = Base.get_extension(pkg, :PythonPlotExt)
     !isnothing(ext) && return ext
-    ext = Base.get_extension(@__MODULE__, :PyPlotExt)
+    ext = Base.get_extension(pkg, :PyPlotExt)
     !isnothing(ext) && return ext
-    ext = Base.get_extension(@__MODULE__, :MakieExt)
+    ext = Base.get_extension(pkg, :MakieExt)
     !isnothing(ext) && return ext
     error("No plotting backend loaded. Please load one of: PythonPlot, PyPlot, GLMakie, CairoMakie, or WGLMakie.")
 end

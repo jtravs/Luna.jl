@@ -1,19 +1,20 @@
-# This file is included by both PyPlotExt.jl and PythonPlotExt.jl.
-# It expects the following to be defined in the including module:
-#   plt        - the plotting module (PyPlot.plt or PythonPlot.pyplot)
-#   ColorMap   - the ColorMap constructor
-#   Figure     - the Figure type
-#   convertany(x) - identity for PyPlot, pyconvert(Any, x) for PythonPlot
-#   convertarray(x) - identity for PyPlot, pyconvert(Array, x) for PythonPlot
-#
-# And the following imports:
-#   Luna: Maths, Processing
-#   Luna.PhysData: wlfreq, c, ε_0
-#   Luna.Processing: makegrid, getIω, getEω, getEt, nearest_z
-#   Luna.Plotting: get_modes, power_unit, getspeclims, modeidcs, window_str, should_log10
-#   Printf: @sprintf
+# Common implementation for PyPlotExt and PythonPlotExt.
+# Expects the including module to define:
+#   plt          - the plotting module (PyPlot.plt or PythonPlot.pyplot)
+#   ColorMap     - the ColorMap constructor
+#   Figure       - the Figure type
+#   convertany(x)    - identity for PyPlot, pyconvert(Any, x) for PythonPlot
+#   convertarray(x)  - identity for PyPlot, pyconvert(Array, x) for PythonPlot
 
+import Luna: Maths, PhysData, Processing
+import Luna.PhysData: wlfreq, c, ε_0
+import Luna.Output: AbstractOutput
+import Luna.Processing: makegrid, getIω, getEω, getEt, nearest_z
 import Luna.Plotting
+import Luna.Plotting: get_modes, power_unit, getspeclims, modeidcs, window_str, should_log10
+import FFTW
+import Printf: @sprintf
+import Base: display
 
 """
     displayall()
@@ -160,6 +161,7 @@ function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bp
     id = "($(string(hash(gensym()); base=16)[1:4])) "
     num = id * "Propagation" * ((length(bpstr) > 0) ? ", $bpstr" : "")
     pfig, axs = plt.subplots(1, 2, num=num)
+    axs = convertarray(axs)
     pfig.set_size_inches(12, 4)
     Iω = Maths.normbymax(Iω)
     _spec2D_log(axs[1], specx, z, Iω, dBmin, speclabel, speclims; kwargs...)
@@ -178,6 +180,7 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
     for mi in modes
         num = id * "Propagation ($(modelabels[mi]))" * ((length(bpstr) > 0) ? ", $bpstr" : "")
         pfig, axs = plt.subplots(1, 2, num=num)
+        axs = convertarray(axs)
         pfig.set_size_inches(12, 4)
         _spec2D_log(axs[1], specx, z, Iω[:, mi, :], dBmin, speclabel, speclims; kwargs...)
         _time2D(axs[2], t, z, It[:, mi, :], trange; kwargs...)
@@ -186,6 +189,7 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
 
     num = id * "Propagation (all modes)" * ((length(bpstr) > 0) ? ", $bpstr" : "")
     pfig, axs = plt.subplots(1, 2, num=num)
+    axs = convertarray(axs)
     pfig.set_size_inches(12, 4)
     Iωall = dropdims(sum(Iω, dims=2), dims=2)
     _spec2D_log(axs[1], specx, z, Iωall, dBmin, speclabel, speclims; kwargs...)
