@@ -167,14 +167,14 @@ function _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; k
     pfig = newfig(size=(1000, 400))
     ax, hm = Makie.heatmap(pfig[1, 1], specx, z, 10 * log10.(Iω),
                            colorrange=(dBmin, 0), interpolate=false,
-                           colormap=cmap,
+                           rasterize=3, colormap=cmap,
                            axis=(; xlabel=speclabel, ylabel="Distance (cm)"))
     Makie.xlims!(ax, speclims)
     Makie.Colorbar(pfig[1, 2], hm, label="SED (dB)")
 
     Pfac, unit = power_unit(It)
     ax2, hm2 = Makie.heatmap(pfig[1, 3], t * 1e15, z, Pfac .* It,
-                             interpolate=false,
+                             interpolate=false, rasterize=3,
                              colormap=cmap,
                              axis=(; xlabel="Time (fs)", ylabel="Distance (cm)"))
     Makie.xlims!(ax2, trange .* 1e15)
@@ -362,7 +362,8 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
                          xspinesvisible=false, yspinesvisible=false))
     else
         ax, pl = Makie.heatmap(fig[1, 1], tg .* 1e15, specyfac * specy, Ig',
-                               colorrange=clims, interpolate=false, colormap=cmap,
+                               colorrange=clims, interpolate=false, rasterize=3,
+                               colormap=cmap,
                                axis=(; xlabel="Time (fs)", ylabel=speclabel))
         Makie.ylims!(ax, speclims)
     end
