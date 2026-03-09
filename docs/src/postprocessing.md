@@ -247,6 +247,17 @@ explicitly.
   **positive** GDD. Increasing `l1`/`l2` pushes the prism into the beam, adding more
   material and more positive GDD.
 
+!!! note "Insertion and separation convention"
+    With **`L_lightcon`**, `l1` and `l2` are independent: increasing either one adds
+    glass to the beam path and shifts the net GDD towards more positive values. This
+    matches the lab practice of translating a prism perpendicular to the beam.
+
+    With **Keller `L`** (apex-to-apex distance), only `l1` is a free parameter — `l2`
+    is determined by the ray trace. Changing `l1` shifts the beam entry point on
+    Prism 1, but the exit point on Prism 2 adjusts to compensate, so the **total**
+    glass path barely changes. To tune insertion with Keller `L`, adjust the
+    apex-to-apex distance instead.
+
 The net GDD can be tuned from strongly negative (large separation, small insertion) to
 positive (small separation, large insertion).
 

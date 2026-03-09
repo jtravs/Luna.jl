@@ -854,19 +854,25 @@ Eω2 = input(grid2, FT2)
 end
 
 # ---- Material insertion adds positive GDD ----
-# Increasing l1 or l2 should make the net GDD less negative (more positive)
-l_insert = 5e-3  # 5 mm insertion
-GDD_no_insert = _prism_GDD(ω0, 0.5, :SiO2, α, θi)
-# With insertion, compute GDD from full phase including material
+# Use L_lightcon convention so that l1/l2 are independently specified;
+# with Keller L the glass path in Prism 1 and Prism 2 cancel geometrically.
+l_insert = 10e-3  # 10 mm insertion per prism
+L_lc = 600e-3     # 600 mm Lightcon separation
 n_insert_ref = real(PhysData.ref_index_fun(:SiO2)(λ0))
-_, _, _A1_ins, _A2_ins = Fields._prism_apex_positions(α, θi, n_insert_ref, l_insert, l_insert; L=0.5)
-_ref_ins = Fields._trace_ray(n_insert_ref, α, θi, _A1_ins, _A2_ins, l_insert)
-_D_ref_ins = _ref_ins.D
-_d_input_ins = _d_input_fixed  # same direction
 _n_func_ins = PhysData.ref_index_fun(:SiO2)
+# No insertion
+_, _, _A1_no, _A2_no = Fields._prism_apex_positions(α, θi, n_insert_ref, 0.0, 0.0; L_lightcon=L_lc)
+_ref_no = Fields._trace_ray(n_insert_ref, α, θi, _A1_no, _A2_no, 0.0)
+GDD_no_insert = Maths.derivative(ω -> _prism_phase_fixed(ω, _A1_no, _A2_no,
+                                                          _n_func_ins, α, θi, 0.0;
+                                                          D_ref=_ref_no.D, d_input=_d_input_fixed),
+                                  ω0, 2)
+# With insertion
+_, _, _A1_ins, _A2_ins = Fields._prism_apex_positions(α, θi, n_insert_ref, l_insert, l_insert; L_lightcon=L_lc)
+_ref_ins = Fields._trace_ray(n_insert_ref, α, θi, _A1_ins, _A2_ins, l_insert)
 GDD_with_insert = Maths.derivative(ω -> _prism_phase_fixed(ω, _A1_ins, _A2_ins,
                                                             _n_func_ins, α, θi, l_insert;
-                                                            D_ref=_D_ref_ins, d_input=_d_input_ins),
+                                                            D_ref=_ref_ins.D, d_input=_d_input_fixed),
                                     ω0, 2)
 # With insertion, GDD should be more positive (less negative)
 @test GDD_with_insert > GDD_no_insert
