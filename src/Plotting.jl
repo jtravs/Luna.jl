@@ -7,18 +7,24 @@ import FFTW
 import Printf: @sprintf
 import Base: display
 
+"""
+    getext()
+
+Return the currently loaded plotting backend extension. Tries PythonPlotExt, PyPlotExt,
+and MakieExt in order.
+"""
 function getext()
     ext = Base.get_extension(@__MODULE__, :PythonPlotExt)
     !isnothing(ext) && return ext
     ext = Base.get_extension(@__MODULE__, :PyPlotExt)
     !isnothing(ext) && return ext
-    ext = Base.get_extension(@__MODULE__, :GLMakieExt)
+    ext = Base.get_extension(@__MODULE__, :MakieExt)
     !isnothing(ext) && return ext
-    error("Please load a plotting backend: PythonPlot, PyPlot, or GLMakie.")
+    error("No plotting backend loaded. Please load one of: PythonPlot, PyPlot, GLMakie, CairoMakie, or WGLMakie.")
 end
 
 """
-    cmap_white(cmap, N=512, n=8)
+    cmap_white(cmap; N=2^12, n=8)
 
 Replace the lowest colour stop of `cmap` (after splitting into `n` stops) with white and
 create a new colourmap with `N` stops.
@@ -31,7 +37,8 @@ end
     get_modes(output)
 
 Determine whether `output` contains a multimode simulation, and if so, return the names
-of the modes.
+of the modes. Returns `(multimode::Bool, labels)` where `labels` is a vector of mode name
+strings or `nothing` for single-mode simulations.
 """
 function get_modes(output)
     t = output["simulation_type"]["transform"]
@@ -44,7 +51,7 @@ function get_modes(output)
     angles = zeros(length(mlines))
     for (ii, li) in enumerate(mlines)
         m = match(r"ϕ=(-?[0-9]+.[0-9]+)π", li)
-        isnothing(m) && continue # no angle information in mode label)
+        isnothing(m) && continue # no angle information in mode label
         angles[ii] = parse(Float64, m.captures[1])
     end
     if !all(angles .== 0)
@@ -67,7 +74,8 @@ end
 """
     stats(output; kwargs...)
 
-Plot all statistics available in `output`. Additional `kwargs` are passed onto `pyplot.plot()`
+Plot all statistics available in `output`. Additional keyword arguments are passed to the
+plotting backend.
 """
 function stats(output; kwargs...)
     stats = output["stats"]
@@ -111,13 +119,19 @@ function stats(output; kwargs...)
     haskey(stats, "dz") && push!(fstats, (1e6*stats["dz"], "Stepsize (μm)"))
     haskey(stats, "core_radius") && push!(fstats, (1e6*stats["core_radius"], "Core radius (μm)"))
     haskey(stats, "zdw") && push!(fstats, (1e9*stats["zdw"], "ZDW (nm)"))
+    haskey(stats, "mode_reconstruction_error") && push!(
+        fstats, (stats["mode_reconstruction_error"], "Mode error"))
+    haskey(stats, "transverse_points") && push!(
+        fstats, (stats["transverse_points"], "Transverse grid points"))
+    haskey(stats, "transverse_integral_error_rel") && push!(
+        fstats, (stats["transverse_integral_error_rel"], "Transverse integral error (relative)"))
 
     z = stats["z"]*1e2
 
     multimode, modes = get_modes(output)
     modes = isnothing(modes) ? [""] : modes
 
-    getext().stats(pstats, fstats, multimode, modes; kwargs...)
+    getext().stats(z, pstats, fstats, multimode, modes; kwargs...)
 end
 
 """
@@ -143,7 +157,12 @@ modeidcs(m::Symbol, ml) = (m == :sum) ? [] : error("modes must be :sum, a single
 modeidcs(m::Nothing, ml) = 1:length(ml)
 modeidcs(m, ml) = m
 
-# Helper function to convert λrange to the correct numbers depending on specaxis
+"""
+    getspeclims(λrange, specaxis)
+
+Convert a wavelength range `λrange` (in metres) to the correct axis limits, label, and
+scale factor for the given `specaxis` (`:f`, `:ω`, or `:λ`).
+"""
 function getspeclims(λrange, specaxis)
     if specaxis == :f
         specxfac = 1e-15
@@ -163,7 +182,12 @@ function getspeclims(λrange, specaxis)
     return speclims, speclabel, specxfac
 end
 
-# Automatically find power unit depending on scale of electric field.
+"""
+    power_unit(Pt, y=:Pt)
+
+Automatically determine the appropriate power unit (kW to PW) based on the magnitude of `Pt`.
+Returns `(scale_factor, unit_string)`.
+"""
 function power_unit(Pt, y=:Pt)
     units = ["kW", "MW", "GW", "TW", "PW"]
     Pmax = maximum(Pt)
@@ -174,20 +198,23 @@ function power_unit(Pt, y=:Pt)
     else
         return powerfac, units[oom]
     end
-end   
+end
 
 """
-    prop_2D(output, specaxis=:f)
+    prop_2D(output, specaxis=:f; kwargs...)
 
-Make false-colour propagation plots for `output`, using spectral x-axis `specaxis` (see
-[`getIω`](@ref)). For multimode simulations, create one figure for each mode plus one for
-the sum of all modes.
+Make false-colour propagation plots for `output`, using spectral x-axis `specaxis`
+(`:f` for frequency, `:ω` for angular frequency, `:λ` for wavelength).
+For multimode simulations, create one figure for each mode plus one for the sum of all modes.
 
 # Keyword arguments
-- `λrange::Tuple(Float64, Float64)` : x-axis limits for spectral plot (wavelength in metres)
-- `trange::Tuple(Float64, Float64)` : x-axis limits for time-domain plot (time in seconds)
-- `dBmin::Float64` : lower colour-scale limit for logarithmic spectral plot
-- `resolution::Real` smooth the spectral energy density as defined by [`getIω`](@ref).
+- `λrange` : x-axis limits for spectral plot as `(λ_min, λ_max)` in metres
+- `trange` : x-axis limits for time-domain plot as `(t_min, t_max)` in seconds
+- `dBmin::Float64` : lower colour-scale limit for logarithmic spectral plot (default: -60)
+- `resolution` : smooth the spectral energy density (see [`getIω`](@ref))
+- `modes` : mode selection — `nothing` (all), `:sum`, integer, or range
+- `oversampling::Int` : time-domain oversampling factor (default: 4)
+- `bandpass` : bandpass filter wavelength range
 """
 function prop_2D(output, specaxis=:f;
                  trange=(-50e-15, 50e-15), bandpass=nothing,
@@ -199,19 +226,18 @@ function prop_2D(output, specaxis=:f;
 end
 
 """
-    time_1D(output, zslice, y=:Pt, kwargs...)
+    time_1D(output, zslice; y=:Pt, kwargs...)
 
-Create lineplots of time-domain slice(s) of the propagation.
+Create lineplots of time-domain slice(s) of the propagation at position(s) `zslice`.
 
-The keyword argument `y` determines
-what is plotted: `:Pt` (power, default), `:Esq` (squared electric field) or `:Et` (electric field).
-
-The keyword argument `modes` selects which modes (if present) are to be plotted, and can be
-a single index, a `range` or `:sum`. In the latter case, the sum of modes is plotted.
-
-The keyword argument `oversampling` determines the amount of oversampling done before plotting.
-
-Other `kwargs` are passed onto `pyplot.plot`.
+# Keyword arguments
+- `y` : quantity to plot — `:Pt` (power, default), `:Et` (electric field), or `:Esq` (field squared)
+- `modes` : mode selection — `nothing` (all), `:sum`, integer, or range
+- `oversampling::Int` : oversampling factor (default: 4)
+- `trange` : time-axis limits as `(t_min, t_max)` in seconds
+- `bandpass` : bandpass filter wavelength range
+- `FTL::Bool` : plot Fourier-transform-limited pulse (default: false)
+- `propagate` : propagation distance for additional dispersion
 """
 function time_1D(output, zslice=maximum(output["z"]);
                 y=:Pt, modes=nothing,
@@ -223,18 +249,17 @@ function time_1D(output, zslice=maximum(output["z"]);
 end
 
 """
-    spec_1D(output, zslice, specaxis=:λ, log10=true, log10min=1e-6)
+    spec_1D(output, zslice, specaxis=:λ; log10=true, kwargs...)
 
-Create lineplots of spectral-domain slices of the propagation.
+Create lineplots of spectral-domain slices of the propagation at position(s) `zslice`.
 
-The x-axis is determined by `specaxis` (see [`getIω`](@ref)).
-
-If `log10` is true, plot on a logarithmic scale, with a y-axis range of `log10min`. 
-
-The keyword argument `modes` selects which modes (if present) are to be plotted, and can be
-a single index, a `range` or `:sum`. In the latter case, the sum of modes is plotted.
-
-Other `kwargs` are passed onto `pyplot.plot`.
+# Keyword arguments
+- `specaxis` : spectral x-axis — `:λ` (wavelength, default), `:f` (frequency), or `:ω` (angular frequency)
+- `modes` : mode selection — `nothing` (all), `:sum`, integer, or range
+- `λrange` : x-axis limits as `(λ_min, λ_max)` in metres
+- `log10::Bool` : use logarithmic y-axis (default: true)
+- `log10min::Float64` : y-axis range for log scale, as fraction of maximum (default: 1e-6)
+- `resolution` : smooth the spectral energy density (see [`getIω`](@ref))
 """
 function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
                  modes=nothing, λrange=(150e-9, 1200e-9),
@@ -261,6 +286,20 @@ function spectrogram(grid::Grid.AbstractGrid, output, zslice, specaxis=:λ;
     spectrogram(t, Et, specaxis; kwargs...)
 end
 
+"""
+    spectrogram(t, Et, specaxis=:λ; trange, N, fw, kwargs...)
+
+Create a time-frequency spectrogram of the electric field `Et` on time grid `t`.
+
+# Keyword arguments
+- `specaxis` : spectral y-axis — `:λ` (wavelength, default), `:f` (frequency), or `:ω` (angular frequency)
+- `trange` : time-axis limits as `(t_min, t_max)` in seconds
+- `N::Int` : number of time points in the spectrogram
+- `fw` : gate function width for the Gabor transform
+- `λrange` : spectral-axis limits as `(λ_min, λ_max)` in metres
+- `log::Bool` : use logarithmic colour scale (default: false)
+- `dBmin::Float64` : lower colour-scale limit in dB when `log=true` (default: -40)
+"""
 function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
     trange, N, fw, λrange=(150e-9, 2000e-9), log=false, dBmin=-40,
     kwargs...)
@@ -268,6 +307,17 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
                          trange, N, fw, λrange, log, dBmin, kwargs...)
 end
 
+"""
+    energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
+
+Plot the energy evolution along the propagation, with a secondary axis showing
+conversion efficiency.
+
+# Keyword arguments
+- `modes` : mode selection — `nothing` (all), `:sum`, integer, or range
+- `bandpass` : bandpass filter wavelength range for energy calculation
+- `figsize` : figure size as `(width, height)`
+"""
 function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     getext().energy(output; modes, bandpass, figsize)
 end

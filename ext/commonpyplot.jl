@@ -1,10 +1,19 @@
-import Luna: Grid, Maths, PhysData, Processing
-import Luna.PhysData: wlfreq, c, ε_0
-import Luna.Output: AbstractOutput
-import Luna.Processing: makegrid, getIω, getEω, getEt, nearest_z
-import FFTW
-import Printf: @sprintf
-import Base: display
+# This file is included by both PyPlotExt.jl and PythonPlotExt.jl.
+# It expects the following to be defined in the including module:
+#   plt        - the plotting module (PyPlot.plt or PythonPlot.pyplot)
+#   ColorMap   - the ColorMap constructor
+#   Figure     - the Figure type
+#   convertany(x) - identity for PyPlot, pyconvert(Any, x) for PythonPlot
+#   convertarray(x) - identity for PyPlot, pyconvert(Array, x) for PythonPlot
+#
+# And the following imports:
+#   Luna: Maths, Processing
+#   Luna.PhysData: wlfreq, c, ε_0
+#   Luna.Processing: makegrid, getIω, getEω, getEt, nearest_z
+#   Luna.Plotting: get_modes, power_unit, getspeclims, modeidcs, window_str, should_log10
+#   Printf: @sprintf
+
+import Luna.Plotting
 
 """
     displayall()
@@ -16,13 +25,12 @@ function displayall()
         fig = plt.figure(fign)
         display(fig)
     end
-
 end
 
 display(figs::AbstractArray{Figure, N}) where N = [display(fig) for fig in figs]
 
 """
-    cmap_white(cmap, N=512, n=8)
+    cmap_white(cmap; N=2^12, n=8)
 
 Replace the lowest colour stop of `cmap` (after splitting into `n` stops) with white and
 create a new colourmap with `N` stops.
@@ -53,7 +61,7 @@ function cmap_colours(num, cmap="viridis"; cmin=0, cmax=0.8)
 end
 
 """
-    subplotgrid(N, portrait=true, kwargs...)
+    subplotgrid(N, portrait=true; colw=4, rowh=2.5, title=nothing)
 
 Create a figure with `N` subplots laid out in a grid that is as close to square as possible.
 If `portrait` is `true`, try to lay out the grid in portrait orientation (taller than wide),
@@ -63,7 +71,7 @@ function subplotgrid(N, portrait=true; colw=4, rowh=2.5, title=nothing)
     cols = ceil(Int, sqrt(N))
     rows = ceil(Int, N/cols)
     portrait && ((rows, cols) = (cols, rows))
-    fig, axs = pyplot.subplots(rows, cols, num=title)
+    fig, axs = plt.subplots(rows, cols, num=title)
     axs = convertany(axs)
     ndims(axs) > 1 && (axs = permutedims(axs, (2, 1)))
     if cols*rows > N
@@ -75,7 +83,7 @@ function subplotgrid(N, portrait=true; colw=4, rowh=2.5, title=nothing)
     fig, N > 1 ? axs : [axs]
 end
 
-function stats(pstats, fstats, multimode, modes; kwargs...)
+function stats(z, pstats, fstats, multimode, modes; kwargs...)
     Npl = length(pstats)
     if Npl > 0
         pfig, axs = subplotgrid(Npl, title="Pulse stats")
@@ -91,7 +99,7 @@ function stats(pstats, fstats, multimode, modes; kwargs...)
         end
         pfig.tight_layout()
     end
-    
+
     Npl = length(fstats)
     if Npl > 0
         ffig, axs = subplotgrid(Npl, title="Other stats")
@@ -111,17 +119,9 @@ function stats(pstats, fstats, multimode, modes; kwargs...)
 end
 
 """
-    prop_2D(output, specaxis=:f)
+    prop_2D(output, specaxis=:f; kwargs...)
 
-Make false-colour propagation plots for `output`, using spectral x-axis `specaxis` (see
-[`getIω`](@ref)). For multimode simulations, create one figure for each mode plus one for
-the sum of all modes.
-
-# Keyword arguments
-- `λrange::Tuple(Float64, Float64)` : x-axis limits for spectral plot (wavelength in metres)
-- `trange::Tuple(Float64, Float64)` : x-axis limits for time-domain plot (time in seconds)
-- `dBmin::Float64` : lower colour-scale limit for logarithmic spectral plot
-- `resolution::Real` smooth the spectral energy density as defined by [`getIω`](@ref).
+Make false-colour propagation plots for `output`.
 """
 function prop_2D(output, specaxis=:f;
                  trange=(-50e-15, 50e-15), bandpass=nothing,
@@ -130,9 +130,9 @@ function prop_2D(output, specaxis=:f;
                  kwargs...)
     z = output["z"]*1e2
     if specaxis == :λ
-            specx, Iω = getIω(output, specaxis, specrange=λrange, resolution=resolution)
+        specx, Iω = getIω(output, specaxis, specrange=λrange, resolution=resolution)
     else
-            specx, Iω = getIω(output, specaxis, resolution=resolution)
+        specx, Iω = getIω(output, specaxis, resolution=resolution)
     end
 
     t, Et = getEt(output; trange, bandpass, oversampling)
@@ -153,6 +153,202 @@ function prop_2D(output, specaxis=:f;
                          kwargs...)
     end
     fig
+end
+
+# single-mode 2D propagation plots
+function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bpstr; kwargs...)
+    id = "($(string(hash(gensym()); base=16)[1:4])) "
+    num = id * "Propagation" * ((length(bpstr) > 0) ? ", $bpstr" : "")
+    pfig, axs = plt.subplots(1, 2, num=num)
+    pfig.set_size_inches(12, 4)
+    Iω = Maths.normbymax(Iω)
+    _spec2D_log(axs[1], specx, z, Iω, dBmin, speclabel, speclims; kwargs...)
+    _time2D(axs[2], t, z, It, trange; kwargs...)
+    pfig.tight_layout()
+    return pfig
+end
+
+# multi-mode 2D propagation plots
+function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
+                    speclabel, speclims, trange, dBmin, bpstr;
+                    kwargs...)
+    pfigs = Figure[]
+    Iω = Maths.normbymax(Iω)
+    id = "($(string(hash(gensym()); base=16)[1:4])) "
+    for mi in modes
+        num = id * "Propagation ($(modelabels[mi]))" * ((length(bpstr) > 0) ? ", $bpstr" : "")
+        pfig, axs = plt.subplots(1, 2, num=num)
+        pfig.set_size_inches(12, 4)
+        _spec2D_log(axs[1], specx, z, Iω[:, mi, :], dBmin, speclabel, speclims; kwargs...)
+        _time2D(axs[2], t, z, It[:, mi, :], trange; kwargs...)
+        push!(pfigs, pfig)
+    end
+
+    num = id * "Propagation (all modes)" * ((length(bpstr) > 0) ? ", $bpstr" : "")
+    pfig, axs = plt.subplots(1, 2, num=num)
+    pfig.set_size_inches(12, 4)
+    Iωall = dropdims(sum(Iω, dims=2), dims=2)
+    _spec2D_log(axs[1], specx, z, Iωall, dBmin, speclabel, speclims; kwargs...)
+
+    Itall = dropdims(sum(It, dims=2), dims=2)
+    _time2D(axs[2], t, z, Itall, trange; kwargs...)
+    pfig.tight_layout()
+    push!(pfigs, pfig)
+
+    return pfigs
+end
+
+# a single logarithmic colour-scale spectral domain plot
+function _spec2D_log(ax, specx, z, I, dBmin, speclabel, speclims; kwargs...)
+    im = ax.pcolormesh(specx, z, 10*log10.(transpose(I)); shading="auto", kwargs...)
+    im.set_clim(dBmin, 0)
+    cb = plt.colorbar(im, ax=ax)
+    cb.set_label("SED (dB)")
+    ax.set_ylabel("Distance (cm)")
+    ax.set_xlabel(speclabel)
+    ax.set_xlim(speclims...)
+end
+
+# a single time-domain propagation plot
+function _time2D(ax, t, z, I, trange; kwargs...)
+    Pfac, unit = power_unit(I)
+    im = ax.pcolormesh(t*1e15, z, Pfac*transpose(I); shading="auto", kwargs...)
+    cb = plt.colorbar(im, ax=ax)
+    cb.set_label("Power ($unit)")
+    ax.set_xlim(trange.*1e15)
+    ax.set_xlabel("Time (fs)")
+    ax.set_ylabel("Distance (cm)")
+end
+
+"""
+    time_1D(output, zslice; y=:Pt, kwargs...)
+
+Create lineplots of time-domain slice(s) of the propagation.
+"""
+function time_1D(output, zslice=maximum(output["z"]);
+                y=:Pt, modes=nothing,
+                oversampling=4, trange=(-50e-15, 50e-15), bandpass=nothing,
+                FTL=false, propagate=nothing,
+                kwargs...)
+    t, Et, zactual = getEt(output, zslice,
+                           trange=trange, oversampling=oversampling, bandpass=bandpass,
+                           FTL=FTL, propagate=propagate)
+    if y == :Pt
+        yt = abs2.(Et)
+    elseif y == :Et
+        yt = real(Et)
+    elseif y == :Esq
+        yt = real(Et).^2
+    else
+        error("unknown time plot variable $y")
+    end
+    multimode, modestrs = get_modes(output)
+    if multimode
+        if modes == :sum
+            y == :Pt || error("Modal sum can only be plotted for power!")
+            yt = dropdims(sum(yt, dims=2), dims=2)
+            modestrs = join(modestrs, "+")
+            nmodes = 1
+        else
+            isnothing(modes) && (modes = 1:length(modestrs))
+            yt = yt[:, modes, :]
+            modestrs = modestrs[modes]
+            nmodes = length(modes)
+        end
+    end
+
+    yfac, unit = power_unit(abs2.(Et), y)
+
+    sfig = plt.figure()
+    if multimode && nmodes > 1
+        _plot_slice_mm(plt.gca(), t*1e15, yfac*yt, zactual, modestrs; kwargs...)
+    else
+        zs = [@sprintf("%.2f cm", zi*100) for zi in zactual]
+        label = multimode ? zs.*" ($modestrs)" : zs
+        for iz in eachindex(zactual)
+            plt.plot(t*1e15, yfac*yt[:, iz]; label=label[iz], kwargs...)
+        end
+    end
+    plt.legend(frameon=false)
+    add_fwhm_legends(plt.gca(), "fs")
+    plt.xlabel("Time (fs)")
+    plt.xlim(1e15.*trange)
+    ylab = y == :Et ?  "Field ($unit)" : "Power ($unit)"
+    plt.ylabel(ylab)
+    y == :Et || plt.ylim(ymin=0)
+    sfig.set_size_inches(8.5, 5)
+    sfig.tight_layout()
+    sfig
+end
+
+"""
+    spec_1D(output, zslice, specaxis=:λ; log10=true, kwargs...)
+
+Create lineplots of spectral-domain slices of the propagation.
+"""
+function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
+                 modes=nothing, λrange=(150e-9, 1200e-9),
+                 log10=true, log10min=1e-6, resolution=nothing,
+                 kwargs...)
+    if specaxis == :λ
+        specx, Iω, zactual = getIω(output, specaxis, zslice, specrange=λrange, resolution=resolution)
+    else
+        specx, Iω, zactual = getIω(output, specaxis, zslice, resolution=resolution)
+    end
+    speclims, speclabel, specxfac = getspeclims(λrange, specaxis)
+    multimode, modestrs = get_modes(output)
+    if multimode
+        modes = isnothing(modes) ? (1:size(Iω, 2)) : modes
+        if modes == :sum
+            Iω = dropdims(sum(Iω, dims=2), dims=2)
+            modestrs = join(modestrs, "+")
+            nmodes = 1
+        else
+            isnothing(modes) && (modes = 1:length(modestrs))
+            Iω = Iω[:, modes, :]
+            modestrs = modestrs[modes]
+            nmodes = length(modes)
+        end
+    end
+
+    specx .*= specxfac
+
+    sfig = plt.figure()
+    if multimode && nmodes > 1
+        _plot_slice_mm(plt.gca(), specx, Iω, zactual, modestrs, log10; kwargs...)
+    else
+        zs = [@sprintf("%.2f cm", zi*100) for zi in zactual]
+        label = multimode ? zs.*" ($modestrs)" : zs
+        for iz in eachindex(zactual)
+            (log10 ? plt.semilogy : plt.plot)(specx, Iω[:, iz]; label=label[iz], kwargs...)
+        end
+    end
+    plt.legend(frameon=false)
+    plt.xlabel(speclabel)
+    plt.ylabel("Spectral energy density")
+    log10 && plt.ylim(3*maximum(Iω)*log10min, 3*maximum(Iω))
+    plt.xlim(speclims...)
+    sfig.set_size_inches(8.5, 5)
+    sfig.tight_layout()
+    sfig
+end
+
+dashes = [(0, (10, 1)),
+          (0, (5, 1)),
+          (0, (1, 0.5)),
+          (0, (1, 0.5, 1, 0.5, 3, 1)),
+          (0, (5, 1, 1, 1))]
+
+function _plot_slice_mm(ax, x, y, z, modestrs, log10=false, fwhm=false; kwargs...)
+    pfun = (log10 ? ax.semilogy : ax.plot)
+    for sidx = 1:size(y, 3) # iterate over z-slices
+        zs = @sprintf("%.2f cm", z[sidx]*100)
+        line = pfun(x, y[:, 1, sidx]; label="$zs ($(modestrs[1]))", kwargs...)[1]
+        for midx = 2:size(y, 2) # iterate over modes
+            pfun(x, y[:, midx, sidx], linestyle=dashes[midx], color=line.get_color(),
+                 label="$zs ($(modestrs[midx]))"; kwargs...)
+        end
+    end
 end
 
 function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
@@ -219,6 +415,12 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     fig
 end
 
+"""
+    auto_fwhm_arrows(ax, x, y; color="k", arrowlength=nothing, hpad=0, linewidth=1,
+                     text=nothing, units="fs", kwargs...)
+
+Draw FWHM arrows on an axis, indicating the full-width at half-maximum of the data `y(x)`.
+"""
 function auto_fwhm_arrows(ax, x, y; color="k", arrowlength=nothing, hpad=0, linewidth=1,
                                     text=nothing, units="fs", kwargs...)
     left, right = Maths.level_xings(x, y; kwargs...)
@@ -246,6 +448,11 @@ function auto_fwhm_arrows(ax, x, y; color="k", arrowlength=nothing, hpad=0, line
     end
 end
 
+"""
+    add_fwhm_legends(ax, unit)
+
+Enhance the legend of `ax` by appending the FWHM of each plotted line to its label.
+"""
 function add_fwhm_legends(ax, unit)
     leg = ax.get_legend()
     texts = leg.get_texts()
@@ -263,12 +470,10 @@ function add_fwhm_legends(ax, unit)
 end
 
 """
-    cornertext(ax, text;
-               corner="ul", pad=0.02, xpad=nothing, ypad=nothing, kwargs...)
+    cornertext(ax, text; corner="ul", pad=0.02, xpad=nothing, ypad=nothing, kwargs...)
 
 Place a `text` in the axes `ax` in the corner defined by `corner`. Padding can be
-defined for `x` and `y` together via `pad` or separately via `xpad` and `ypad`. Further
-keyword arguments are passed to `pyplot.text`. 
+defined for `x` and `y` together via `pad` or separately via `xpad` and `ypad`.
 
 Possible values for `corner` are `ul`, `ur`, `ll`, `lr` where the first letter
 defines upper/lower and the second defines left/right.
@@ -297,4 +502,3 @@ function cornertext(ax, text; corner="ul", pad=0.02, xpad=nothing, ypad=nothing,
     ax.text(x, y, text; horizontalalignment=hal, verticalalignment=val,
                  transform=ax.transAxes, kwargs...)
 end
-

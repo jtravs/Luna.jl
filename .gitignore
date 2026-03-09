@@ -12,3 +12,4 @@ docs/build
 .vscode/spellright.dict
 .CondaPkg
 deps/build.log
+.DS_Store

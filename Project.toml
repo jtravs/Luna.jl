@@ -6,7 +6,7 @@ authors = ["chrisbrahms <38351086+chrisbrahms@users.noreply.github.com>"]
 [extensions]
 PythonPlotExt = ["PythonPlot", "PythonCall"]
 PyPlotExt = ["PyPlot"]
-GLMakieExt = ["GLMakie"]
+MakieExt = ["Makie"]
 
 [deps]
 ArgParse = "c7e460c6-2fb9-53a9-8c5b-16f535851c63"
@@ -60,7 +60,7 @@ Unitful = "1986cc42-f94f-5a68-af5c-568840ba703d"
 PythonCall = "6099a3de-0909-46bc-b1f4-468b9a2dfc0d"
 PythonPlot = "274fc56d-3b97-40fa-a1cd-1b4a50311bf9"
 PyPlot = "d330b81b-6aea-500a-939a-2ce795aea3ee"
-GLMakie = "e9467ef8-e4e7-5192-8a1a-b1aee30e663a"
+Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
 
 [compat]
 ArgParse = "1"
@@ -87,6 +87,7 @@ HCubature = "1.5"
 HDF5 = "0.15, 0.16, 0.17"
 Hankel = "0.5.5"
 HypergeometricFunctions = "0.3.28"
+Makie = "0.21, 0.22"
 LibGit2 = "1.9"
 LinearAlgebra = "1.9"
 Logging = "1.9"
