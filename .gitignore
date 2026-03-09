@@ -8,6 +8,7 @@ deps/deps.jl
 Manifest.toml
 _git2_*
 docs/build
+docs/src/generated
 *.info
 .vscode/spellright.dict
 .CondaPkg
