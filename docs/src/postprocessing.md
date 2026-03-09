@@ -4,7 +4,7 @@ After propagating a pulse through a fibre (or other nonlinear medium) with Luna,
 output frequency-domain field `Eω` can be further manipulated to simulate optical
 elements encountered after the fibre: mirrors, bulk materials, gratings, prisms, and
 more. This page describes how to use the `prop_*` (propagation) and `optcomp_*`
-(optimised compression) functions in the [`Fields`](@ref) module.
+(optimised compression) functions in the [`Fields`](modules/Fields.md) module.
 
 All functions follow a consistent convention:
 - **In-place** versions are named `prop_X!(Eω, ω, ...)` and modify `Eω` directly.
@@ -16,7 +16,7 @@ All functions follow a consistent convention:
 
 ## Extracting fields from simulation output
 
-After running a simulation with [`prop_capillary`](@ref) (or the low-level interface), the
+After running a simulation with `prop_capillary` (or the low-level interface), the
 output field at the end of the fibre can be retrieved using [`Processing.getEω`](@ref):
 
 ```julia
@@ -352,7 +352,7 @@ L_opt, Eω_compressed = Fields.optcomp_prisms(Eω_chirped, grid, :SiO2, α, θi;
 
 ## Waveguide mode propagation
 
-[`Fields.prop_mode!`](@ref) / [`Fields.prop_mode`](@ref) propagate the field along a
+[`Fields.prop_mode!`](@ref) / [`Fields.prop_mode`](@ref Fields.prop_mode!) propagate the field along a
 waveguide mode, including both dispersion and loss:
 
 ```julia
