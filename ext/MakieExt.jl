@@ -185,9 +185,10 @@ end
 
 function _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; title=nothing, kwargs...)
     cmap = get(kwargs, :cmap, :viridis)
-    pfig = newfig(size=(1000, 400))
+    pfig = newfig(size=(1000, 450))
     if !isnothing(title)
         Makie.Label(pfig[0, :], title, font=:bold)
+        Makie.rowsize!(pfig.layout, 0, Makie.Fixed(20))
     end
     ax, hm = Makie.heatmap(pfig[1, 1], specx, z, 10 * log10.(Iω),
                            colorrange=(dBmin, 0), interpolate=false,
@@ -203,6 +204,16 @@ function _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; t
                              axis=(; xlabel="Time (fs)", ylabel="Distance (cm)"))
     Makie.xlims!(ax2, trange .* 1e15)
     Makie.Colorbar(pfig[1, 4], hm2, label=tex("Power ($unit)"))
+    
+    # Ensure plots have equal width and colorbars are narrow
+    Makie.colsize!(pfig.layout, 1, Makie.Relative(0.42))
+    Makie.colsize!(pfig.layout, 2, Makie.Fixed(15))
+    Makie.colsize!(pfig.layout, 3, Makie.Relative(0.42))
+    Makie.colsize!(pfig.layout, 4, Makie.Fixed(15))
+    Makie.colgap!(pfig.layout, 1, Makie.Fixed(5))
+    Makie.colgap!(pfig.layout, 2, Makie.Fixed(40))
+    Makie.colgap!(pfig.layout, 3, Makie.Fixed(5))
+    
     pfig
 end
 
