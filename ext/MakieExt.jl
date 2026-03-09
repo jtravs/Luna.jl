@@ -49,6 +49,15 @@ function newfig(; size=(800, 600))
     fig
 end
 
+function display_fig(fig)
+    backend = Makie.current_backend()
+    if nameof(backend) == :GLMakie && isdefined(backend, :Screen)
+        display(backend.Screen(), fig)
+    else
+        display(fig)
+    end
+end
+
 function cmap_white(cmap; N=2^12, n=8)
     cm = Makie.to_colormap(cmap, n)
     cm[1] = Makie.RGBAf(1, 1, 1, 1)
@@ -98,7 +107,7 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
             multimode && size(data, 1) > 1 && Makie.axislegend(ax, framevisible=false)
         end
         push!(figs, pfig)
-        display(pfig)
+        display_fig(pfig)
     end
 
     Npl = length(fstats)
@@ -117,7 +126,7 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
             multimode && size(data, 1) > 1 && Makie.axislegend(ax, framevisible=false)
         end
         push!(figs, ffig)
-        display(ffig)
+        display_fig(ffig)
     end
     figs
 end
@@ -158,7 +167,7 @@ end
 function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bpstr; kwargs...)
     Iω = Maths.normbymax(Iω)
     fig = _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; kwargs...)
-    display(fig)
+    display_fig(fig)
     fig
 end
 
@@ -170,7 +179,7 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
     for mi in modes
         pfig = _prop2D_fig(specx, z, Iω[:, mi, :], dBmin, speclabel, speclims,
                            t, It[:, mi, :], trange; title=modelabels[mi], kwargs...)
-        display(pfig)
+        display_fig(pfig)
         push!(pfigs, pfig)
     end
 
@@ -178,7 +187,7 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
     Itall = dropdims(sum(It, dims=2), dims=2)
     pfig = _prop2D_fig(specx, z, Iωall, dBmin, speclabel, speclims,
                        t, Itall, trange; title="All modes", kwargs...)
-    display(pfig)
+    display_fig(pfig)
     push!(pfigs, pfig)
     return pfigs
 end
@@ -270,7 +279,7 @@ function time_1D(output, zslice=maximum(output["z"]);
         Makie.xlims!(ax, (1e15 .* trange)...)
         y == :Et || Makie.ylims!(ax, 0, nothing)
     end
-    display(sfig)
+    display_fig(sfig)
     sfig
 end
 
@@ -318,7 +327,7 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
         log10 && Makie.ylims!(ax, 3 * maximum(Iω) * log10min, 3 * maximum(Iω))
         Makie.xlims!(ax, speclims...)
     end
-    display(sfig)
+    display_fig(sfig)
     sfig
 end
 
@@ -352,7 +361,7 @@ function _plot_slice_mm(x, y, z, modestrs, xlabel, ylabel, log10=false;
         end
     end
     Makie.axislegend(ax, framevisible=false)
-    display(pfig)
+    display_fig(pfig)
     pfig
 end
 
@@ -409,7 +418,7 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
         Makie.ylims!(ax, speclims)
     end
     Makie.Colorbar(fig[1, 2], pl)
-    display(fig)
+    display_fig(fig)
     fig
 end
 
@@ -454,7 +463,7 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     Makie.ylims!(ax, 0, maxe)
     Makie.ylims!(rax, 0, 100 * maxe / 1e6 / e0)
     Makie.xlims!(rax, extrema(z)...)
-    display(fig)
+    display_fig(fig)
     fig
 end
 
