@@ -30,12 +30,6 @@ end
 
 display(figs::AbstractArray{Figure, N}) where N = [display(fig) for fig in figs]
 
-"""
-    cmap_white(cmap; N=2^12, n=8)
-
-Replace the lowest colour stop of `cmap` (after splitting into `n` stops) with white and
-create a new colourmap with `N` stops.
-"""
 function cmap_white(cmap; N=2^12, n=8)
     vals = collect(range(0, 1, length=n))
     vals_i = collect(range(0, 1, length=N))
@@ -119,11 +113,6 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
     [pfig, ffig]
 end
 
-"""
-    prop_2D(output, specaxis=:f; kwargs...)
-
-Make false-colour propagation plots for `output`.
-"""
 function prop_2D(output, specaxis=:f;
                  trange=(-50e-15, 50e-15), bandpass=nothing,
                  λrange=(150e-9, 2000e-9), dBmin=-60,
@@ -224,11 +213,6 @@ function _time2D(ax, t, z, I, trange; kwargs...)
     ax.set_ylabel("Distance (cm)")
 end
 
-"""
-    time_1D(output, zslice; y=:Pt, kwargs...)
-
-Create lineplots of time-domain slice(s) of the propagation.
-"""
 function time_1D(output, zslice=maximum(output["z"]);
                 y=:Pt, modes=nothing,
                 oversampling=4, trange=(-50e-15, 50e-15), bandpass=nothing,
@@ -285,11 +269,6 @@ function time_1D(output, zslice=maximum(output["z"]);
     sfig
 end
 
-"""
-    spec_1D(output, zslice, specaxis=:λ; log10=true, kwargs...)
-
-Create lineplots of spectral-domain slices of the propagation.
-"""
 function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
                  modes=nothing, λrange=(150e-9, 1200e-9),
                  log10=true, log10min=1e-6, resolution=nothing,

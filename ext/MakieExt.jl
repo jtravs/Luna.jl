@@ -14,12 +14,6 @@ function newfig(; size=(800, 600))
     Makie.Figure(; size)
 end
 
-"""
-    cmap_white(cmap; N=2^12, n=8)
-
-Replace the lowest colour stop of `cmap` (after splitting into `n` stops) with white and
-create a new colourmap with `N` stops.
-"""
 function cmap_white(cmap; N=2^12, n=8)
     cm = Makie.to_colormap(cmap, n)
     cm[1] = Makie.RGBAf(1, 1, 1, 1)
@@ -73,7 +67,7 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
         for n in 1:Npl
             data, ylabel = pstats[n]
             scale = (multimode && ndims(data) > 1) ? log10 : identity
-            data = (multimode && ndims(data) > 1) ? data' : reshape(data, 1, :)
+            data = (multimode && ndims(data) > 1) ? data : reshape(data, 1, :)
             data = (scale == log10) ? max.(data, 1e-300) : data
             ax = Makie.Axis(pfig[idcs[n]...]; xlabel="Distance (cm)", ylabel, yscale=scale)
             for i in axes(data, 1)
@@ -91,7 +85,7 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
         for n in 1:Npl
             data, ylabel = fstats[n]
             scale = (multimode && ndims(data) > 1 && should_log10(data)) ? log10 : identity
-            data = (multimode && ndims(data) > 1) ? data' : reshape(data, 1, :)
+            data = (multimode && ndims(data) > 1) ? data : reshape(data, 1, :)
             data = (scale == log10) ? max.(data, 1e-300) : data
             ax = Makie.Axis(ffig[idcs[n]...]; xlabel="Distance (cm)", ylabel, yscale=scale)
             for i in axes(data, 1)
