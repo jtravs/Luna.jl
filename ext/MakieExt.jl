@@ -10,14 +10,28 @@ import Makie
 
 import Luna.Plotting
 
+function tex(s)
+    if contains(s, '$')
+        try
+            return Makie.LaTeXString(s)
+        catch
+            return s
+        end
+    end
+    return s
+end
+
 function newfig(; size=(800, 600))
-    Makie.Figure(; size)
+    fig = Makie.Figure(; size)
+    if nameof(Makie.current_backend()) in (:GLMakie, :WGLMakie)
+        Makie.DataInspector(fig)
+    end
+    fig
 end
 
 function cmap_white(cmap; N=2^12, n=8)
     cm = Makie.to_colormap(cmap, n)
     cm[1] = Makie.RGBAf(1, 1, 1, 1)
-    # Interpolate to N stops using linear interpolation
     result = Vector{Makie.RGBAf}(undef, N)
     for i in 1:N
         t = (i - 1) / (N - 1)
@@ -33,24 +47,12 @@ function cmap_white(cmap; N=2^12, n=8)
     result
 end
 
-"""
-    cmap_colours(num, cmap=:viridis; cmin=0, cmax=0.8)
-
-Make an array of `num` different colours that follow the colourmap `cmap` between the values
-`cmin` and `cmax`.
-"""
 function cmap_colours(num, cmap=:viridis; cmin=0, cmax=0.8)
     cm = Makie.to_colormap(cmap, 256)
     n = range(cmin, cmax; length=num)
     [cm[clamp(round(Int, v * 255) + 1, 1, 256)] for v in n]
 end
 
-"""
-    subplotgrid(N, portrait=true; colw=350, rowh=250, title=nothing)
-
-Compute grid indices and figure size for `N` subplots.
-Returns `(indices, width, height)` where `indices` is an array of `(row, col)` tuples.
-"""
 function subplotgrid(N, portrait=true; colw=350, rowh=250, title=nothing)
     cols = ceil(Int, sqrt(N))
     rows = ceil(Int, N / cols)
@@ -69,13 +71,14 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
             scale = (multimode && ndims(data) > 1) ? log10 : identity
             data = (multimode && ndims(data) > 1) ? data : reshape(data, 1, :)
             data = (scale == log10) ? max.(data, 1e-300) : data
-            ax = Makie.Axis(pfig[idcs[n]...]; xlabel="Distance (cm)", ylabel, yscale=scale)
+            ax = Makie.Axis(pfig[idcs[n]...]; xlabel="Distance (cm)", ylabel=tex(ylabel), yscale=scale)
             for i in axes(data, 1)
                 Makie.lines!(ax, z, data[i, :], label=modes[i])
             end
             multimode && size(data, 1) > 1 && Makie.axislegend(ax, framevisible=false)
         end
         push!(figs, pfig)
+        display(pfig)
     end
 
     Npl = length(fstats)
@@ -87,13 +90,14 @@ function stats(z, pstats, fstats, multimode, modes; kwargs...)
             scale = (multimode && ndims(data) > 1 && should_log10(data)) ? log10 : identity
             data = (multimode && ndims(data) > 1) ? data : reshape(data, 1, :)
             data = (scale == log10) ? max.(data, 1e-300) : data
-            ax = Makie.Axis(ffig[idcs[n]...]; xlabel="Distance (cm)", ylabel, yscale=scale)
+            ax = Makie.Axis(ffig[idcs[n]...]; xlabel="Distance (cm)", ylabel=tex(ylabel), yscale=scale)
             for i in axes(data, 1)
                 Makie.lines!(ax, z, data[i, :], label=modes[i])
             end
             multimode && size(data, 1) > 1 && Makie.axislegend(ax, framevisible=false)
         end
         push!(figs, ffig)
+        display(ffig)
     end
     figs
 end
@@ -119,24 +123,25 @@ function prop_2D(output, specaxis=:f;
     multimode, modelabels = get_modes(output)
 
     if multimode
-        fig = _prop2D_mm(modelabels, modeidcs(modes, modelabels), t, z, specx, It, Iω,
+        figs = _prop2D_mm(modelabels, modeidcs(modes, modelabels), t, z, specx, It, Iω,
                          speclabel, speclims, trange, dBmin, window_str(bandpass);
                          kwargs...)
     else
         fig = _prop2D_sm(t, z, specx, It, Iω,
                          speclabel, speclims, trange, dBmin, window_str(bandpass);
                          kwargs...)
+        figs = [fig]
     end
+    figs
+end
+
+function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bpstr; kwargs...)
+    Iω = Maths.normbymax(Iω)
+    fig = _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; kwargs...)
+    display(fig)
     fig
 end
 
-# single-mode 2D propagation plots
-function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bpstr; kwargs...)
-    Iω = Maths.normbymax(Iω)
-    _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; kwargs...)
-end
-
-# multi-mode 2D propagation plots
 function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
                     speclabel, speclims, trange, dBmin, bpstr;
                     kwargs...)
@@ -144,25 +149,30 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
     Iω = Maths.normbymax(Iω)
     for mi in modes
         pfig = _prop2D_fig(specx, z, Iω[:, mi, :], dBmin, speclabel, speclims,
-                           t, It[:, mi, :], trange; kwargs...)
+                           t, It[:, mi, :], trange; title=modelabels[mi], kwargs...)
+        display(pfig)
         push!(pfigs, pfig)
     end
 
     Iωall = dropdims(sum(Iω, dims=2), dims=2)
     Itall = dropdims(sum(It, dims=2), dims=2)
     pfig = _prop2D_fig(specx, z, Iωall, dBmin, speclabel, speclims,
-                       t, Itall, trange; kwargs...)
+                       t, Itall, trange; title="All modes", kwargs...)
+    display(pfig)
     push!(pfigs, pfig)
     return pfigs
 end
 
-function _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; kwargs...)
+function _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; title=nothing, kwargs...)
     cmap = get(kwargs, :cmap, :viridis)
     pfig = newfig(size=(1000, 400))
+    if !isnothing(title)
+        Makie.Label(pfig[0, :], title, font=:bold)
+    end
     ax, hm = Makie.heatmap(pfig[1, 1], specx, z, 10 * log10.(Iω),
                            colorrange=(dBmin, 0), interpolate=false,
                            rasterize=3, colormap=cmap,
-                           axis=(; xlabel=speclabel, ylabel="Distance (cm)"))
+                           axis=(; xlabel=tex(speclabel), ylabel="Distance (cm)"))
     Makie.xlims!(ax, speclims)
     Makie.Colorbar(pfig[1, 2], hm, label="SED (dB)")
 
@@ -172,7 +182,7 @@ function _prop2D_fig(specx, z, Iω, dBmin, speclabel, speclims, t, It, trange; k
                              colormap=cmap,
                              axis=(; xlabel="Time (fs)", ylabel="Distance (cm)"))
     Makie.xlims!(ax2, trange .* 1e15)
-    Makie.Colorbar(pfig[1, 4], hm2, label="Power ($unit)")
+    Makie.Colorbar(pfig[1, 4], hm2, label=tex("Power ($unit)"))
     pfig
 end
 
@@ -219,7 +229,7 @@ function time_1D(output, zslice=maximum(output["z"]);
         sfig = newfig()
         zs = [@sprintf("%.2f cm", zi * 100) for zi in zactual]
         labels = multimode ? zs .* " ($modestrs)" : zs
-        ax = Makie.Axis(sfig[1, 1]; xlabel, ylabel)
+        ax = Makie.Axis(sfig[1, 1]; xlabel=tex(xlabel), ylabel=tex(ylabel))
         for iz in eachindex(zactual)
             fw = Maths.fwhm(t * 1e15, yfac * yt[:, iz])
             lbl = labels[iz] * @sprintf(" [%.2f fs]", fw)
@@ -229,6 +239,7 @@ function time_1D(output, zslice=maximum(output["z"]);
         Makie.xlims!(ax, (1e15 .* trange)...)
         y == :Et || Makie.ylims!(ax, 0, nothing)
     end
+    display(sfig)
     sfig
 end
 
@@ -267,8 +278,8 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
         zs = [@sprintf("%.2f cm", zi * 100) for zi in zactual]
         labels = multimode ? zs .* " ($modestrs)" : zs
         scale = log10 ? Base.log10 : identity
-        ax = Makie.Axis(sfig[1, 1], yscale=scale, xlabel=speclabel,
-                        ylabel="Spectral energy density")
+        ax = Makie.Axis(sfig[1, 1], yscale=scale, xlabel=tex(speclabel),
+                        ylabel=tex("Spectral energy density"))
         for iz in eachindex(zactual)
             Makie.lines!(ax, specx, Iω[:, iz]; label=labels[iz], kwargs...)
         end
@@ -276,10 +287,10 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
         log10 && Makie.ylims!(ax, 3 * maximum(Iω) * log10min, 3 * maximum(Iω))
         Makie.xlims!(ax, speclims...)
     end
+    display(sfig)
     sfig
 end
 
-# Linestyle patterns for distinguishing modes in multi-mode plots
 const _mm_linestyles = [
     :solid,
     :dash,
@@ -292,35 +303,40 @@ function _plot_slice_mm(x, y, z, modestrs, xlabel, ylabel, log10=false;
                        fwlabel=false, kwargs...)
     pfig = newfig()
     scale = log10 ? Base.log10 : identity
-    ax = Makie.Axis(pfig[1, 1], yscale=scale, xlabel=xlabel, ylabel=ylabel)
+    ax = Makie.Axis(pfig[1, 1], yscale=scale, xlabel=tex(xlabel), ylabel=tex(ylabel))
     for sidx = 1:size(y, 3) # iterate over z-slices
         zs = @sprintf("%.2f cm", z[sidx] * 100)
-        label = "$zs ($(modestrs[1]))"
-        if fwlabel
-            fw = Maths.fwhm(x, y[:, 1, sidx])
-            label *= @sprintf(" [%.2f fs]", fw)
-        end
-        line = Makie.lines!(ax, x, y[:, 1, sidx]; label,
-                            linestyle=_mm_linestyles[1], kwargs...)
-        for midx = 2:size(y, 2) # iterate over modes
+        # Using a fixed color per z-slice, but different linestyle per mode
+        for midx = 1:size(y, 2)
             label = "$zs ($(modestrs[midx]))"
             if fwlabel
                 fw = Maths.fwhm(x, y[:, midx, sidx])
                 label *= @sprintf(" [%.2f fs]", fw)
             end
-            ls = _mm_linestyles[mod1(midx, length(_mm_linestyles))]
-            Makie.lines!(ax, x, y[:, midx, sidx]; label,
-                         color=line.color, linestyle=ls, kwargs...)
+            Makie.lines!(ax, x, y[:, midx, sidx];
+                         label=label,
+                         linestyle=_mm_linestyles[mod1(midx, length(_mm_linestyles))],
+                         color=Makie.Cycled(sidx),
+                         kwargs...)
         end
     end
     Makie.axislegend(ax, framevisible=false)
+    display(pfig)
     pfig
 end
 
+function spectrogram(output, zslice=maximum(output["z"]), specaxis=:λ;
+                      trange, N, fw, λrange=(150e-9, 2000e-9), log=false, dBmin=-40,
+                      surface3d=false,
+                      kwargs...)
+    t, Et, zactual = getEt(output, zslice; trange=trange)
+    spectrogram(t, Et, specaxis; trange, N, fw, λrange, log, dBmin, surface3d, kwargs...)
+end
+
 function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
-                     trange, N, fw, λrange=(150e-9, 2000e-9), log=false, dBmin=-40,
-                     surface3d=false,
-                     kwargs...)
+                      trange, N, fw, λrange=(150e-9, 2000e-9), log=false, dBmin=-40,
+                      surface3d=false,
+                      kwargs...)
     ω = Maths.rfftfreq(t)[2:end]
     tmin, tmax = extrema(trange)
     tg = collect(range(tmin, tmax, length=N))
@@ -346,7 +362,7 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
                          colorrange=clims, colormap=cmap,
                          axis=(; type=Makie.Axis3, azimuth=pi / 4, elevation=pi / 4,
                          protrusions=75, perspectiveness=0.0, viewmode=:stretch,
-                         xlabel="Time (fs)", ylabel=speclabel, ylabeloffset=80,
+                         xlabel=tex("Time (fs)"), ylabel=tex(speclabel), ylabeloffset=80,
                          xlabeloffset=80, zgridvisible=false, zlabelvisible=false,
                          zticksvisible=false, zticklabelsvisible=false,
                          yzpanelvisible=false, xzpanelvisible=false,
@@ -358,10 +374,11 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
         ax, pl = Makie.heatmap(fig[1, 1], tg .* 1e15, specyfac * specy, Ig',
                                colorrange=clims, interpolate=false, rasterize=3,
                                colormap=cmap,
-                               axis=(; xlabel="Time (fs)", ylabel=speclabel))
+                               axis=(; xlabel=tex("Time (fs)"), ylabel=tex(speclabel)))
         Makie.ylims!(ax, speclims)
     end
     Makie.Colorbar(fig[1, 2], pl)
+    display(fig)
     fig
 end
 
@@ -391,8 +408,8 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     labels = multimode ? (modestrs isa AbstractString ? [modestrs] : modestrs) : nothing
 
     fig = newfig(size=(round(Int, figsize[1]*100), round(Int, figsize[2]*100)))
-    ax = Makie.Axis(fig[1, 1], xlabel="Distance (cm)", ylabel="Energy (μJ)")
-    rax = Makie.Axis(fig[1, 1], yaxisposition=:right, ylabel="Conversion efficiency (%)")
+    ax = Makie.Axis(fig[1, 1], xlabel=tex("Distance (cm)"), ylabel=tex("Energy (μJ)"))
+    rax = Makie.Axis(fig[1, 1], yaxisposition=:right, ylabel=tex("Conversion efficiency (%)"))
     Makie.hidespines!(rax)
     Makie.hidexdecorations!(rax)
     for i in axes(edata, 2)
@@ -406,15 +423,10 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     Makie.ylims!(ax, 0, maxe)
     Makie.ylims!(rax, 0, 100 * maxe / 1e6 / e0)
     Makie.xlims!(rax, extrema(z)...)
+    display(fig)
     fig
 end
 
-"""
-    auto_fwhm_arrows(ax, x, y; color=:black, arrowlength=nothing, hpad=0, linewidth=1,
-                     text=nothing, units="fs", kwargs...)
-
-Draw FWHM arrows on an axis, indicating the full-width at half-maximum of the data `y(x)`.
-"""
 function auto_fwhm_arrows(ax, x, y; color=:black, arrowlength=nothing, hpad=0, linewidth=1,
                                     text=nothing, units="fs", kwargs...)
     left, right = Maths.level_xings(x, y; kwargs...)
@@ -422,10 +434,8 @@ function auto_fwhm_arrows(ax, x, y; color=:black, arrowlength=nothing, hpad=0, l
     halfmax = maximum(y) / 2
     arrowlength = isnothing(arrowlength) ? 2 * fw : arrowlength
 
-    # Left arrow
     Makie.arrows!(ax, [left - hpad - arrowlength], [halfmax], [arrowlength], [0.0];
                   color=color, linewidth=linewidth)
-    # Right arrow
     Makie.arrows!(ax, [right + hpad + arrowlength], [halfmax], [-arrowlength], [0.0];
                   color=color, linewidth=linewidth)
 
@@ -440,14 +450,6 @@ function auto_fwhm_arrows(ax, x, y; color=:black, arrowlength=nothing, hpad=0, l
     end
 end
 
-"""
-    cornertext(ax, text; corner="ul", pad=0.02, xpad=nothing, ypad=nothing, kwargs...)
-
-Place a `text` in the axes `ax` in the corner defined by `corner`.
-
-Possible values for `corner` are `ul`, `ur`, `ll`, `lr` where the first letter
-defines upper/lower and the second defines left/right.
-"""
 function cornertext(ax, text; corner="ul", pad=0.02, xpad=nothing, ypad=nothing, kwargs...)
     xpad = isnothing(xpad) ? pad : xpad
     ypad = isnothing(ypad) ? pad : ypad
