@@ -11,6 +11,26 @@ import Makie
 import Luna.Plotting
 
 function tex(s)
+    # Prefer unicode superscripts for common cases to keep font consistency
+    # (LaTeXString often uses a different math font which can look out of place)
+    # We replace patterns with and without the $ delimiters to catch various sources
+    replacements = [
+        "\$^{1/2}\$" => "¹/²",
+        "\$^2\$" => "²",
+        "\$^3\$" => "³",
+        "\$^{-3}\$" => "⁻³",
+        "\$^{1/2}" => "¹/²",
+        "\$^2" => "²",
+        "\$^3" => "³",
+        "\$^{-3}" => "⁻³",
+        "^2" => "²",
+        "^3" => "³",
+        "^{-3}" => "⁻³",
+    ]
+    for r in replacements
+        s = replace(s, r)
+    end
+    
     if contains(s, '$')
         try
             return Makie.LaTeXString(s)
