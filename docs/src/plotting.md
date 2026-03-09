@@ -1,14 +1,49 @@
 # Plotting
 
-Luna provides built-in plotting functions through a backend extension system. Three backends are supported: **PythonPlot** (recommended, matplotlib via PythonCall), **PyPlot** (legacy matplotlib via PyCall), and **Makie** (native Julia, supporting GLMakie, CairoMakie, and WGLMakie).
+Luna provides built-in plotting functions through a backend extension system. Three backends are supported: **Makie** (recommended, native Julia), **PythonPlot** (matplotlib via PythonCall), and **PyPlot** (legacy matplotlib via PyCall).
 
 ## Choosing a backend
 
-### PythonPlot (recommended)
+### Makie (recommended)
+```julia
+using Luna, CairoMakie  # static (PDF/SVG/PNG)
+using Luna, GLMakie      # interactive (OpenGL)
+using Luna, WGLMakie     # web-based (browser/notebooks)
+```
+[Makie](https://docs.makie.org/) is a pure-Julia plotting library and the recommended backend for Luna. Any Makie backend triggers the Luna plotting extension. Choose based on your use case:
+- **CairoMakie**: high-quality static output for publications (PDF, SVG, PNG)
+- **GLMakie**: interactive plots with pan/zoom in standalone windows
+- **WGLMakie**: interactive plots in web browsers, Jupyter notebooks, and VSCode
+
+**Installation:**
+```julia
+using Pkg
+Pkg.add("CairoMakie")  # or "GLMakie" or "WGLMakie"
+```
+
+!!! tip "Switching Makie backends"
+    You can switch between Makie backends within a single Julia session using `activate!()`:
+    ```julia
+    using Luna, CairoMakie    # start with static output
+    Plotting.prop_2D(output)   # renders as PNG/SVG
+
+    GLMakie.activate!()        # switch to interactive
+    Plotting.prop_2D(output)   # now interactive with pan/zoom
+    ```
+    This is particularly useful when developing interactively: use GLMakie or WGLMakie for exploration, then switch to CairoMakie for publication-quality output.
+
+!!! tip "Interactive plots in VSCode and Jupyter"
+    WGLMakie provides fully interactive plots (pan, zoom, hover) directly inside VSCode's Julia plot pane and in Jupyter notebooks — no external window required:
+    ```julia
+    using Luna, WGLMakie
+    Plotting.prop_2D(output)  # interactive plot in your editor
+    ```
+
+### PythonPlot
 ```julia
 using Luna, PythonPlot
 ```
-PythonPlot uses [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl) to interface with matplotlib. It is the recommended backend for publication-quality figures.
+PythonPlot uses [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl) to interface with matplotlib. A good choice if you are already familiar with matplotlib or need specific matplotlib features.
 
 **Installation:**
 ```julia
@@ -20,7 +55,7 @@ Pkg.add(["PythonPlot", "PythonCall"])
 ```julia
 using Luna, PyPlot
 ```
-PyPlot uses [PyCall.jl](https://github.com/JuliaPy/PyCall.jl) to interface with matplotlib. It provides the same functionality as PythonPlot but uses the older PyCall interface.
+PyPlot uses the older [PyCall.jl](https://github.com/JuliaPy/PyCall.jl) interface to matplotlib. It provides the same functionality as PythonPlot. Use this if you have an existing PyCall-based workflow.
 
 **Installation:**
 ```julia
@@ -28,25 +63,8 @@ using Pkg
 Pkg.add("PyPlot")
 ```
 
-### Makie (native Julia)
-```julia
-using Luna, GLMakie   # interactive (OpenGL)
-using Luna, CairoMakie # static (PDF/SVG/PNG)
-using Luna, WGLMakie   # web-based (browser)
-```
-Makie is a pure-Julia plotting library. Any Makie backend triggers the Luna plotting extension. Choose based on your use case:
-- **GLMakie**: interactive plots with pan/zoom
-- **CairoMakie**: static high-quality output for publications
-- **WGLMakie**: interactive plots in web browsers and notebooks
-
-**Installation:**
-```julia
-using Pkg
-Pkg.add("GLMakie")  # or "CairoMakie" or "WGLMakie"
-```
-
 !!! note
-    Only one plotting backend can be active at a time. If multiple are loaded, Luna uses the first one found in the order: PythonPlot, PyPlot, Makie.
+    If multiple plotting packages are loaded, Luna uses the first backend found in the order: PythonPlot, PyPlot, Makie.
 
 ## Quick reference
 

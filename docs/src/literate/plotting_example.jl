@@ -1,14 +1,14 @@
 # # Plotting examples
 #
-# This page demonstrates Luna's built-in plotting functions using the PythonPlot backend.
-# The same functions work with PyPlot and Makie backends.
+# This page demonstrates Luna's built-in plotting functions using the CairoMakie backend.
+# The same functions work identically with GLMakie, WGLMakie, PythonPlot, and PyPlot.
 #
 # ## Setup
 #
 # First, we run a simple hollow capillary fibre simulation: dispersive wave emission
 # in the deep UV from a few-cycle 800 nm pump pulse.
 
-using Luna, PythonPlot
+using Luna, CairoMakie
 
 radius = 125e-6
 flength = 1.5
@@ -61,10 +61,15 @@ Plotting.spec_1D(output; modes=:sum, λrange=(150e-9, 1000e-9))
 Plotting.spectrogram(output, flength; trange=(-20e-15, 30e-15),
                      λrange=(150e-9, 1000e-9), N=256, fw=3e-15)
 
+# With the Makie backend, you can also create a 3D surface spectrogram using `surface3d=true`:
+
+Plotting.spectrogram(output, flength; trange=(-20e-15, 30e-15),
+                     λrange=(150e-9, 1000e-9), N=256, fw=3e-15, surface3d=true)
+
 # ## Statistics
 #
 # [`Plotting.stats`](@ref) automatically plots all available propagation statistics
-# (energy, peak power, FWHM, etc.).
+# (energy, peak power, FWHM, electron density, etc.).
 
 Plotting.stats(output)
 

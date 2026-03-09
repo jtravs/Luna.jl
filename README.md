@@ -42,12 +42,13 @@ Luna requires Julia v1.9 or later, which can be obtained from [here](https://jul
 ]
 add Luna
 ```
-This will install and precompile Luna and all its dependencies. For plotting you also need to install a plotting backend. We recommend `PythonPlot` which can be installed by calling:
+This will install and precompile Luna and all its dependencies. For plotting you also need to install a plotting backend. We recommend [Makie](https://docs.makie.org/), a pure-Julia plotting library:
 
 ```julia
 ]
-add PythonPlot, PythonCall
+add CairoMakie
 ```
+CairoMakie produces high-quality static figures (PDF/SVG/PNG). For interactive plots with pan/zoom, use `GLMakie` instead, or `WGLMakie` for interactive plots in VSCode and Jupyter notebooks. You can also use `PythonPlot` (matplotlib via PythonCall) or `PyPlot` (legacy matplotlib via PyCall) — see the [plotting documentation](http://lupo-lab.com/Luna.jl/dev/plotting.html) for details.
 
 ## Quickstart
 To run a simple simulation of ultrafast pulse propagation in a gas-filled hollow capillary fibre, you can use `prop_capillary`. As an example, take a 3-metre length of HCF with 125 μm core radius, filled with 1 bar of helium gas, and driving pulses centred at 800 nm wavelength with 120 μJ of energy and 10 fs duration. We consider a frequency grid which spans from 120 nm to 4 μm and a time window of 1 ps.
@@ -91,32 +92,28 @@ julia> output_multimode["Eω"]
 ```
 **NOTE:** Setting `modes=:HE11` and `modes=1` are **not** equivalent, except if only the Kerr effect is included in the simulation. The former uses mode-averaged propagation (treating all spatial dependence of the nonlinear polarisation the same as the Kerr effect) whereas the latter projects the spatially dependent nonlinear polarisation onto a single mode. This difference is especially important when photoionisation plays a major role.
 ### Plotting results
-More usefully, you can directly plot the propagation results using `Plotting.prop_2D()`. While `Plotting` is imported at the same time as `prop_capillary` by the `using Luna` statement, you also need to import a plotting backend, e.g. `PythonPlot`:
+More usefully, you can directly plot the propagation results using `Plotting.prop_2D()`. While `Plotting` is imported at the same time as `prop_capillary` by the `using Luna` statement, you also need to import a plotting backend, e.g. `CairoMakie`:
 ```julia
-julia> using PythonPlot
+julia> using CairoMakie
 julia> Plotting.prop_2D(output)
-Python Figure: <Figure size 1200x400 with 4 Axes>
 ```
 This should show a plot like this:
 ![Propagation example 1](assets/readme_modeAvgProp.png)
 You can also display the power spectrum at the input and output (and anywhere in between):
 ```julia
 julia> Plotting.spec_1D(output, [0, 1.5, 3]; log10=true)
-Python Figure: <Figure size 850x500 with 1 Axes>
 ```
 which will show this:
 ![Propagation example 2](assets/readme_modeAvgSpec.png)
 `Plotting` functions accept many additional keyword arguments to quickly display relevant information. For example, you can show the bandpass-filtered UV pulse from the simulation using the `bandpass` argument:
 ```julia
 julia> Plotting.time_1D(output, [2, 2.5, 3]; trange=(-10e-15, 30e-15), bandpass=(180e-9, 220e-9))
-Python Figure: <Figure size 850x500 with 1 Axes>
 ```
 ![Propagation example 3](assets/readme_modeAvgTime.png)
 
 For multi-mode simulations, the plotting functions will display all modes individually by default. You can display the sum over modes instead using `modes=:sum`:
 ```julia
 julia> Plotting.spec_1D(output_multimode; log10=true, modes=:sum)
-Python Figure: <Figure size 850x500 with 1 Axes>
 ```
 ![Propagation example 4](assets/readme_multiModeSpec.png)
 (Compare this to the mode-averaged case above and note the important differences, e.g. the appearance of additional ultraviolet dispersive waves in higher-order modes.)
@@ -144,16 +141,15 @@ MemoryOutput["simulation_type", "dumps", "meta", "Eω", "prop_capillary_args", "
 ```
 After this has run, you can visualise the output, with e.g.
 ```julia
-julia> using PythonPlot
+julia> using CairoMakie
 julia> Plotting.prop_2D(output_gnlse, :λ, dBmin=-40.0,  λrange=(400e-9, 1300e-9), trange=(-1e-12, 5e-12))
-Python Figure: <Figure size 1200x400 with 4 Axes>
 ```
 This should show a plot like this:
 ![GNLSE propagation example](assets/readme_gnlse_scg.png)
 
 
 ## Examples
-The [examples folder](examples/) contains complete simulation examples for a variety of scenarios, both for the [simple interface](examples/simple_interface/) and the [low-level interface](examples/low_level_interface). Some of the simple interface examples require the `PythonPlot` package to be present, and many of the low-level examples require other packages as well--you can install these by simply typing `] add PythonPlot` at the Julia REPL or the equivalent for other packages.
+The [examples folder](examples/) contains complete simulation examples for a variety of scenarios, both for the [simple interface](examples/simple_interface/) and the [low-level interface](examples/low_level_interface). Some of the simple interface examples require a plotting backend (e.g. `CairoMakie` or `PythonPlot`) to be present, and many of the low-level examples require other packages as well--you can install these by simply typing `] add CairoMakie` at the Julia REPL or the equivalent for other packages.
 
 ## The low-level interface
 At its core, Luna is extremely flexible, and the simple interface using `prop_capillary` only exposes part of what Luna can do. There are lots of examples in the [low-level interface examples folder](examples/low_level_interface). These are not actively maintained and are not guaranteed to run. As a side effect of its flexibility, it is quite easy to make mistakes when using the low-level interface. For example, changing from single-mode to multi-mode propagation in a fibre requires several concurrent changes to your code. If you have trouble with this interface, [open an issue](https://github.com/LupoLab/Luna/issues/new) with as much detail as possible and we will try to help you run it.
@@ -162,7 +158,12 @@ At its core, Luna is extremely flexible, and the simple interface using `prop_ca
 Luna comes with a built-in interface which allows for the running of single- and multi-dimensional parameter scans with very little additional code. An example can be found in the [examples folder](examples/simple_interface/scan.jl) and more information is available in the [documentation](http://lupo-lab.com/Luna.jl/dev/scans.html).
 
 ## Plotting backends
-Luna supports three plotting backends; PythonPlot, PyPlot and GLMakie. For most use cases, you should use PythonPlot. We support PyPlot for backwards compatibility. Currently, support for GLMakie is experimental.
+Luna supports three plotting backends through Julia's package extension system:
+- **[Makie](https://docs.makie.org/)** (recommended) — pure Julia. Use `CairoMakie` for static output, `GLMakie` for interactive windows, or `WGLMakie` for interactive plots in VSCode and Jupyter notebooks. You can switch between Makie backends within a session using e.g. `GLMakie.activate!()`.
+- **PythonPlot** — matplotlib via [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl). A good choice if you prefer the matplotlib ecosystem.
+- **PyPlot** — matplotlib via [PyCall.jl](https://github.com/JuliaPy/PyCall.jl). Legacy backend for backwards compatibility.
+
+See the [plotting documentation](http://lupo-lab.com/Luna.jl/dev/plotting.html) for full details.
 
 ## New to Julia?
 There are many resources to help you learn Julia. A good place to start is [Julia Academy](https://juliaacademy.com/) which has several courses for learning Julia depending on your current experience. There are additional resources linked from the [Julia website](https://julialang.org/learning/).
