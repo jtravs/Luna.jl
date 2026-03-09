@@ -14,6 +14,7 @@ makedocs(
             "Nonlinear responses" => "model/nonlinear_responses.md"
         ],
         "The simple interface" => "interface.md",
+        "Plotting" => "plotting.md",
         "Parameter scans" => "scans.md",
         "Modules" => [
             "$(split(fi, ".")[1]).jl" => "modules/$fi" for fi in readdir(modulesdir)
