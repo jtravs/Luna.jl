@@ -4,14 +4,15 @@ Run from the Luna root directory:
 
     julia --project scripts/generate_figures.jl
 
-This requires CairoMakie to be installed. All figures are saved as SVG
+This requires PythonPlot to be installed. All figures are saved as SVG
 in the assets/ and docs/src/assets/ directories.
 
 To regenerate figures after changing the plotting code or simulation parameters,
 simply re-run this script.
 =#
 
-using Luna, CairoMakie
+using Luna, PythonPlot
+const plt = PythonPlot.pyplot
 
 assetsdir = joinpath(@__DIR__, "..", "assets")
 docassetsdir = joinpath(@__DIR__, "..", "docs", "src", "assets")
@@ -29,18 +30,18 @@ output = prop_capillary(125e-6, 3, :He, 1;
 # Figure 1: prop_2D
 println("  Generating prop_2D figure...")
 fig = Plotting.prop_2D(output)
-save(joinpath(assetsdir, "readme_modeAvgProp.svg"), fig)
+fig.savefig(joinpath(assetsdir, "readme_modeAvgProp.svg"))
 
 # Figure 2: spec_1D at three z-positions
 println("  Generating spec_1D figure...")
 fig = Plotting.spec_1D(output, [0, 1.5, 3]; log10=true)
-save(joinpath(assetsdir, "readme_modeAvgSpec.svg"), fig)
+fig.savefig(joinpath(assetsdir, "readme_modeAvgSpec.svg"))
 
 # Figure 3: time_1D with bandpass filter (UV pulse)
 println("  Generating time_1D figure...")
 fig = Plotting.time_1D(output, [2, 2.5, 3];
     trange=(-10e-15, 30e-15), bandpass=(180e-9, 220e-9))
-save(joinpath(assetsdir, "readme_modeAvgTime.svg"), fig)
+fig.savefig(joinpath(assetsdir, "readme_modeAvgTime.svg"))
 
 # ============================================================================
 # README figures — multi-mode HCF propagation
@@ -53,7 +54,7 @@ output_multimode = prop_capillary(125e-6, 3, :He, 1;
 # Figure 4: spec_1D with modes summed
 println("  Generating multimode spec_1D figure...")
 fig = Plotting.spec_1D(output_multimode; log10=true, modes=:sum)
-save(joinpath(assetsdir, "readme_multiModeSpec.svg"), fig)
+fig.savefig(joinpath(assetsdir, "readme_multiModeSpec.svg"))
 
 # ============================================================================
 # README figures — GNLSE supercontinuum generation
@@ -71,7 +72,7 @@ output_gnlse = prop_gnlse(γ, flength, βs;
 println("  Generating GNLSE prop_2D figure...")
 fig = Plotting.prop_2D(output_gnlse, :λ;
     dBmin=-40.0, λrange=(400e-9, 1300e-9), trange=(-1e-12, 5e-12))
-save(joinpath(assetsdir, "readme_gnlse_scg.svg"), fig)
+fig.savefig(joinpath(assetsdir, "readme_gnlse_scg.svg"))
 
 # ============================================================================
 # docs/src/scans.md figure — pressure-energy scan
@@ -105,20 +106,21 @@ end
 end
 
 println("  Generating scan spectrum figure...")
-fig = Figure(size=(1200, 300))
+npress = length(pressures)
+fig, axs = plt.subplots(1, npress, figsize=(4*npress, 3))
 for (pidx, pressure) in enumerate(pressures)
-    ax = Axis(fig[1, pidx];
-        xlabel="Wavelength (nm)", ylabel="Energy (μJ)",
-        title="Pressure: $pressure bar")
+    ax = npress == 1 ? axs : axs[pidx-1]
     data = 10 * Maths.log10_norm(Iλ[:, :, pidx])
-    hm = heatmap!(ax, λ * 1e9, energies * 1e6, data;
-        colorrange=(-40, 0), colormap=:viridis, rasterize=3)
-    xlims!(ax, 100, 1200)
-    if pidx == length(pressures)
-        Colorbar(fig[1, pidx+1], hm; label="Energy density (dB)")
-    end
+    hm = ax.pcolormesh(λ * 1e9, energies * 1e6, data';
+        vmin=-40, vmax=0, cmap="viridis", rasterized=true)
+    ax.set_xlim(100, 1200)
+    ax.set_xlabel("Wavelength (nm)")
+    ax.set_ylabel("Energy (μJ)")
+    ax.set_title("Pressure: $pressure bar")
 end
-save(joinpath(docassetsdir, "scan_spectrum.svg"), fig)
+fig.colorbar(hm, ax=axs, label="Energy density (dB)")
+fig.tight_layout()
+fig.savefig(joinpath(docassetsdir, "scan_spectrum.svg"))
 
 # Clean up temporary scan output
 rm(outputdir; recursive=true)

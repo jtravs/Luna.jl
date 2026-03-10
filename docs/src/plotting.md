@@ -1,19 +1,34 @@
 # Plotting
 
-Luna provides built-in plotting functions through a backend extension system. Three backends are supported: **Makie** (recommended, native Julia), **PythonPlot** (matplotlib via PythonCall), and **PyPlot** (legacy matplotlib via PyCall).
+Luna provides built-in plotting functions through a backend extension system. Three backends are supported: **PythonPlot** (recommended, full matplotlib capability), **Makie** (native Julia with advanced features), and **PyPlot** (legacy, kept for backward compatibility).
 
 ## Choosing a backend
 
-### Makie (recommended)
+### PythonPlot (recommended)
+```julia
+using Luna, PythonPlot
+```
+[PythonPlot](https://github.com/JuliaPy/PythonPlot.jl) uses [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl) to provide the full capability of [matplotlib](https://matplotlib.org/) from Julia. This is the recommended backend for Luna: matplotlib is mature, well-documented, and highly customisable.
+
+**Installation:**
+```julia
+using Pkg
+Pkg.add(["PythonPlot", "PythonCall"])
+```
+
+### Makie (native Julia)
 ```julia
 using Luna, CairoMakie  # static (PDF/SVG/PNG)
 using Luna, GLMakie      # interactive (OpenGL)
 using Luna, WGLMakie     # web-based (browser/notebooks)
 ```
-[Makie](https://docs.makie.org/) is a pure-Julia plotting library and the recommended backend for Luna. Any Makie backend triggers the Luna plotting extension. Choose based on your use case:
+[Makie](https://docs.makie.org/) is a pure-Julia plotting library offering a native Julia experience with advanced features such as interactive 3D spectrograms. Any Makie backend triggers the Luna plotting extension. Choose based on your use case:
 - **CairoMakie**: high-quality static output for publications (PDF, SVG, PNG)
 - **GLMakie**: interactive plots with pan/zoom in standalone windows
 - **WGLMakie**: interactive plots in web browsers, Jupyter notebooks, and VSCode
+
+!!! note
+    The Makie backend is fully functional but may have occasional bugs. If you encounter issues, try the PythonPlot backend instead.
 
 **Installation:**
 ```julia
@@ -39,23 +54,11 @@ Pkg.add("CairoMakie")  # or "GLMakie" or "WGLMakie"
     Plotting.prop_2D(output)  # interactive plot in your editor
     ```
 
-### PythonPlot
-```julia
-using Luna, PythonPlot
-```
-PythonPlot uses [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl) to interface with matplotlib. A good choice if you are already familiar with matplotlib or need specific matplotlib features.
-
-**Installation:**
-```julia
-using Pkg
-Pkg.add(["PythonPlot", "PythonCall"])
-```
-
 ### PyPlot (legacy)
 ```julia
 using Luna, PyPlot
 ```
-PyPlot uses the older [PyCall.jl](https://github.com/JuliaPy/PyCall.jl) interface to matplotlib. It provides the same functionality as PythonPlot. Use this if you have an existing PyCall-based workflow.
+PyPlot uses the older [PyCall.jl](https://github.com/JuliaPy/PyCall.jl) interface to matplotlib. PyPlot is no longer maintained upstream but is kept in Luna for backward compatibility. New users should use PythonPlot instead.
 
 **Installation:**
 ```julia
@@ -267,19 +270,6 @@ ax.plot(specx * 1e9, Iω[:, end])
 ax.set_xlabel("Wavelength (nm)")
 ax.set_ylabel("Spectral energy density")
 ```
-
-## Backend differences
-
-| Feature | PythonPlot/PyPlot | Makie |
-|:--------|:-----------------|:------|
-| Static figures | Yes | Yes (CairoMakie) |
-| Interactive pan/zoom | Limited | Yes (GLMakie/WGLMakie) |
-| 3D spectrograms | No | Yes (`surface3d=true`) |
-| FWHM legend annotations | Yes | Yes (inline in labels) |
-| `cmap_colours` | Yes | Yes |
-| `subplotgrid` | Returns `(fig, axs)` | Returns `(indices, width, height)` |
-| `auto_fwhm_arrows` | Yes | Yes |
-| `cornertext` | Yes | Yes |
 
 ## API Reference
 

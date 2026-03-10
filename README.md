@@ -42,13 +42,13 @@ Luna requires Julia v1.9 or later, which can be obtained from [here](https://jul
 ]
 add Luna
 ```
-This will install and precompile Luna and all its dependencies. For plotting you also need to install a plotting backend. We recommend [Makie](https://docs.makie.org/), a pure-Julia plotting library:
+This will install and precompile Luna and all its dependencies. For plotting you also need to install a plotting backend. We recommend [PythonPlot](https://github.com/JuliaPy/PythonPlot.jl), which provides the full capability of matplotlib:
 
 ```julia
 ]
-add CairoMakie
+add PythonPlot PythonCall
 ```
-CairoMakie produces high-quality static figures (PDF/SVG/PNG). For interactive plots with pan/zoom, use `GLMakie` instead, or `WGLMakie` for interactive plots in VSCode and Jupyter notebooks. You can also use `PythonPlot` (matplotlib via PythonCall) or `PyPlot` (legacy matplotlib via PyCall) — see the [plotting documentation](http://lupo-lab.com/Luna.jl/dev/plotting.html) for details.
+For a native Julia experience with advanced features (e.g. interactive 3D spectrograms), you can use [Makie](https://docs.makie.org/) instead (`CairoMakie` for static output, `GLMakie` for interactive windows, `WGLMakie` for VSCode/Jupyter). See the [plotting documentation](http://lupo-lab.com/Luna.jl/dev/plotting.html) for details.
 
 ## Quickstart
 To run a simple simulation of ultrafast pulse propagation in a gas-filled hollow capillary fibre, you can use `prop_capillary`. As an example, take a 3-metre length of HCF with 125 μm core radius, filled with 1 bar of helium gas, and driving pulses centred at 800 nm wavelength with 120 μJ of energy and 10 fs duration. We consider a frequency grid which spans from 120 nm to 4 μm and a time window of 1 ps.
@@ -92,9 +92,9 @@ julia> output_multimode["Eω"]
 ```
 **NOTE:** Setting `modes=:HE11` and `modes=1` are **not** equivalent, except if only the Kerr effect is included in the simulation. The former uses mode-averaged propagation (treating all spatial dependence of the nonlinear polarisation the same as the Kerr effect) whereas the latter projects the spatially dependent nonlinear polarisation onto a single mode. This difference is especially important when photoionisation plays a major role.
 ### Plotting results
-More usefully, you can directly plot the propagation results using `Plotting.prop_2D()`. While `Plotting` is imported at the same time as `prop_capillary` by the `using Luna` statement, you also need to import a plotting backend, e.g. `CairoMakie`:
+More usefully, you can directly plot the propagation results using `Plotting.prop_2D()`. While `Plotting` is imported at the same time as `prop_capillary` by the `using Luna` statement, you also need to import a plotting backend, e.g. `PythonPlot`:
 ```julia
-julia> using CairoMakie
+julia> using PythonPlot
 julia> Plotting.prop_2D(output)
 ```
 This should show a plot like this:
@@ -141,7 +141,7 @@ MemoryOutput["simulation_type", "dumps", "meta", "Eω", "prop_capillary_args", "
 ```
 After this has run, you can visualise the output, with e.g.
 ```julia
-julia> using CairoMakie
+julia> using PythonPlot
 julia> Plotting.prop_2D(output_gnlse, :λ, dBmin=-40.0,  λrange=(400e-9, 1300e-9), trange=(-1e-12, 5e-12))
 ```
 This should show a plot like this:
@@ -149,7 +149,7 @@ This should show a plot like this:
 
 
 ## Examples
-The [examples folder](examples/) contains complete simulation examples for a variety of scenarios, both for the [simple interface](examples/simple_interface/) and the [low-level interface](examples/low_level_interface). Some of the simple interface examples require a plotting backend (e.g. `CairoMakie` or `PythonPlot`) to be present, and many of the low-level examples require other packages as well--you can install these by simply typing `] add CairoMakie` at the Julia REPL or the equivalent for other packages.
+The [examples folder](examples/) contains complete simulation examples for a variety of scenarios, both for the [simple interface](examples/simple_interface/) and the [low-level interface](examples/low_level_interface). Some of the simple interface examples require a plotting backend (e.g. `PythonPlot` or `CairoMakie`) to be present, and many of the low-level examples require other packages as well--you can install these by simply typing `] add CairoMakie` at the Julia REPL or the equivalent for other packages.
 
 ## The low-level interface
 At its core, Luna is extremely flexible, and the simple interface using `prop_capillary` only exposes part of what Luna can do. There are lots of examples in the [low-level interface examples folder](examples/low_level_interface). These are not actively maintained and are not guaranteed to run. As a side effect of its flexibility, it is quite easy to make mistakes when using the low-level interface. For example, changing from single-mode to multi-mode propagation in a fibre requires several concurrent changes to your code. If you have trouble with this interface, [open an issue](https://github.com/LupoLab/Luna/issues/new) with as much detail as possible and we will try to help you run it.
@@ -159,9 +159,9 @@ Luna comes with a built-in interface which allows for the running of single- and
 
 ## Plotting backends
 Luna supports three plotting backends through Julia's package extension system:
-- **[Makie](https://docs.makie.org/)** (recommended) — pure Julia. Use `CairoMakie` for static output, `GLMakie` for interactive windows, or `WGLMakie` for interactive plots in VSCode and Jupyter notebooks. You can switch between Makie backends within a session using e.g. `GLMakie.activate!()`.
-- **PythonPlot** — matplotlib via [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl). A good choice if you prefer the matplotlib ecosystem.
-- **PyPlot** — matplotlib via [PyCall.jl](https://github.com/JuliaPy/PyCall.jl). Legacy backend for backwards compatibility.
+- **[PythonPlot](https://github.com/JuliaPy/PythonPlot.jl)** (recommended) — provides the full capability of matplotlib via [PythonCall.jl](https://github.com/JuliaPy/PythonCall.jl).
+- **[Makie](https://docs.makie.org/)** — native Julia plotting with advanced features (e.g. interactive 3D spectrograms). Use `CairoMakie` for static output, `GLMakie` for interactive windows, or `WGLMakie` for VSCode and Jupyter notebooks.
+- **PyPlot** — matplotlib via [PyCall.jl](https://github.com/JuliaPy/PyCall.jl). Not maintained upstream; kept for backward compatibility.
 
 See the [plotting documentation](http://lupo-lab.com/Luna.jl/dev/plotting.html) for full details.
 
