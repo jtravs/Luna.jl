@@ -14,30 +14,33 @@ const plt = PythonPlot.pyplot
 plt.rcParams["savefig.dpi"] = 600
 
 radius = 125e-6
-flength = 1.5
-gas = :Ar
-pressure = 80e-3
+flength = 3.0
+gas = :He
+pressure = 1.0
 
 λ0 = 800e-9
 τfwhm = 10e-15
-energy = 60e-6
+energy = 120e-6
 
 output = prop_capillary(radius, flength, gas, pressure; λ0, τfwhm, energy,
-                        modes=2, trange=200e-15, λlims=(150e-9, 4e-6))
+                        modes=4, trange=400e-15, λlims=(150e-9, 4e-6))
 
 # ## 2D propagation plots
 #
 # [`Plotting.prop_2D`](@ref) creates side-by-side spectral and temporal heatmaps.
 # The first positional argument after `output` selects the spectral axis:
 # `:λ` for wavelength, `:f` for frequency (default), or `:ω` for angular frequency.
+#
+# Since this is a multimode simulation, `prop_2D` returns a vector of figures
+# (one for each mode and one for the sum). We use `foreach(display, ...)` to show them all.
 
-Plotting.prop_2D(output, :λ; λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30)
+foreach(display, Plotting.prop_2D(output, :λ; λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30))
 
 # For multimode simulations, use the `modes` keyword to select which modes to plot.
 # `:sum` plots the coherent sum of all modes:
 
-Plotting.prop_2D(output, :λ; modes=:sum,
-                 λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30)
+foreach(display, Plotting.prop_2D(output, :λ; modes=:sum,
+                 λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30))
 
 # ## Time-domain line plots
 #
@@ -71,8 +74,10 @@ Plotting.spectrogram(output, flength; trange=(-20e-15, 30e-15),
 #
 # [`Plotting.stats`](@ref) automatically plots all available propagation statistics
 # (energy, peak power, FWHM, electron density, etc.).
+#
+# `stats` returns a vector of figures (pulse statistics and propagation statistics).
 
-Plotting.stats(output)
+foreach(display, Plotting.stats(output))
 
 # ## Energy evolution
 #
