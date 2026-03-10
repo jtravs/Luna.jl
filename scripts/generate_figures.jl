@@ -14,6 +14,8 @@ simply re-run this script.
 using Luna, PythonPlot
 const plt = PythonPlot.pyplot
 
+plt.rcParams["savefig.dpi"] = 600
+
 assetsdir = joinpath(@__DIR__, "..", "assets")
 docassetsdir = joinpath(@__DIR__, "..", "docs", "src", "assets")
 mkpath(assetsdir)
@@ -111,14 +113,14 @@ fig, axs = plt.subplots(1, npress, figsize=(4*npress, 3))
 for (pidx, pressure) in enumerate(pressures)
     ax = npress == 1 ? axs : axs[pidx-1]
     data = 10 * Maths.log10_norm(Iλ[:, :, pidx])
-    hm = ax.pcolormesh(λ * 1e9, energies * 1e6, data';
+    global im = ax.pcolormesh(λ * 1e9, energies * 1e6, data';
         vmin=-40, vmax=0, cmap="viridis", rasterized=true)
     ax.set_xlim(100, 1200)
     ax.set_xlabel("Wavelength (nm)")
     ax.set_ylabel("Energy (μJ)")
     ax.set_title("Pressure: $pressure bar")
 end
-fig.colorbar(hm, ax=axs, label="Energy density (dB)")
+fig.colorbar(im, ax=axs, label="Energy density (dB)")
 fig.tight_layout()
 fig.savefig(joinpath(docassetsdir, "scan_spectrum.svg"))
 

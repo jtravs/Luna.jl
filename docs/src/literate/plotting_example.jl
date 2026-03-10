@@ -10,6 +10,9 @@
 
 using Luna, PythonPlot
 
+const plt = PythonPlot.pyplot
+plt.rcParams["savefig.dpi"] = 600
+
 radius = 125e-6
 flength = 1.5
 gas = :Ar
