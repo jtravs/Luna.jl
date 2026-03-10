@@ -14,7 +14,7 @@ const plt = PythonPlot.pyplot
 plt.rcParams["savefig.dpi"] = 600
 
 radius = 125e-6
-flength = 3.0
+flength = 2.0
 gas = :He
 pressure = 1.0
 
@@ -32,15 +32,29 @@ output = prop_capillary(radius, flength, gas, pressure; λ0, τfwhm, energy,
 # `:λ` for wavelength, `:f` for frequency (default), or `:ω` for angular frequency.
 #
 # Since this is a multimode simulation, `prop_2D` returns a vector of figures
-# (one for each mode and one for the sum). We use `foreach(display, ...)` to show them all.
+# (one for each mode and one for the sum).
 
-foreach(display, Plotting.prop_2D(output, :λ; λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30))
+Plotting.prop_2D(output, :λ; λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30)
+for (i, fig) in enumerate(ans) fig.savefig("prop_2D_$i.svg") end; # hide
+
+# **Individual modes**
+#
+# ![Mode 1](prop_2D_1.svg) ![Mode 2](prop_2D_2.svg)
+#
+# ![Mode 3](prop_2D_3.svg) ![Mode 4](prop_2D_4.svg)
+#
+# **Sum of all modes**
+#
+# ![Sum of all modes](prop_2D_5.svg)
 
 # For multimode simulations, use the `modes` keyword to select which modes to plot.
 # `:sum` plots the coherent sum of all modes:
 
-foreach(display, Plotting.prop_2D(output, :λ; modes=:sum,
-                 λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30))
+Plotting.prop_2D(output, :λ; modes=:sum,
+                 λrange=(150e-9, 1000e-9), trange=(-20e-15, 20e-15), dBmin=-30)
+ans[1].savefig("prop_2D_sum.svg"); # hide
+
+# ![Sum of all modes](prop_2D_sum.svg)
 
 # ## Time-domain line plots
 #
@@ -74,10 +88,13 @@ Plotting.spectrogram(output, flength; trange=(-20e-15, 30e-15),
 #
 # [`Plotting.stats`](@ref) automatically plots all available propagation statistics
 # (energy, peak power, FWHM, electron density, etc.).
-#
-# `stats` returns a vector of figures (pulse statistics and propagation statistics).
 
-foreach(display, Plotting.stats(output))
+Plotting.stats(output)
+for (i, fig) in enumerate(ans) fig.savefig("stats_$i.svg") end; # hide
+
+# ![Pulse statistics](stats_1.svg)
+#
+# ![Propagation statistics](stats_2.svg)
 
 # ## Energy evolution
 #
