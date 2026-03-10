@@ -142,7 +142,7 @@ function prop_2D(output, specaxis=:f;
                          speclabel, speclims, trange, dBmin, window_str(bandpass);
                          kwargs...)
     end
-    convertany(fig)
+    fig
 end
 
 # single-mode 2D propagation plots
@@ -156,14 +156,14 @@ function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bp
     _spec2D_log(axs[1], specx, z, Iω, dBmin, speclabel, speclims; kwargs...)
     _time2D(axs[2], t, z, It, trange; kwargs...)
     pfig.tight_layout()
-    return convertany(pfig)
+    return Figure(pfig)
 end
 
 # multi-mode 2D propagation plots
 function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
                     speclabel, speclims, trange, dBmin, bpstr;
                     kwargs...)
-    pfigs = Figure[]
+    pfigs = Any[]
     Iω = Maths.normbymax(Iω)
     id = "($(string(hash(gensym()); base=16)[1:4])) "
     for mi in modes
@@ -173,7 +173,7 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
         pfig.set_size_inches(12, 4)
         _spec2D_log(axs[1], specx, z, Iω[:, mi, :], dBmin, speclabel, speclims; kwargs...)
         _time2D(axs[2], t, z, It[:, mi, :], trange; kwargs...)
-        push!(pfigs, convertany(pfig))
+        push!(pfigs, Figure(pfig))
     end
 
     num = id * "Propagation (all modes)" * ((length(bpstr) > 0) ? ", $bpstr" : "")
@@ -186,7 +186,7 @@ function _prop2D_mm(modelabels, modes, t, z, specx, It, Iω,
     Itall = dropdims(sum(It, dims=2), dims=2)
     _time2D(axs[2], t, z, Itall, trange; kwargs...)
     pfig.tight_layout()
-    push!(pfigs, convertany(pfig))
+    push!(pfigs, Figure(pfig))
 
     return pfigs
 end
@@ -266,7 +266,7 @@ function time_1D(output, zslice=maximum(output["z"]);
     y == :Et || plt.ylim(ymin=0)
     sfig.set_size_inches(8.5, 5)
     sfig.tight_layout()
-    convertany(sfig)
+    Figure(sfig)
 end
 
 function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
@@ -313,7 +313,7 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
     plt.xlim(speclims...)
     sfig.set_size_inches(8.5, 5)
     sfig.tight_layout()
-    convertany(sfig)
+    Figure(sfig)
 end
 
 dashes = [(0, (10, 1)),
@@ -355,7 +355,7 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
     plt.xlabel("Time (fs)")
     log && plt.clim(dBmin, 0)
     plt.colorbar()
-    convertany(fig)
+    Figure(fig)
 end
 
 function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
@@ -395,7 +395,7 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
     rax.set_ylim(100/(1e6*e0).*lims)
     rax.set_ylabel("Conversion efficiency (%)")
     fig.set_size_inches(figsize...)
-    convertany(fig)
+    Figure(fig)
 end
 
 """
