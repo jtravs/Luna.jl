@@ -62,16 +62,25 @@ ans[1].savefig("prop_2D_sum.svg"); # hide
 # The legend automatically includes the FWHM duration.
 
 Plotting.time_1D(output; modes=:sum)
+ans.savefig("time_1D_sum.svg"); # hide
+
+# ![Time-domain (sum)](time_1D_sum.svg)
 
 # Use `bandpass` to isolate a spectral window in the time domain:
 
 Plotting.time_1D(output; modes=1, bandpass=(220e-9, 270e-9), trange=(-50e-15, 50e-15))
+ans.savefig("time_1D_bp.svg"); # hide
+
+# ![Time-domain (bandpassed)](time_1D_bp.svg)
 
 # ## Spectral line plots
 #
 # [`Plotting.spec_1D`](@ref) plots spectral slices. By default it uses a logarithmic y-axis.
 
 Plotting.spec_1D(output; modes=:sum, λrange=(150e-9, 1000e-9))
+ans.savefig("spec_1D.svg"); # hide
+
+# ![Spectral-domain (sum)](spec_1D.svg)
 
 # ## Spectrograms
 #
@@ -80,6 +89,9 @@ Plotting.spec_1D(output; modes=:sum, λrange=(150e-9, 1000e-9))
 
 Plotting.spectrogram(output, flength; trange=(-20e-15, 30e-15),
                      λrange=(150e-9, 1000e-9), N=256, fw=3e-15)
+ans.savefig("spectrogram.svg"); # hide
+
+# ![Spectrogram](spectrogram.svg)
 
 # !!! note
 #     With the Makie backend, you can also create a 3D surface spectrogram using `surface3d=true`.
@@ -102,3 +114,6 @@ for (i, fig) in enumerate(ans) fig.savefig("stats_$i.svg") end; # hide
 # for conversion efficiency.
 
 Plotting.energy(output)
+ans.savefig("energy.svg"); # hide
+
+# ![Energy evolution](energy.svg)
