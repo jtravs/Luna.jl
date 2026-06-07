@@ -30,9 +30,15 @@ import Luna.PhysData: au_Efield
 
     factor(rate, E) = rate(E) / none(E)
 
-    # (a) Regression: :none must equal the unmodified PPT exactly.
+    # (a) :auto (the new default) enables :zhang where coefficients exist, and is off otherwise.
+    @test Ionisation.IonRatePPT(:He, λ0).bsi == :zhang            # default is :auto → :zhang
+    @test Ionisation.IonRatePPT(:He, λ0; bsi=:auto).bsi == :zhang
+    @test Ionisation.IonRatePPT(:He, λ0; bsi=:auto).zhang_coeffs == Ionisation.ZHANG_COEFFS[:He]
+    @test Ionisation.IonRatePPT(:N2, λ0; bsi=:auto).bsi == :none  # molecular → off, no error
+    @test Ionisation.IonRatePPT(:He, λ0; bsi=:none).bsi == :none
     for x in (0.3, 0.8, 1.5)
-        @test none(x*Eb) == Ionisation.IonRatePPT(:He, λ0)(x*Eb)
+        @test Ionisation.IonRatePPT(:He, λ0)(x*Eb) == zh(x*Eb)   # default matches explicit :zhang
+        @test none(x*Eb) ≥ zh(x*Eb)                              # :none is the uncorrected rate
     end
 
     # (b) Mild correction well below E_b (factor close to 1).

@@ -58,31 +58,39 @@ const ZHANG_COEFFS = Dict{Symbol,NTuple{3,Float64}}(
     bsi_kwargs(material::Symbol, bsi::Symbol)
 
 Resolve the per-species barrier-suppression keyword arguments to forward downstream from a
-Symbol-based constructor. Returns an empty `NamedTuple` for `bsi == :none` so that existing
-cache hashes are unchanged; otherwise returns the tabulated coefficients for `material`.
+Symbol-based constructor, looking up the tabulated coefficients for `material`.
 
-These are static single-active-electron ATOMIC corrections, so a species is accepted only if
-it appears in the relevant coefficient table (`TONGLIN_ALPHA` for `:tonglin`, `ZHANG_COEFFS`
-for `:zhang`) — this is what rejects molecular species, without needing a separate blocklist.
-For an atomic species not in the table, pass `α_bsi`/`zhang_coeffs` explicitly via the raw
-`IonRatePPT(ip, λ0, Z, l; …)` constructor.
+`bsi` is one of:
+- `:auto` (default): enable the correction wherever validated coefficients exist, and silently
+  leave it off otherwise (e.g. molecular or non-tabulated species — no error). `:zhang` is used
+  because it is validated over the widest field range (0.5–4.5 E_b).
+- `:none`: no correction.
+- `:tonglin` / `:zhang`: force that correction; errors if no coefficients are tabulated for
+  `material` (these are single-active-electron ATOMIC corrections, so a species is accepted only
+  if it appears in `TONGLIN_ALPHA` / `ZHANG_COEFFS` — this is what rejects molecular species,
+  without needing a separate blocklist). For an atomic species not in the table, pass
+  `α_bsi`/`zhang_coeffs` explicitly via the raw `IonRatePPT(ip, λ0, Z, l; …)` constructor.
 """
 function bsi_kwargs(material::Symbol, bsi::Symbol)
-    bsi === :none && return (;)
-    if bsi === :tonglin
+    if bsi === :auto
+        return haskey(ZHANG_COEFFS, material) ?
+            (; bsi = :zhang, zhang_coeffs = ZHANG_COEFFS[material]) : (; bsi = :none)
+    elseif bsi === :none
+        return (; bsi = :none)
+    elseif bsi === :tonglin
         haskey(TONGLIN_ALPHA, material) || error(
             "No Tong & Lin (2005) α tabulated for :$material; barrier-suppression " *
             "corrections are defined for atomic species only. Pass α_bsi explicitly via " *
-            "the raw IonRatePPT(ip, λ0, Z, l; …) constructor, or use bsi = :none.")
-        return (; bsi, α_bsi = TONGLIN_ALPHA[material])
+            "the raw IonRatePPT(ip, λ0, Z, l; …) constructor, or use bsi = :auto / :none.")
+        return (; bsi = :tonglin, α_bsi = TONGLIN_ALPHA[material])
     elseif bsi === :zhang
         haskey(ZHANG_COEFFS, material) || error(
             "No Zhang (2014) coefficients tabulated for :$material; barrier-suppression " *
             "corrections are defined for atomic species only. Pass zhang_coeffs explicitly " *
-            "via the raw IonRatePPT(ip, λ0, Z, l; …) constructor, or use bsi = :none.")
-        return (; bsi, zhang_coeffs = ZHANG_COEFFS[material])
+            "via the raw IonRatePPT(ip, λ0, Z, l; …) constructor, or use bsi = :auto / :none.")
+        return (; bsi = :zhang, zhang_coeffs = ZHANG_COEFFS[material])
     else
-        error("Unknown bsi correction: :$bsi. Use :none, :tonglin or :zhang.")
+        error("Unknown bsi correction: :$bsi. Use :auto, :none, :tonglin or :zhang.")
     end
 end
 
@@ -215,17 +223,22 @@ wavelength `λ0`, also given charge state `Z` and angular momentum `l`
     a state with two electrons (spin up/down).
 - `bsi::Symbol`: barrier-suppression (over-the-barrier) correction applied as a multiplicative
     factor to the rate. One of:
-    * `:none`    – no correction (default; original PPT behaviour).
+    * `:auto`    – (default) enable the correction wherever validated coefficients exist for the
+                   species (resolves to `:zhang`), and silently leave it off otherwise (e.g.
+                   molecular/non-tabulated species — no error). Only meaningful when constructing
+                   from a material `Symbol`; the raw `(ip, λ0, Z, l)` constructor treats `:auto`
+                   as `:zhang` if `zhang_coeffs` are supplied, else `:none`.
+    * `:none`    – no correction (original PPT behaviour).
     * `:tonglin` – Tong & Lin, J. Phys. B 38, 2593 (2005), eq. (2):
                    `factor = exp(-α (Z²/Ip)(|E|/κ³))`. Validated to ≈ 2 E_b.
     * `:zhang`   – Zhang, Lan & Lu, Phys. Rev. A 90, 043410 (2014), eq. (8):
                    `factor = exp(a1 u² + a2 u + a3)`, `u = |E|/E_b`. Validated 0.5–4.5 E_b.
-    Both reduce to ≈ 1 well below the barrier-suppression field `E_b = Ip²/(4Z)` and bring the
-    high-field rate into line with single-active-electron TDSE/static results. The factor is
-    clamped to ≤ 1 and (for `:zhang`) `u` is capped at 4.5. These are static (DC) corrections,
-    appropriate for the tunnelling/small-γ regime, not for multiphoton/UV ionisation, and are
-    defined for atomic species only. See the CORRECTNESS NOTE in the source on the sign typo
-    in Zhang eq. (8).
+    Both `:tonglin` and `:zhang` reduce to ≈ 1 well below the barrier-suppression field
+    `E_b = Ip²/(4Z)` and bring the high-field rate into line with single-active-electron
+    TDSE/static results. The factor is clamped to ≤ 1 and (for `:zhang`) `u` is capped at 4.5.
+    These are static (DC) corrections, appropriate for the tunnelling/small-γ regime, not for
+    multiphoton/UV ionisation, and are defined for atomic species only. See the CORRECTNESS
+    NOTE in the source on the sign typo in Zhang eq. (8).
 - `α_bsi::Real`: Tong & Lin α (defaults: per-species table; else 6 for s-wave, 9 otherwise).
 - `zhang_coeffs::NTuple{3,Real}`: `(a1, a2, a3)` for `:zhang` (defaults from the per-species
     table when constructed from a material `Symbol`).
@@ -284,7 +297,7 @@ PPT ionisation rate for the given `material` when driven at wavelength `λ0`.
 
 Other keyword arguments are identical to `IonRatePPT(ionpot::Float64, λ0, Z, l; kwargs...)`
 """
-function IonRatePPT(material::Symbol, λ0; stark_shift=true, dipole_corr=true, bsi::Symbol=:none, kwargs...)
+function IonRatePPT(material::Symbol, λ0; stark_shift=true, dipole_corr=true, bsi::Symbol=:auto, kwargs...)
     _, l, Z = quantum_numbers(material)
     Δα = stark_shift ? polarisability_difference(material) : 0.0
     α_ion = dipole_corr ? polarisability(material, true) : 0.0
@@ -294,7 +307,7 @@ end
 
 function IonRatePPT(ip, λ0, Z, l; Δα=0, α_ion=0, sum_tol=1e-6,
     cycle_average=false, sum_integral=false, msum=true, Cnl=missing, occupancy=2,
-    bsi::Symbol=:none, α_bsi=nothing, zhang_coeffs=nothing)
+    bsi::Symbol=:auto, α_bsi=nothing, zhang_coeffs=nothing)
 
     if ismissing(Δα)
         Δα = 0.0
@@ -309,6 +322,12 @@ function IonRatePPT(ip, λ0, Z, l; Δα=0, α_ion=0, sum_tol=1e-6,
     ω0 = 2π*c/λ0
     ω0_au = au_time*ω0
 
+    # The raw constructor has no species table to consult, so :auto enables :zhang only when
+    # coefficients are supplied, and is otherwise off. (Symbol-based constructors resolve :auto
+    # against the per-species tables before reaching this point — see `bsi_kwargs`.)
+    if bsi === :auto
+        bsi = isnothing(zhang_coeffs) ? :none : :zhang
+    end
     α_bsi_resolved = isnothing(α_bsi) ? tonglin_alpha_default(l) : float(α_bsi)
     zc = isnothing(zhang_coeffs) ? (0.0, 0.0, 0.0) : NTuple{3,Float64}(zhang_coeffs)
     if bsi === :zhang && isnothing(zhang_coeffs)
@@ -316,8 +335,11 @@ function IonRatePPT(ip, λ0, Z, l; Δα=0, α_ion=0, sum_tol=1e-6,
               "species, or pass zhang_coeffs = (a1, a2, a3).")
     end
 
-    IonRatePPT(float(Z), l, Δα, α_ion_au, ω0_au, Cnl, ip, occupancy,
-        msum, sum_integral, sum_tol, cycle_average, bsi, α_bsi_resolved, zc)
+    # Coerce the Float64-typed fields: the raw constructor accepts integer arguments
+    # (e.g. the default Δα=0, or an integer ionpot), but the parametric struct's auto-generated
+    # constructor does not convert them.
+    IonRatePPT(float(Z), l, float(Δα), α_ion_au, ω0_au, Cnl, float(ip), occupancy,
+        msum, sum_integral, float(sum_tol), cycle_average, bsi, α_bsi_resolved, zc)
 end
 
 function (ir::IonRatePPT)(E)
@@ -445,7 +467,7 @@ function ionrate_PPT(ionpot, λ0, Z, l, E; kwargs...)
 end
 
 function ionrate_PPT(material::Symbol, λ0, E;
-                     stark_shift=true, dipole_corr=true, bsi::Symbol=:none, kwargs...)
+                     stark_shift=true, dipole_corr=true, bsi::Symbol=:auto, kwargs...)
     _, l, Z = quantum_numbers(material)
     Δα = stark_shift ? polarisability_difference(material) : 0.0
     α_ion = dipole_corr ? polarisability(material, true) : 0.0
@@ -493,7 +515,7 @@ function IonRatePPTAccel(E, rate)
     IonRatePPTAccel(cspl, Emin, Emax)
 end
 
-function IonRatePPTAccel(material::Symbol, λ0; stark_shift=true, dipole_corr=true, bsi::Symbol=:none, kwargs...)
+function IonRatePPTAccel(material::Symbol, λ0; stark_shift=true, dipole_corr=true, bsi::Symbol=:auto, kwargs...)
     _, l, Z = quantum_numbers(material)
     Δα = stark_shift ? polarisability_difference(material) : 0.0
     α_ion = dipole_corr ? polarisability(material, true) : 0.0
