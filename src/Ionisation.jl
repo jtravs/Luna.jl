@@ -468,8 +468,9 @@ Create a cached (saved) interpolated PPT ionisation rate function. If a saved lo
 exists, load this rather than recalculate.
 
 # Keyword arguments
-- `N::Int`: Number of samples with which to create the `CSpline` interpolant.
-- `Emax::Number`: Maximum field strength to include in the interpolant.
+- `N::Int`: Number of samples with which to create the `CSpline` interpolant. The samples are
+    log-spaced in field strength from `E_b/2500` to `Emax` (denser at the low-field turn-on).
+- `Emax::Number`: Maximum field strength to include in the interpolant. Defaults to `2 E_b`.
 - `cache::Bool`: Whether to save the pre-calculated rate to a file
 - `cachedir::String`: Path to the directory where the cache should be stored and loaded from.
     Defaults to \$HOME/.luna/pptcache
@@ -504,12 +505,16 @@ function IonRatePPTCached(args...; kwargs...)
     IonRatePPTAccel(args...; cache=true, kwargs...)
 end
 
+# Bump when the cached PPT grid scheme changes, so that stale cache files written with an
+# older grid (same ionpot/λ0/Z/l/N/Emax/kwargs) are not silently reused. v2 = log-spaced grid.
+const PPT_CACHE_VERSION = 2
+
 function IonRatePPTAccel(ionpot::Float64, λ0, Z, l;
     N=2^16, Emax=nothing, cache=true,
     cachedir=joinpath(Utils.cachedir(), "pptcache"),
     stale_age=60 * 10,
     kwargs...)
-    h = hash((ionpot, λ0, Z, l, N, Emax, collect(kwargs)))
+    h = hash((PPT_CACHE_VERSION, ionpot, λ0, Z, l, N, Emax, collect(kwargs)))
     fname = string(h, base=16) * ".h5"
     fpath = joinpath(cachedir, fname)
     if cache && isfile(fpath)
@@ -564,13 +569,22 @@ end
 
 function makePPTcache(ionpot::Float64, λ0, Z, l;
                       N=2^16, Emax=nothing, kwargs...)
-    Emax = isnothing(Emax) ? 2*barrier_suppression(ionpot, Z) : Emax
+    Eb = barrier_suppression(ionpot, Z)
+    Emax = isnothing(Emax) ? 2*Eb : Emax
 
-    # ω0 = 2π*c/λ0
-    # Emin = ω0*sqrt(2m_e*ionpot)/electron/0.5 # Keldysh parameter of 0.5
-    Emin = Emax/5000
+    # Lower bound is tied to the species barrier-suppression field E_b, NOT to Emax, so that
+    # extending Emax into the over-the-barrier regime (e.g. for the :zhang correction) does
+    # not drift the low-field sampling. Eb/2500 reproduces the previous default lower bound
+    # (Emax/5000 evaluated at the default Emax = 2 E_b).
+    Emin = Eb/2500
 
-    E = collect(range(Emin, stop=Emax, length=N));
+    # Geometric (log-spaced) field grid: log(rate) curves sharply at the low-field turn-on and
+    # flattens at high field, so a log grid concentrates samples where the cubic spline needs
+    # them and spends few on the (flat) high-field tail. This preserves low-field resolution
+    # while letting Emax reach ~4.5 E_b (the :zhang validity limit) without increasing N.
+    # Maths.CSpline handles the non-uniform axis via its FastFinder; underflowed (zero) rates
+    # at the very lowest fields are dropped in the IonRatePPTAccel(E, rate) constructor.
+    E = exp10.(range(log10(Emin), log10(Emax); length=N))
     @info @sprintf("Pre-calculating PPT rate for %.2f eV, %.1f nm...", ionpot/electron, 1e9λ0)
     flush(stderr) # pre-calculating can take a while, so make sure this message is shown
     rate = ionrate_PPT(ionpot, λ0, Z, l, E; kwargs...)
