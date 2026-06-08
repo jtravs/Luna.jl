@@ -98,3 +98,62 @@ import Luna.PhysData: au_Efield
     @test isapprox(acc_tl(Eb), tl(Eb); rtol=1e-2)
     @test isapprox(acc_zh(Eb), zh(Eb); rtol=1e-2)
 end
+
+# Sanity checks for the other tabulated noble gases. These mirror the He checks but avoid the
+# He-specific hardcoded factor values. The key guard remains the Tong–Lin ↔ Zhang agreement
+# below ~2 E_b: a wrong/sign-flipped Zhang coefficient (or the eq. (8) typo) would push the
+# Zhang factor above 1 and break it. The agreement is looser than for He — the paper documents
+# ~10–25% (Zhang gives slightly weaker suppression) for Ne/Kr/Xe — so rtol is relaxed to 0.3.
+@testset "PPT barrier-suppression sanity: $gas" for gas in (:Ne, :Ar, :Kr, :Xe)
+    λ0 = 800e-9
+    Ip = PhysData.ionisation_potential(gas)
+    Ip_au = Ip / PhysData.au_energy
+    _, l, Zq = PhysData.quantum_numbers(gas)
+    Z = float(Zq)
+    κ = sqrt(2Ip_au)
+    Eb_au = Ip_au^2 / (4Z)
+    Eb = Eb_au * au_Efield
+
+    none = Ionisation.IonRatePPT(gas, λ0; bsi=:none)
+    tl   = Ionisation.IonRatePPT(gas, λ0; bsi=:tonglin)
+    zh   = Ionisation.IonRatePPT(gas, λ0; bsi=:zhang)
+    factor(rate, E) = rate(E) / none(E)
+
+    # default :auto resolves to :zhang for these tabulated atomic gases
+    @test Ionisation.IonRatePPT(gas, λ0).bsi == :zhang
+    @test Ionisation.IonRatePPT(gas, λ0; bsi=:auto).zhang_coeffs == Ionisation.ZHANG_COEFFS[gas]
+
+    # (b) mild correction well below E_b (factor not far from 1).
+    @test 0.75 ≤ factor(tl, 0.15Eb) ≤ 1.0
+    @test 0.75 ≤ factor(zh, 0.15Eb) ≤ 1.0
+
+    # (c) moderate suppression at E_b (loose, gas-independent bounds).
+    @test 0.2 ≤ factor(tl, Eb) ≤ 0.7
+    @test 0.2 ≤ factor(zh, Eb) ≤ 0.7
+
+    # (d) Tong–Lin and Zhang must AGREE below ~2 E_b (sign-typo guard).
+    for x in (0.5, 0.8, 1.0, 1.3, 1.8)
+        @test isapprox(tl(x*Eb), zh(x*Eb); rtol=0.3)
+    end
+
+    # (e) both must SUPPRESS (never enhance) over the whole range; factor ≤ 1.
+    for x in (0.2, 0.5, 1.0, 2.0, 3.0, 4.5)
+        @test factor(tl, x*Eb) ≤ 1.0 + 1e-9
+        @test factor(zh, x*Eb) ≤ 1.0 + 1e-9
+        @test tl(x*Eb) ≤ none(x*Eb)
+        @test zh(x*Eb) ≤ none(x*Eb)
+    end
+
+    # (f) Beyond 2 E_b, Tong–Lin over-suppresses → Zhang gives the LARGER (more physical) rate.
+    for x in (2.5, 3.0, 4.0)
+        @test zh(x*Eb) > tl(x*Eb)
+    end
+
+    # (g) Independent self-consistency of the Tong–Lin analytic factor with the tabulated α.
+    α = Ionisation.TONGLIN_ALPHA[gas]
+    f_expected = exp(-α * (Z^2/Ip_au) * (Eb_au/κ^3))
+    @test isapprox(factor(tl, Eb), f_expected; rtol=1e-6)
+
+    # (h) Zhang argument is capped at 4.5 E_b (factor frozen beyond).
+    @test isapprox(factor(zh, 5.0Eb), factor(zh, 4.5Eb); rtol=1e-6)
+end
