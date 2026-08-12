@@ -25,7 +25,17 @@ function solve_precon(f!, linop, y0, t, dt, tmax;
 end
 
 function solve(s, tmax; stepfun=donothing!, output=false, outputN=201,
-                        status_period=1, repeat_limit=10)
+                        status_period=1, repeat_limit=10, step_on=nothing)
+    # `step_on`: strictly increasing positions the stepper must land on
+    # exactly (clipping the adaptive step, never enlarging it). Use for save
+    # positions: the dense-output interpolant shares the error norm's blind
+    # spot (it is accurate for the dominant field components, not weak ones),
+    # so interpolated saves of a weak signal can scatter at the percent level
+    # between otherwise identical runs. Landing on the position instead makes
+    # the save an exact step endpoint. Costs a few extra steps.
+    step_on = isnothing(step_on) ? Float64[] :
+        sort(collect(Float64, filter(z -> z > 0, step_on)))
+    next_on = 1
     if output
         yout = Array{eltype(s.y)}(undef, (size(s.y)..., outputN))
         tout = range(s.t, stop=tmax, length=outputN)
@@ -41,6 +51,16 @@ function solve(s, tmax; stepfun=donothing!, output=false, outputN=201,
     start = Dates.now()
     tic = Dates.now()
     while s.tn <= tmax
+        # advance past positions already reached (within relative eps), then
+        # clip the trial step so it lands exactly on the next one
+        while next_on <= length(step_on) &&
+              step_on[next_on] <= s.tn + 1e-12 * tmax
+            next_on += 1
+        end
+        if next_on <= length(step_on)
+            gap = step_on[next_on] - s.tn
+            gap < s.dtn && (s.dtn = gap)
+        end
         ok = step!(s)
         steps += 1
         if Dates.value(Dates.now()-tic) > 1000*status_period
@@ -227,13 +247,22 @@ prop!_maybe(s) = nothing
 
 "Interpolate solution, aka dense output."
 function interpolate(s::Stepper, ti::Float64)
+    # Snap queries within round-off of the step endpoint to the stepped
+    # solution. A `step_on` landing is t + (target - t), which can differ from
+    # target by 1 ulp, and the interpolation polynomial at σ ≈ 1 does NOT
+    # reproduce yn: its σ=1 weights equal the b4-labelled (FSAL-row) vector,
+    # not the b5-labelled weights used by locextrap propagation (see dopri.jl),
+    # so it differs from yn by the full embedded error estimate — which is
+    # large relative to weak solution components. Bitwise equality is
+    # therefore not a sufficient endpoint test.
+    if abs(ti - s.tn) <= 4*eps(abs(s.tn))
+        return s.yn
+    end
     if ti > s.tn
         error("Attempting to extrapolate!")
     end
     if ti == s.t
         return s.y
-    elseif ti == s.tn
-        return s.yn
     end
     σ = (ti - s.t)/s.dt
     σp = map(p -> σ^p, range(1, stop=4))
@@ -247,13 +276,15 @@ end
 
 "Interpolate solution, aka dense output."
 function interpolate(s::PreconStepper, ti::Float64)
+    # Near-endpoint snap: see interpolate(s::Stepper, ti) for the rationale.
+    if abs(ti - s.tn) <= 4*eps(abs(s.tn))
+        return s.yn
+    end
     if ti > s.tn
         error("Attempting to extrapolate!")
     end
     if ti == s.t
         return s.y
-    elseif ti == s.tn
-        return s.yn
     end
     σ = (ti - s.t)/s.dt
     σp = map(p -> σ^p, range(1, stop=4))
