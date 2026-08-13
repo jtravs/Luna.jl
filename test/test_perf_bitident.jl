@@ -54,6 +54,20 @@ end
     @test isequal(zref, zfast)
 end
 
+@testset "RK45 register reduction" begin
+    Eref, zref = propagate_free3d()
+    # adopting the caller's input array must not change results
+    Ead, zad = propagate_free3d(run_kwargs=(; preserve_input=false))
+    @test isequal(Eref, Ead)
+    @test isequal(zref, zad)
+    # a custom norm uses the materialised error estimate; wrapping weaknorm must
+    # therefore reproduce the fused fast path exactly
+    wnorm(yerr, y, yn, rtol, atol) = Luna.RK45.weaknorm(yerr, y, yn, rtol, atol)
+    Emat, zmat = propagate_free3d(run_kwargs=(; norm=wnorm))
+    @test isequal(Eref, Emat)
+    @test isequal(zref, zmat)
+end
+
 @testset "pointwise Kerr agreement" begin
     import Luna: Nonlinear, NonlinearRHS
     for (resp, TT) in ((Nonlinear.Kerr_env(1e-25), ComplexF64),

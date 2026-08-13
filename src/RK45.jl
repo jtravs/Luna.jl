@@ -9,18 +9,21 @@ include("dopri.jl")
 
 function solve(f!, y0, t, dt, tmax;
                rtol=1e-6, atol=1e-10, safety=0.9, max_dt=Inf, min_dt=0, locextrap=true,
-               norm=weaknorm,
+               norm=weaknorm, preserve_input=true,
                kwargs...)
     stepper = Stepper(f!, y0, t, dt,
-                      rtol=rtol, atol=atol, safety=safety, max_dt=max_dt, min_dt=min_dt, locextrap=locextrap, norm=norm)
+                      rtol=rtol, atol=atol, safety=safety, max_dt=max_dt, min_dt=min_dt, locextrap=locextrap, norm=norm,
+                      preserve_input=preserve_input)
     return solve(stepper, tmax; kwargs...)
 end
 
 function solve_precon(f!, linop, y0, t, dt, tmax;
                     rtol=1e-6, atol=1e-10, safety=0.9, max_dt=Inf, min_dt=0, locextrap=true, norm=weaknorm,
+                    preserve_input=true,
                     kwargs...)
     stepper = PreconStepper(f!, linop, y0, t, dt,
-                      rtol=rtol, atol=atol, safety=safety, max_dt=max_dt, min_dt=min_dt, locextrap=locextrap, norm=norm)
+                      rtol=rtol, atol=atol, safety=safety, max_dt=max_dt, min_dt=min_dt, locextrap=locextrap, norm=norm,
+                      preserve_input=preserve_input)
     return solve(stepper, tmax; kwargs...)
 end
 
@@ -113,8 +116,8 @@ mutable struct Stepper{T<:AbstractArray, F, nT}
     f!::F  # RHS function
     y::T  # Solution at current t
     yn::T  # Solution at t+dt
-    yi::T  # Interpolant array (see interpolate())
-    yerr::T  # solution error estimate (from embedded RK)
+    yi::Union{Nothing, T}  # Interpolant array, allocated on first use (see interpolate())
+    yerr::Union{Nothing, T}  # error estimate, allocated on first use (see errnorm)
     ks::NTuple{7, T}  # k values (intermediate solutions for Runge-Kutta method)
     t::Float64  # current time (propagation variable)
     tn::Float64  # next time
@@ -134,12 +137,14 @@ end
 
 function Stepper(f!, y0, t, dt;
                  rtol=1e-6, atol=1e-10, safety=0.9, max_dt=Inf, min_dt=0,
-                 locextrap=true, norm=weaknorm)
+                 locextrap=true, norm=weaknorm, preserve_input=true)
     k1 = similar(y0)
     f!(k1, y0, t)
     ks = (k1, similar(k1), similar(k1), similar(k1), similar(k1), similar(k1), similar(k1))
-    yerr = similar(y0)
-    return Stepper(f!, copy(y0), copy(y0), similar(y0), yerr, ks,
+    # with preserve_input=false the stepper adopts y0 as its yn buffer (the caller's array
+    # is written into during stepping), saving one field-sized allocation
+    yn = preserve_input ? copy(y0) : y0
+    return Stepper(f!, copy(y0), yn, nothing, nothing, ks,
         float(t), float(t), float(dt), float(dt),
         float(rtol), float(atol), float(safety), float(max_dt), float(min_dt),
         locextrap, false, 0.0, 0.0, norm)
@@ -150,8 +155,8 @@ mutable struct PreconStepper{T<:AbstractArray, F, P, nT}
     prop!::P # linear propagator callable
     y::T  # Solution at current t
     yn::T  # Solution at t+dt
-    yi::T  # Interpolant array (see interpolate())
-    yerr::T  # solution error estimate (from embedded RK)
+    yi::Union{Nothing, T}  # Interpolant array, allocated on first use (see interpolate())
+    yerr::Union{Nothing, T}  # error estimate, allocated on first use (see errnorm)
     ks::NTuple{7, T}  # k values (intermediate solutions for Runge-Kutta method)
     t::Float64  # current time (propagation variable)
     tn::Float64  # next time
@@ -171,15 +176,19 @@ end
 
 function PreconStepper(f!, linop, y0, t, dt;
                        rtol=1e-6, atol=1e-10, safety=0.9, max_dt=Inf, min_dt=0,
-                       locextrap=true, norm=weaknorm)
+                       locextrap=true, norm=weaknorm, preserve_input=true)
     prop! = make_prop!(linop, y0)
     fbar! = make_fbar!(f!, prop!, y0)
     k1 = similar(y0)
-    fbar!(k1, y0, t, t)
+    # fbar! propagates (clobbers) its input in place; pass a transient copy so that y0 is
+    # untouched and k1 is computed through a scratch copy exactly as before
+    fbar!(k1, copy(y0), t, t)
     ks = (k1, similar(k1), similar(k1), similar(k1), similar(k1), similar(k1), similar(k1))
-    yerr = similar(y0)
+    # with preserve_input=false the stepper adopts y0 as its yn buffer (the caller's array
+    # is written into during stepping), saving one field-sized allocation
+    yn = preserve_input ? copy(y0) : y0
 
-    return PreconStepper(fbar!, prop!, copy(y0), copy(y0), similar(y0), yerr, ks,
+    return PreconStepper(fbar!, prop!, copy(y0), yn, nothing, nothing, ks,
         float(t), float(t), float(dt), float(dt), float(rtol), float(atol), float(safety),
         float(max_dt), float(min_dt), locextrap, false, 0.0, 0.0, norm)
 end
@@ -188,17 +197,16 @@ function step!(s)
     evaluate!(s)
 
     if s.locextrap
-        s.yn .= s.y
-        for jj = 1:7
-            b5[jj] == 0 || (s.yn .+= s.dt*b5[jj].*s.ks[jj])
-        end
+        # single fused pass; the n-ary + is left-associated, so per element this
+        # accumulates in exactly the same order as the sequential .+= version
+        # (b5[2] == 0 and is skipped, as before)
+        k1, k2, k3, k4, k5, k6, k7 = s.ks
+        c1 = s.dt*b5[1]; c3 = s.dt*b5[3]; c4 = s.dt*b5[4]
+        c5 = s.dt*b5[5]; c6 = s.dt*b5[6]; c7 = s.dt*b5[7]
+        @. s.yn = s.y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6 + c7*k7
     end
-    
-    fill!(s.yerr, 0)
-    for ii = 1:7
-        errest[ii] == 0 || (@. s.yerr += s.dt*s.ks[ii]*errest[ii])
-    end
-    s.err = s.norm(s.yerr, s.y, s.yn, s.rtol, s.atol)
+
+    s.err = errnorm(s)
     s.ok = s.err <= 1
     stepcontrolPI!(s)
     if s.ok
@@ -211,6 +219,32 @@ function step!(s)
     return s.ok
 end
 
+# Accumulate the ii-th Butcher stage state into yn in a single fused pass. The n-ary +
+# is left-associated, so per element this matches the sequential yn .= y; yn .+= ...
+# accumulation bit-for-bit (zero tableau entries are skipped, as before: B[6][2] == 0).
+function stage!(yn, y, dt, ks, ii)
+    k1, k2, k3, k4, k5, k6, k7 = ks
+    if ii == 1
+        c1 = dt*B[1][1]
+        @. yn = y + c1*k1
+    elseif ii == 2
+        c1 = dt*B[2][1]; c2 = dt*B[2][2]
+        @. yn = y + c1*k1 + c2*k2
+    elseif ii == 3
+        c1 = dt*B[3][1]; c2 = dt*B[3][2]; c3 = dt*B[3][3]
+        @. yn = y + c1*k1 + c2*k2 + c3*k3
+    elseif ii == 4
+        c1 = dt*B[4][1]; c2 = dt*B[4][2]; c3 = dt*B[4][3]; c4 = dt*B[4][4]
+        @. yn = y + c1*k1 + c2*k2 + c3*k3 + c4*k4
+    elseif ii == 5
+        c1 = dt*B[5][1]; c2 = dt*B[5][2]; c3 = dt*B[5][3]; c4 = dt*B[5][4]; c5 = dt*B[5][5]
+        @. yn = y + c1*k1 + c2*k2 + c3*k3 + c4*k4 + c5*k5
+    else
+        c1 = dt*B[6][1]; c3 = dt*B[6][3]; c4 = dt*B[6][4]; c5 = dt*B[6][5]; c6 = dt*B[6][6]
+        @. yn = y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6
+    end
+end
+
 function evaluate!(s::Stepper)
     # Set new time and stepsize values -- this happens at the beginning because
     # the interpolant still requires the old values after the step has finished
@@ -218,10 +252,7 @@ function evaluate!(s::Stepper)
     s.t = s.tn
     s.y .= s.yn
     for ii = 1:6
-        s.yn .= s.y
-        for jj = 1:ii
-            B[ii][jj] == 0 || (s.yn .+= s.dt*B[ii][jj].*s.ks[jj])
-        end
+        stage!(s.yn, s.y, s.dt, s.ks, ii)
         s.f!(s.ks[ii+1], s.yn, s.t+nodes[ii]*s.dt)
     end
 end
@@ -234,11 +265,14 @@ function evaluate!(s::PreconStepper)
     s.dt = s.dtn
     s.t = s.tn
     for ii = 1:6
-        s.yn .= s.y
-        for jj = 1:ii
-            B[ii][jj] == 0 || (s.yn .+= s.dt*B[ii][jj].*s.ks[jj])
-        end
+        stage!(s.yn, s.y, s.dt, s.ks, ii)
         s.fbar!(s.ks[ii+1], s.yn, s.t, s.t+nodes[ii]*s.dt)
+    end
+    if !s.locextrap
+        # fbar! propagated (clobbered) yn in place during the last stage; restore the
+        # stage-6 accumulation, which is what yn held here before fbar! became in-place.
+        # (With locextrap — the default — step! rebuilds yn from b5 anyway.)
+        stage!(s.yn, s.y, s.dt, s.ks, 6)
     end
 end
 
@@ -264,14 +298,25 @@ function interpolate(s::Stepper, ti::Float64)
     if ti == s.t
         return s.y
     end
+    interpolant!(s, ti)
+    return @. s.y + s.dt.*s.yi
+end
+
+"""
+Accumulate the dense-output interpolant at `ti` into `s.yi` (allocated on first use).
+Single fused pass; per element this matches the sequential fill!/.+= accumulation
+bit-for-bit (including the zero-weight `ks[2]` term, which the loop also included).
+"""
+function interpolant!(s, ti::Float64)
     σ = (ti - s.t)/s.dt
     σp = map(p -> σ^p, range(1, stop=4))
     b = sum(σp.*interpC, dims=1)
-    fill!(s.yi, 0)
-    for ii = 1:7
-         s.yi .+= s.ks[ii].*b[ii]
+    if s.yi === nothing
+        s.yi = similar(s.y)
     end
-    return @. s.y + s.dt.*s.yi
+    k1, k2, k3, k4, k5, k6, k7 = s.ks
+    w1 = b[1]; w2 = b[2]; w3 = b[3]; w4 = b[4]; w5 = b[5]; w6 = b[6]; w7 = b[7]
+    @. s.yi = 0 + k1*w1 + k2*w2 + k3*w3 + k4*w4 + k5*w5 + k6*w6 + k7*w7
 end
 
 "Interpolate solution, aka dense output."
@@ -286,13 +331,7 @@ function interpolate(s::PreconStepper, ti::Float64)
     if ti == s.t
         return s.y
     end
-    σ = (ti - s.t)/s.dt
-    σp = map(p -> σ^p, range(1, stop=4))
-    b = sum(σp.*interpC, dims=1)
-    fill!(s.yi, 0)
-    for ii = 1:7
-         s.yi .+= s.ks[ii].*b[ii]
-    end
+    interpolant!(s, ti)
     out =  @. s.y + s.dt.*s.yi
     s.prop!(out, s.t, ti)
     return out
@@ -326,14 +365,20 @@ function make_prop!(linop!, y0)
     return prop!
 end
 
-"Make closure for the pre-conditioned RHS function."
+"""
+Make closure for the pre-conditioned RHS function.
+
+!!! note
+    `fbar!(out, ybar, t1, t2)` propagates `ybar` to `t2` **in place** — the caller must
+    not rely on the contents of `ybar` afterwards. `evaluate!(::PreconStepper)` rebuilds
+    `yn` from `y` after every stage, so this is safe there and saves one field-sized
+    scratch buffer.
+"""
 function make_fbar!(f!, prop!, y0)
-    y = similar(y0)
-    fbar! = let f! = f!, prop! = prop!, y=y
+    fbar! = let f! = f!, prop! = prop!
         function fbar!(out, ybar, t1, t2)
-            y .= ybar
-            prop!(y, t1, t2) # propagate to t2
-            f!(out, y, t2) # evaluate RHS function
+            prop!(ybar, t1, t2) # propagate to t2 (in place)
+            f!(out, ybar, t2) # evaluate RHS function
             prop!(out, t1, t2, true) # propagate back to t1
         end
     end
@@ -382,6 +427,65 @@ function weaknorm(yerr, y, yn, rtol, atol)
     end
     errwt = max(max(sqrt(sy), sqrt(syn)), atol)
     return sqrt(syerr)/rtol/errwt
+end
+
+"""
+    fused_errnorm(norm)
+
+Return a function `f(s)` which computes the error metric for stepper `s` without
+materialising the error-estimate array, or `nothing` if no fused version exists for
+`norm`. In the latter case the error estimate is accumulated into `s.yerr` (allocated on
+first use) and `norm(yerr, y, yn, rtol, atol)` is called as before. Custom norms can opt
+in by adding a method for their own type.
+"""
+fused_errnorm(norm) = nothing
+fused_errnorm(::typeof(weaknorm)) = weaknorm_fused
+
+"""
+Fused version of [`weaknorm`](@ref): the error estimate is computed element-by-element on
+the fly instead of being accumulated into a separate array. Performs the same
+floating-point operations in the same order as the materialised version, so the result is
+bit-identical.
+"""
+function weaknorm_fused(s)
+    dt = s.dt
+    k1, k2, k3, k4, k5, k6, k7 = s.ks
+    e1 = errest[1]; e3 = errest[3]; e4 = errest[4] # errest[2] == 0 and is skipped,
+    e5 = errest[5]; e6 = errest[6]; e7 = errest[7] # matching the materialised loop
+    y = s.y
+    yn = s.yn
+    sy = 0
+    syn = 0
+    syerr = 0
+    @inbounds for ii in eachindex(y)
+        yerr = 0 + dt*k1[ii]*e1 + dt*k3[ii]*e3 + dt*k4[ii]*e4 +
+                   dt*k5[ii]*e5 + dt*k6[ii]*e6 + dt*k7[ii]*e7
+        sy += abs2(y[ii])
+        syn += abs2(yn[ii])
+        syerr += abs2(yerr)
+    end
+    errwt = max(max(sqrt(sy), sqrt(syn)), s.atol)
+    return sqrt(syerr)/s.rtol/errwt
+end
+
+"""
+Compute the error metric for the current step. Uses a fused, allocation-free version if
+one exists for `s.norm` (see [`fused_errnorm`](@ref)); otherwise materialises the error
+estimate into `s.yerr` and calls `s.norm`.
+"""
+function errnorm(s)
+    f = fused_errnorm(s.norm)
+    f === nothing || return f(s)
+    if s.yerr === nothing
+        s.yerr = similar(s.y)
+    end
+    k1, k2, k3, k4, k5, k6, k7 = s.ks
+    dt = s.dt
+    e1 = errest[1]; e3 = errest[3]; e4 = errest[4] # errest[2] == 0 and is skipped
+    e5 = errest[5]; e6 = errest[6]; e7 = errest[7]
+    # single fused pass; left-associated + matches the sequential .+= accumulation
+    @. s.yerr = 0 + dt*k1*e1 + dt*k3*e3 + dt*k4*e4 + dt*k5*e5 + dt*k6*e6 + dt*k7*e7
+    return s.norm(s.yerr, s.y, s.yn, s.rtol, s.atol)
 end
 
 "Simple proportional error controller, see e.g. Hairer eq. (4.13)."

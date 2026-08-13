@@ -377,7 +377,7 @@ function run(Eω, grid,
              linop, transform, FT, output;
              min_dz=0, max_dz=grid.zmax/2, init_dz=1e-4, z0=0.0,
              rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
-             status_period=1, step_on=nothing)
+             status_period=1, step_on=nothing, preserve_input=true)
 
     Et = FT \ Eω
 
@@ -405,7 +405,8 @@ function run(Eω, grid,
         transform, linop, Eω, z0, init_dz, grid.zmax, stepfun=stepfun,
         max_dt=max_dz, min_dt=min_dz,
         rtol=rtol, atol=atol, safety=safety, norm=norm,
-        status_period=status_period, step_on=step_on)
+        status_period=status_period, step_on=step_on,
+        preserve_input=preserve_input)
 end
 
 # run some code for precompilation
