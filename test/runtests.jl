@@ -6,160 +6,58 @@ testdir = dirname(@__FILE__)
 import Luna: set_fftw_mode
 set_fftw_mode(:estimate)
 
+# Test suite layout: testset name => files, in execution order.
+# Run a subset by passing substring patterns as test arguments, e.g.
+#   Pkg.test("Luna", test_args=["rk45", "freespace"])
+#   julia --project test/runtests.jl rk45 freespace
+# A file runs if any pattern occurs in its filename; no arguments runs everything.
+const TESTFILES = [
+    "Maths" => ["test_maths.jl"],
+    "PhysData" => ["test_physdata.jl"],
+    "Capillary" => ["test_capillary.jl"],
+    "Rectangular Modes" => ["test_rect_modes.jl"],
+    "ODE Solver" => ["test_rk45.jl"],
+    "Ionisation" => ["test_ionisation.jl"],
+    "Output" => ["test_output.jl"],
+    "Multimode" => ["test_multimode.jl"],
+    "Polarisation" => ["test_polarisation.jl", "test_polarisation_field.jl",
+                       "test_polarisation_env.jl"],
+    "Tools" => ["test_tools.jl"],
+    "Utils" => ["test_utils.jl"],
+    "Gradients" => ["test_gradient.jl"],
+    "Tapers" => ["test_tapers.jl"],
+    "Scans" => ["test_scans.jl"],
+    "Raman" => ["test_raman.jl"],
+    "Kerr" => ["test_kerr.jl"],
+    "LinearOps" => ["test_linops.jl"],
+    "Modes" => ["test_modes.jl"],
+    "Radial Propagation" => ["test_radial.jl"],
+    "Full 3D Propagation" => ["test_full_freespace.jl"],
+    "Performance fast paths" => ["test_perf_bitident.jl"],
+    "Antiresonant modes" => ["test_antiresonant.jl"],
+    "Fields" => ["test_fields.jl"],
+    "Processing" => ["test_processing.jl"],
+    "Vector plasma" => ["test_vectorplasma.jl"],
+    "Statistics" => ["test_stats.jl"],
+    "Gas mixtures" => ["test_mixtures.jl"],
+    "Interface" => ["test_interface.jl"],
+    "Linear propagation" => ["test_linearprop.jl"],
+    "GNLSE interface" => ["test_gnlse.jl"],
+    "Noise model" => ["test_noise.jl"],
+]
+
+const testpatterns = String.(ARGS)
+matches(fname) = isempty(testpatterns) || any(p -> occursin(p, fname), testpatterns)
+
 @testset "All" begin
-
-@testset "Maths" begin
-    @info("================= test_maths.jl")
-    include(joinpath(testdir, "test_maths.jl"))
+for (setname, files) in TESTFILES
+    torun = filter(matches, files)
+    isempty(torun) && continue
+    @testset "$setname" begin
+        for fname in torun
+            @info("================= $fname")
+            include(joinpath(testdir, fname))
+        end
+    end
 end
-
-@testset "PhysData" begin
-    @info("================= test_physdata.jl")
-    include(joinpath(testdir, "test_physdata.jl"))
-end
-
-@testset "Capillary" begin
-    @info("================= test_capillary.jl")
-    include(joinpath(testdir, "test_capillary.jl"))
-end
-
-@testset "Rectangular Modes" begin
-    @info("================= test_rect_modes.jl")
-    include(joinpath(testdir, "test_rect_modes.jl"))
-end
-
-@testset "ODE Solver" begin
-    @info("================= test_rk45.jl")
-    include(joinpath(testdir, "test_rk45.jl"))
-end
-
-@testset "Ionisation" begin
-    @info("================= test_ionisation.jl")
-    include(joinpath(testdir, "test_ionisation.jl"))
-end
-
-@testset "Output" begin
-    @info("================= test_output.jl")
-    include(joinpath(testdir, "test_output.jl"))
-end
-
-@testset "Multimode" begin
-    @info("================= test_multimode.jl")
-    include(joinpath(testdir, "test_multimode.jl"))
-end
-
-@testset "Polarisation" begin
-    @info("================= test_polarisation.jl")
-    include(joinpath(testdir, "test_polarisation.jl"))
-    @info("================= test_polarisation_field.jl")
-    include(joinpath(testdir, "test_polarisation_field.jl"))
-    @info("================= test_polarisation_env.jl")
-    include(joinpath(testdir, "test_polarisation_env.jl"))
-end
-
-@testset "Tools" begin
-    @info("================= test_tools.jl")
-    include(joinpath(testdir, "test_tools.jl"))
-end
-
-@testset "Utils" begin
-    @info("================= test_utils.jl")
-    include(joinpath(testdir, "test_utils.jl"))
-end
-
-@testset "Gradients" begin
-    @info("================= test_gradient.jl")
-    include(joinpath(testdir, "test_gradient.jl"))
-end
-
-@testset "Tapers" begin
-    @info("================= test_tapers.jl")
-    include(joinpath(testdir, "test_tapers.jl"))
-end
-
-@testset "Scans" begin
-    @info("================= test_scans.jl")
-    include(joinpath(testdir, "test_scans.jl"))
-end
-
-@testset "Raman" begin
-    @info("================= test_raman.jl")
-    include(joinpath(testdir, "test_raman.jl"))
-end
-
-@testset "Kerr" begin
-    @info("================= test_kerr.jl")
-    include(joinpath(testdir, "test_kerr.jl"))
-end
-
-@testset "LinearOps" begin
-    @info("================= test_linops.jl")
-    include(joinpath(testdir, "test_linops.jl"))
-end
-
-@testset "Modes" begin
-    @info("================= test_modes.jl")
-    include(joinpath(testdir, "test_modes.jl"))
-end
-
-@testset "Radial Propagation" begin
-    @info("================= test_radial.jl")
-    include(joinpath(testdir, "test_radial.jl"))
-end
-
-@testset "Full 3D Propagation" begin
-    @info("================= test_full_freespace.jl")
-    include(joinpath(testdir, "test_full_freespace.jl"))
-end
-
-@testset "Antiresonant modes" begin
-    @info("================= test_antiresonant.jl")
-    include(joinpath(testdir, "test_antiresonant.jl"))
-end
-
-@testset "Fields" begin
-    @info("================= test_fields.jl")
-    include(joinpath(testdir, "test_fields.jl"))
-end
-
-@testset "Processing" begin
-    @info("================= test_processing.jl")
-    include(joinpath(testdir, "test_processing.jl"))
-end
-
-@testset "Vector plasma" begin
-    @info("================= test_vectorplasma.jl")
-    include(joinpath(testdir, "test_vectorplasma.jl"))
-end
-
-@testset "Statistics" begin
-    @info("================= test_stats.jl")
-    include(joinpath(testdir, "test_stats.jl"))
-end
-
-@testset "Gas mixtures" begin
-    @info("================= test_mixtures.jl")
-    include(joinpath(testdir, "test_mixtures.jl"))
-end
-
-@testset "Interface" begin
-    @info("================= test_interface.jl")
-    include(joinpath(testdir, "test_interface.jl"))
-end
-
-@testset "Linear propagation" begin
-    @info("================= test_linearprop.jl")
-    include(joinpath(testdir, "test_linearprop.jl"))
-end
-
-@testset "GNLSE interface" begin
-    @info("================= test_gnlse.jl")
-    include(joinpath(testdir, "test_gnlse.jl"))
-end
-
-@testset "Noise model" begin
-    @info("================= test_noise.jl")
-    include(joinpath(testdir, "test_noise.jl"))
-end
-
 end
