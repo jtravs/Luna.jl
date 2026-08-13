@@ -13,7 +13,7 @@ import Test: @test, @testset
 using Luna
 Luna.set_fftw_mode(:estimate)
 
-function propagate_free3d(; N=16, R=400e-6, saveN=5,
+function propagate_free3d(; N=16, R=400e-6, saveN=5, factored=false,
                             setup_kwargs=(;), run_kwargs=(;))
     gas = :Ar
     pres = 4
@@ -29,8 +29,8 @@ function propagate_free3d(; N=16, R=400e-6, saveN=5,
     end
     responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(gas)),)
     nfun = PhysData.ref_index_fun(gas, pres)
-    linop = LinearOps.make_const_linop(grid, xygrid, nfun)
-    normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun)
+    linop = LinearOps.make_const_linop(grid, xygrid, nfun; factored)
+    normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored)
     inputs = Fields.GaussGaussField(λ0=λ0, τfwhm=τ, energy=energy, w0=w0)
     Eω, transform, FT = Luna.setup(grid, xygrid, densityfun, normfun, responses,
                                    inputs; setup_kwargs...)
@@ -77,14 +77,39 @@ end
     Utils.THREADING_MINLEN[] = 1
     try
         Eth, zth = propagate_free3d()
+        Efacth, zfacth = propagate_free3d(factored=true)
         Utils.set_threading(false)
         Eser, zser = propagate_free3d()
+        Efacser, zfacser = propagate_free3d(factored=true)
         @test isequal(Eth, Eser)
         @test isequal(zth, zser)
+        @test isequal(Efacth, Efacser)
+        @test isequal(zfacth, zfacser)
     finally
         Utils.set_threading(true)
         Utils.THREADING_MINLEN[] = minlen_old
     end
+end
+
+@testset "factored linop and norm" begin
+    Eref, zref = propagate_free3d()
+    Efac, zfac = propagate_free3d(factored=true)
+    @test isequal(Eref, Efac)
+    @test isequal(zref, zfac)
+    # elementwise identity of the lazy operators vs the materialised arrays
+    grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+    rgrid = Grid.RealGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+    xygrid = Grid.FreeGrid(400e-6, 16)
+    nfun = PhysData.ref_index_fun(:Ar, 4)
+    for g in (grid, rgrid)
+        lmat = LinearOps.make_const_linop(g, xygrid, nfun)
+        lfac = LinearOps.make_const_linop(g, xygrid, nfun; factored=true)
+        @test size(lfac) == size(lmat)
+        @test isequal(collect(lfac), lmat)
+    end
+    nmat = NonlinearRHS.const_norm_free(grid, xygrid, nfun)(0.0)
+    nfac = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true)(0.0)
+    @test isequal(collect(nfac), nmat)
 end
 
 @testset "pointwise Kerr agreement" begin

@@ -854,12 +854,44 @@ function trans_free_fast!(nl, t::TransFree, Eωk, z)
 end
 
 """
+    FreeNorm
+
+Lazy normalisation-factor array for 3D free-space propagation: stores only `k²(ω)` and
+`k⊥²(ky, kx)` and computes `√(k² - k⊥²)/(μ₀ω)` elements on demand, instead of caching the
+full `(nω, nky, nkx)` `Float64` array. Elements are identical (bit-for-bit) to those
+produced by [`norm_free`](@ref). Construct via `const_norm_free(...; factored=true)`.
+"""
+struct FreeNorm <: AbstractArray{Float64, 3}
+    ω::Vector{Float64}
+    k2::Vector{Float64}
+    kperp2::Matrix{Float64}
+end
+
+Base.size(n::FreeNorm) = (length(n.ω), size(n.kperp2, 1), size(n.kperp2, 2))
+Base.@propagate_inbounds function Base.getindex(n::FreeNorm, iω::Int, iy::Int, ix::Int)
+    ω = n.ω[iω]
+    ω == 0 && return 1.0
+    βsq = n.k2[iω] - n.kperp2[iy, ix]
+    βsq <= 0 && return 1.0
+    return sqrt(βsq)/(PhysData.μ_0*ω)
+end
+
+"""
     const_norm_free(grid, xygrid, nfun)
 
 Make function to return normalisation factor for 3D propagation without re-calculating at
-every step.
+every step. With `factored=true` the returned function yields a lazy [`FreeNorm`](@ref)
+(bit-identical elements, no field-sized cache).
 """
-function const_norm_free(grid, xygrid, nfun)
+function const_norm_free(grid, xygrid, nfun; factored::Bool=false)
+    if factored
+        kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
+        k2 = zero(grid.ω)
+        # same k² as norm_free computes (z-independent here, so evaluated once)
+        k2[grid.sidx] = (nfun.(wlfreq.(grid.ω[grid.sidx])).*grid.ω[grid.sidx]./PhysData.c).^2
+        out = FreeNorm(copy(grid.ω), k2, kperp2)
+        return z -> out
+    end
     nfunω = (ω; z) -> nfun(wlfreq(ω))
     normfun = norm_free(grid, xygrid, nfunω)
     out = copy(normfun(0.0))

@@ -1,49 +1,117 @@
 module LinearOps
 import FFTW
 import Hankel
-import Luna: Modes, Grid, PhysData, Maths
+import Luna: Modes, Grid, PhysData, Maths, RK45, Utils
 import Luna.PhysData: wlfreq
 
 #=================================================#
 #===============    FREE SPACE     ===============#
 #=================================================#
+
+# Single-element free-space linear operator: shared between the materialising
+# _fill_linop_xy! fill loops and the lazy FactoredFreeLinop, so the two can never drift
+# apart (they are bit-identical by construction).
+@inline function _linop_xy_element(ω, β1, k2ω, kperp2i)
+    βsq = k2ω - kperp2i
+    if βsq < 0
+        # negative βsq -> evanescent fields -> attenuation
+        return -im*(-β1*ω) - min(sqrt(abs(βsq)), 200)
+    else
+        return -im*(sqrt(βsq) - β1*ω)
+    end
+end
+
+"""
+    FactoredFreeLinop
+
+Lazy constant linear operator for free-space 3D propagation. Stores only the separable
+factors — `k²(ω)` (a vector) and `k⊥²(ky, kx)` (a small matrix) — instead of the full
+`(nω, nky, nkx)` `ComplexF64` array, and computes elements on demand. `RK45.make_prop!`
+has a specialised threaded kernel for it, so the array is never materialised during
+propagation. Construct via `make_const_linop(...; factored=true)`.
+"""
+struct FactoredFreeLinop <: AbstractArray{ComplexF64, 3}
+    ω::Vector{Float64}
+    k2::Vector{Float64} # (n(ω)·ω/c)² on the sidx region, 0 elsewhere
+    kperp2::Matrix{Float64} # (nky, nkx)
+    β1::Float64 # 1/velocity of the reference frame
+    βref::Float64 # reference β0, subtracted for EnvGrid without THG
+    subref::Bool # whether βref is subtracted (EnvGrid with thg=false)
+end
+
+Base.size(l::FactoredFreeLinop) = (length(l.ω), size(l.kperp2, 1), size(l.kperp2, 2))
+Base.@propagate_inbounds function Base.getindex(l::FactoredFreeLinop,
+                                                iω::Int, iy::Int, ix::Int)
+    val = _linop_xy_element(l.ω[iω], l.β1, l.k2[iω], l.kperp2[iy, ix])
+    l.subref ? val - (-im*l.βref) : val
+end
+
+"Threaded RK45 propagator kernel for the factored linear operator: the operator elements
+and their exponentials are computed on the fly — no array-sized reads or storage."
+function RK45.make_prop!(linop::FactoredFreeLinop, y0)
+    prop! = let linop=linop
+        function prop!(y, t1, t2, bwd=false)
+            dt = bwd ? (t1-t2) : (t2-t1)
+            ω = linop.ω; k2 = linop.k2; kperp2 = linop.kperp2
+            β1 = linop.β1; βref = linop.βref; subref = linop.subref
+            nω = length(ω)
+            Utils.tforeach(length(kperp2); ntotal=length(y)) do ii
+                kp = kperp2[ii]
+                base = (ii-1)*nω
+                @inbounds for iω in 1:nω
+                    l = _linop_xy_element(ω[iω], β1, k2[iω], kp)
+                    subref && (l -= -im*βref)
+                    y[base+iω] *= exp(l*dt)
+                end
+            end
+        end
+    end
+end
+
 """
     make_const_linop(grid, xygrid, n, frame_vel)
 
 Make constant linear operator for full 3D propagation. `n` is the refractive index (array)
-and β1 is 1/velocity of the reference frame.
+and β1 is 1/velocity of the reference frame. With `factored=true`, return a
+[`FactoredFreeLinop`](@ref) instead of the materialised array (bit-identical results,
+one field-sized array less).
 """
 function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
-                          n::AbstractArray, β1::Number)
+                          n::AbstractArray, β1::Number; factored::Bool=false)
     kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
     idcs = CartesianIndices((length(xygrid.ky), length(xygrid.kx)))
     k2 = zero(grid.ω)
     k2[grid.sidx] .= (n[grid.sidx] .* grid.ω[grid.sidx] ./ PhysData.c).^2
+    factored && return FactoredFreeLinop(copy(grid.ω), k2, kperp2, float(β1), 0.0, false)
     out = zeros(ComplexF64, (length(grid.ω), length(xygrid.ky), length(xygrid.kx)))
     _fill_linop_xy!(out, grid, β1, k2, kperp2, idcs)
     return out
 end
 
-function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid, nfun)
+function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid, nfun;
+                          factored::Bool=false)
     n = zero(grid.ω)
     n[grid.sidx] = nfun.(2π*PhysData.c./grid.ω[grid.sidx])
     β1 = PhysData.dispersion_func(1, nfun)(grid.referenceλ)
-    make_const_linop(grid, xygrid, n, β1)
+    make_const_linop(grid, xygrid, n, β1; factored)
 end
 
 function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
-                          n::AbstractArray, β1::Number, β0ref::Number; thg=false)
+                          n::AbstractArray, β1::Number, β0ref::Number;
+                          thg=false, factored::Bool=false)
     kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
     idcs = CartesianIndices((length(xygrid.ky), length(xygrid.kx)))
     k2 = zero(grid.ω)
     k2[grid.sidx] .= (n[grid.sidx].*grid.ω[grid.sidx]./PhysData.c).^2
+    factored && return FactoredFreeLinop(copy(grid.ω), k2, kperp2, float(β1),
+                                         float(β0ref), !thg)
     out = zeros(ComplexF64, (length(grid.ω), length(xygrid.ky), length(xygrid.kx)))
     _fill_linop_xy!(out, grid, β1, k2, kperp2, idcs, β0ref; thg=thg)
     return out
 end
 
-function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,     
-                          thg=false)
+function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,
+                          thg=false; factored::Bool=false)
     n = zero(grid.ω)
     n[grid.sidx] = nfun.(wlfreq.(grid.ω[grid.sidx]))
     β1 = PhysData.dispersion_func(1, nfun)(grid.referenceλ)
@@ -52,7 +120,7 @@ function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,
     else
         β0const = grid.ω0/PhysData.c * nfun(wlfreq(grid.ω0))
     end
-    make_const_linop(grid, xygrid, n, β1, β0const; thg=thg)
+    make_const_linop(grid, xygrid, n, β1, β0const; thg=thg, factored)
 end
 
 """
@@ -77,13 +145,7 @@ end
 function _fill_linop_xy!(out, grid::Grid.RealGrid, β1::Float64, k2, kperp2, idcs)
     for ii in idcs
         for iω in eachindex(grid.ω)
-            βsq = k2[iω] - kperp2[ii]
-            if βsq < 0
-                # negative βsq -> evanescent fields -> attenuation
-                out[iω, ii] = -im*(-β1*grid.ω[iω]) - min(sqrt(abs(βsq)), 200)
-            else
-                out[iω, ii] = -im*(sqrt(βsq) - β1*grid.ω[iω])
-            end
+            out[iω, ii] = _linop_xy_element(grid.ω[iω], β1, k2[iω], kperp2[ii])
         end
     end
 end
@@ -104,13 +166,7 @@ end
 function _fill_linop_xy!(out, grid::Grid.EnvGrid, β1::Float64, k2, kperp2, idcs, βref; thg)
     for ii in idcs
         for iω in eachindex(grid.ω)
-            βsq = k2[iω] - kperp2[ii]
-            if βsq < 0
-                # negative βsq -> evanescent fields -> attenuation
-                out[iω, ii] = -im*(-β1*grid.ω[iω]) - min(sqrt(abs(βsq)), 200)
-            else
-                out[iω, ii] = -im*(sqrt(βsq) - β1*grid.ω[iω])
-            end
+            out[iω, ii] = _linop_xy_element(grid.ω[iω], β1, k2[iω], kperp2[ii])
             if !thg
                 out[iω, ii] -= -im*βref
             end
