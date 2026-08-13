@@ -178,13 +178,17 @@ function step!(s)
     s.ok && (s.ks[1] .= s.ks[end])
     evaluate!(s)
 
-    if s.locextrap
-        s.yn .= s.y
-        for jj = 1:7
-            b5[jj] == 0 || (s.yn .+= s.dt*b5[jj].*s.ks[jj])
-        end
+    # Propagate the 5th-order solution (local extrapolation, the default) or the embedded
+    # 4th-order one. Both are formed explicitly rather than reusing the stage-6
+    # accumulation evaluate! happens to leave in yn -- which is the 5th-order solution --
+    # so this does not depend on the RHS leaving its input array alone. For locextrap the
+    # two are bit-identical anyway: b5[1:6] == B[6], b5[7] == 0, same accumulation order.
+    bprop = s.locextrap ? b5 : b4
+    s.yn .= s.y
+    for jj = 1:7
+        bprop[jj] == 0 || (s.yn .+= s.dt*bprop[jj].*s.ks[jj])
     end
-    
+
     fill!(s.yerr, 0)
     for ii = 1:7
         errest[ii] == 0 || (@. s.yerr += s.dt*s.ks[ii]*errest[ii])

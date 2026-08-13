@@ -243,3 +243,56 @@ for dns_precon in (false, true)
     @test dns_probe(0.1; precon=dns_precon, rtol=1e-14) == r1
 end
 
+# --- which weight vector is which ------------------------------------------
+# The two vectors of the Dormand-Prince RK5(4)7M pair, as exact rationals. They
+# are told apart by the quadrature order conditions Σᵢbᵢcᵢᵖ = 1/(p+1): the
+# 5th-order vector satisfies them through p = 4, the embedded 4th-order one only
+# through p = 3. dopri.jl had the two labelled the wrong way round, so
+# locextrap=true propagated the *lower*-order solution; these tests pin the
+# correction down.
+dns_c = Rational{BigInt}[0, 1//5, 3//10, 4//5, 8//9, 1, 1]
+dns_v5 = Rational{BigInt}[35//384, 0, 500//1113, 125//192, -2187//6784, 11//84, 0]
+dns_v4 = Rational{BigInt}[5179//57600, 0, 7571//16695, 393//640, -92097//339200,
+                          187//2100, 1//40]
+dns_quad(b, p) = sum(b .* dns_c.^p) == 1//(p + 1)
+@test all(p -> dns_quad(dns_v5, p), 0:4)
+@test all(p -> dns_quad(dns_v4, p), 0:3)
+@test !dns_quad(dns_v4, 4)
+@test RK45.b5 == Float64.(dns_v5)
+@test RK45.b4 == Float64.(dns_v4)
+# DOPRI5 is FSAL: the final Butcher row is the 5th-order solution, which is
+# therefore where stage 7 is evaluated, and which the dense output reproduces
+# at σ = 1.
+@test RK45.b5[1:6] == RK45.B[6]
+@test RK45.b5[7] == 0
+@test vec(sum(RK45.interpC, dims=1)) ≈ RK45.b5
+# The error estimate is untouched by the relabelling: it is still the standard
+# DOPRI5 E vector, (4th order) - (5th order).
+@test RK45.errest ≈ [-71/57600, 0, 71/16695, -71/1920, 17253/339200, -22/525, 1/40]
+
+# The stepped solution converges at 5th order with local extrapolation (the
+# default) and at 4th without it; and with local extrapolation the interpolant
+# is a continuous extension of the solution actually propagated, so at the step
+# endpoint it reproduces yn to round-off. Without it the two differ by the full
+# embedded error estimate -- which is why interpolate() cannot simply be trusted
+# at σ ≈ 1.
+for dns_precon in (false, true)
+    r1 = dns_probe(0.1; precon=dns_precon)
+    r2 = dns_probe(0.025; precon=dns_precon)
+    n1 = dns_probe(0.1; precon=dns_precon, locextrap=false)
+    n2 = dns_probe(0.025; precon=dns_precon, locextrap=false)
+    @test log(r1.eglob/r2.eglob)/log(4) > 4.6
+    @test 3.5 < log(n1.eglob/n2.eglob)/log(4) < 4.6
+    @test r1.egap < 1e-12
+    @test n1.egap > 1e-9
+end
+
+# FSAL is exact: k7 is the RHS evaluated at the solution that is propagated, so
+# after a step ks[1] is the RHS at that step's own endpoint.
+dns_s = dns_stepper(0.1)
+RK45.step!(dns_s)
+RK45.step!(dns_s)  # the second step performs the deferred FSAL move
+dns_fk = similar(dns_s.y)
+dns_f!(dns_fk, dns_s.y, dns_s.t)
+@test dns_s.ks[1] ≈ dns_fk rtol=1e-13
+
