@@ -50,6 +50,9 @@ const TESTFILES = [
 ]
 
 const testpatterns = String.(ARGS)
+# Consume the selection patterns: some test files (via Luna.Scans) parse ARGS
+# themselves and would reject leftover arguments.
+empty!(ARGS)
 matches(fname) = isempty(testpatterns) || any(p -> occursin(p, fname), testpatterns)
 
 @testset "All" begin
