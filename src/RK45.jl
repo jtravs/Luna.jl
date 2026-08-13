@@ -32,11 +32,12 @@ function solve(s, tmax; stepfun=donothing!, output=false, outputN=201,
                         status_period=1, repeat_limit=10, step_on=nothing)
     # `step_on`: strictly increasing positions the stepper must land on
     # exactly (clipping the adaptive step, never enlarging it). Use for save
-    # positions: the dense-output interpolant shares the error norm's blind
-    # spot (it is accurate for the dominant field components, not weak ones),
-    # so interpolated saves of a weak signal can scatter at the percent level
-    # between otherwise identical runs. Landing on the position instead makes
-    # the save an exact step endpoint. Costs a few extra steps.
+    # positions: the dense-output interpolant is one order less accurate than
+    # the stepped solution (4th vs 5th) and shares the error norm's blind spot
+    # (the step size is set by the dominant field components, not the weak
+    # ones), so interpolated saves of a weak signal can scatter between
+    # otherwise identical runs. Landing on the position instead makes the save
+    # an exact step endpoint. Costs a few extra steps.
     step_on = isnothing(step_on) ? Float64[] :
         sort(collect(Float64, filter(z -> z > 0, step_on)))
     next_on = 1
@@ -130,7 +131,8 @@ mutable struct Stepper{T<:AbstractArray, F, nT}
     max_dt::Float64  # maximum value for dt (default Inf)
     min_dt::Float64  # minimum value for dt (default 0)
     locextrap::Bool  # true if using local extrapolation
-    ok::Bool  # true if current step was successful
+    ok::Bool  # true if current step was successful. Also means "an FSAL move is owed"
+              # (see step!), so nothing may write it after step! has returned.
     err::Float64  # error metric to be compared to tol
     errlast::Float64  # error of the most recent successful step
     norm::nT # function to calculate error metric, defaults to RK45.weaknorm
@@ -169,7 +171,8 @@ mutable struct PreconStepper{T<:AbstractArray, F, P, nT}
     max_dt::Float64  # maximum value for dt (default Inf)
     min_dt::Float64  # minimum value for dt (default 0)
     locextrap::Bool  # true if using local extrapolation
-    ok::Bool  # true if current step was successful
+    ok::Bool  # true if current step was successful. Also means "an FSAL move is owed"
+              # (see step!), so nothing may write it after step! has returned.
     err::Float64  # error metric to be compared to tol
     errlast::Float64  # error of the most recent successful step
     norm::nT  # function to calculate error metric, defaults to RK45.weaknorm
@@ -195,15 +198,33 @@ function PreconStepper(f!, linop, y0, t, dt;
 end
 
 function step!(s)
+    # FSAL: k7 of the previous step is k1 of this one. The move is deferred to here
+    # (rather than done at the end of step!) because the completed step's dense output is
+    # consumed between step! returning and this call, and the interpolant's k1 weight is
+    # nonzero (interpC column 1; b1(1) = 35/384) -- moving it any earlier degrades every
+    # interpolated save from 4th to 2nd order. s.ok is false before the first step (ks[2:7]
+    # are `similar`, i.e. undef) and after a rejected step (k1 must survive for the retry).
+    # For the PreconStepper this must also stay ahead of evaluate!'s rebase of ks[1] into
+    # the new anchor frame, which it does by construction.
+    s.ok && (s.ks[1] .= s.ks[end])
     evaluate!(s)
 
+    # Propagate the 5th-order solution (local extrapolation, the default) or the embedded
+    # 4th-order one. Single fused pass; the n-ary + is left-associated, so per element this
+    # accumulates in exactly the same order as the sequential .+= version (zero weights are
+    # skipped, as before: b5[2] == b5[7] == 0, b4[2] == 0). Both are formed explicitly
+    # rather than reusing the stage-6 accumulation evaluate! leaves in yn -- which is the
+    # 5th-order solution -- so this does not depend on fbar! leaving its input alone.
+    k1, k2, k3, k4, k5, k6, k7 = s.ks
     if s.locextrap
-        # single fused pass; the n-ary + is left-associated, so per element this
-        # accumulates in exactly the same order as the sequential .+= version
-        # (b5[2] == 0 and is skipped, as before)
-        k1, k2, k3, k4, k5, k6, k7 = s.ks
         c1 = s.dt*b5[1]; c3 = s.dt*b5[3]; c4 = s.dt*b5[4]
-        c5 = s.dt*b5[5]; c6 = s.dt*b5[6]; c7 = s.dt*b5[7]
+        c5 = s.dt*b5[5]; c6 = s.dt*b5[6]
+        tchunks(s.yn, s.y, k1, k3, k4, k5, k6) do yn, y, k1, k3, k4, k5, k6
+            @. yn = y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6
+        end
+    else
+        c1 = s.dt*b4[1]; c3 = s.dt*b4[3]; c4 = s.dt*b4[4]
+        c5 = s.dt*b4[5]; c6 = s.dt*b4[6]; c7 = s.dt*b4[7]
         tchunks(s.yn, s.y, k1, k3, k4, k5, k6, k7) do yn, y, k1, k3, k4, k5, k6, k7
             @. yn = y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6 + c7*k7
         end
@@ -214,7 +235,6 @@ function step!(s)
     stepcontrolPI!(s)
     if s.ok
         s.tn = s.t + s.dt
-        s.ks[1] .= s.ks[end]
     else
         s.yn .= s.y
     end
@@ -283,12 +303,8 @@ function evaluate!(s::PreconStepper)
         stage!(s.yn, s.y, s.dt, s.ks, ii)
         s.fbar!(s.ks[ii+1], s.yn, s.t, s.t+nodes[ii]*s.dt)
     end
-    if !s.locextrap
-        # fbar! propagated (clobbered) yn in place during the last stage; restore the
-        # stage-6 accumulation, which is what yn held here before fbar! became in-place.
-        # (With locextrap — the default — step! rebuilds yn from b5 anyway.)
-        stage!(s.yn, s.y, s.dt, s.ks, 6)
-    end
+    # fbar! propagated (clobbered) yn in place during the last stage, but that no longer
+    # matters: step! rebuilds yn from the weight vector in both locextrap branches.
 end
 
 prop!_maybe(s::PreconStepper) = s.prop!(s.yn, s.t, s.tn)
@@ -296,14 +312,12 @@ prop!_maybe(s) = nothing
 
 "Interpolate solution, aka dense output."
 function interpolate(s::Stepper, ti::Float64)
-    # Snap queries within round-off of the step endpoint to the stepped
-    # solution. A `step_on` landing is t + (target - t), which can differ from
-    # target by 1 ulp, and the interpolation polynomial at σ ≈ 1 does NOT
-    # reproduce yn: its σ=1 weights equal the b4-labelled (FSAL-row) vector,
-    # not the b5-labelled weights used by locextrap propagation (see dopri.jl),
-    # so it differs from yn by the full embedded error estimate — which is
-    # large relative to weak solution components. Bitwise equality is
-    # therefore not a sufficient endpoint test.
+    # Snap queries within round-off of the step endpoint to the stepped solution. A
+    # `step_on` landing is t + (target - t), which can differ from target by 1 ulp, so
+    # bitwise equality with tn is not a sufficient endpoint test. The polynomial's σ=1
+    # weights are b5 (sum(interpC, dims=1) == b5), i.e. exactly what locextrap
+    # propagation uses, so just outside the window it agrees with yn to round-off —
+    # but a save asked for at the endpoint should be the stepped solution itself.
     if abs(ti - s.tn) <= 4*eps(abs(s.tn))
         return s.yn
     end
