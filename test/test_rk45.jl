@@ -1,4 +1,5 @@
 import FFTW
+import Logging
 import Luna: RK45
 import Test: @test
 
@@ -133,4 +134,112 @@ zarrpf, Aarrpf = RK45.solve_precon(fnl!, Linfunc, copy(Aω), z, dz, zmax,
 @test isapprox(abs2.(Aarrpf[:, 1]), abs2.(Aarrpf[:, end]), rtol=1e-3)
 # Is there a difference if the linear part is a function (but constant)?
 @test all(abs2.(Aarrp) .== abs2.(Aarrpf))
+
+# --- dense output (interpolant) accuracy ------------------------------------
+# DOPRI5 is FSAL: k7 of a step is k1 of the next. That move must not happen
+# until the completed step's dense output has been consumed, because the
+# interpolant's k1 weight is nonzero (interpC column 1, b1(1) = 35/384). Doing
+# it inside the step poisons every interpolated save by dt*b1(σ)*(k7 - k1),
+# which is O(h²) -- the dense output drops from 4th to 2nd order while the
+# stepped endpoints, and therefore almost every other test, stay untouched.
+#
+# Test problem: y' = i(a + |y|²)y on a single element. |y| is conserved, so
+#     y(t) = y(t₀)*exp(i(a + |y(t₀)|²)(t - t₀))
+# exactly -- and the same holds for the preconditioned split with
+# linop = [i*a] and nonlinear part i|y|²y. Setting min_dt == max_dt == h pins
+# every step to exactly h (steplims! clamps from both sides), so the
+# convergence studies below are fixed-step and cannot be disturbed by the
+# step-size controller.
+
+dns_a = 3.0
+dns_f!(o, y, t) = (o[1] = im*(dns_a + abs2(y[1]))*y[1]; o)
+dns_fnl!(o, y, t) = (o[1] = im*abs2(y[1])*y[1]; o)
+dns_lin = ComplexF64[im*dns_a]
+dns_y0() = ComplexF64[1.0]
+"Exact solution at `t` of the trajectory passing through `y` at `t0`."
+dns_exact(y, t0, t) = y*exp(im*(dns_a + abs2(y))*(t - t0))
+
+dns_stepper(h; precon=false, rtol=1e-2, locextrap=true) = precon ?
+    RK45.PreconStepper(dns_fnl!, dns_lin, dns_y0(), 0.0, h;
+                       rtol=rtol, min_dt=h, max_dt=h, locextrap=locextrap) :
+    RK45.Stepper(dns_f!, dns_y0(), 0.0, h;
+                 rtol=rtol, min_dt=h, max_dt=h, locextrap=locextrap)
+
+"""
+Run the model problem to `tmax` with every step pinned to exactly `h`, probing
+the dense output of each completed step. Returns
+    eloc:   max over steps of the dense-output error at the step midpoint,
+            measured against the exact solution continued from that step's own
+            starting value, so the trajectory's accumulated error cannot mask it
+    eslope: max over steps of the relative error in the interpolant's slope at
+            the start of the step, which must be f(y(tₙ)). This sees the FSAL
+            corruption directly, without any convergence study
+    eglob:  max over steps of the error of the stepped solution itself
+    egap:   max over steps of the mismatch between the interpolant just inside
+            the step endpoint and the stepped endpoint yn
+    nsteps, dterr: step count, and max deviation of the realised step from `h`
+"""
+function dns_probe(h; precon=false, tmax=2.0, rtol=1e-2, locextrap=true)
+    y0 = dns_y0()
+    tprev = 0.0
+    yprev = copy(y0)
+    eloc = 0.0; eslope = 0.0; eglob = 0.0; egap = 0.0; nsteps = 0; dterr = 0.0
+    probe = function (yn, tn, dtn, interp)
+        dtk = tn - tprev  # the 3rd argument is the *next* step size, not this one
+        dterr = max(dterr, abs(dtk - h))
+        y0k = yprev[1]
+        tm = tprev + dtk/2
+        eloc = max(eloc, abs(interp(tm)[1] - dns_exact(y0k, tprev, tm)))
+        δ = 1e-6*dtk
+        slope = (interp(tprev + δ)[1] - y0k)/δ
+        exslope = im*(dns_a + abs2(y0k))*y0k
+        eslope = max(eslope, abs(slope - exslope)/abs(exslope))
+        egap = max(egap, abs(interp(tn - 10*eps(abs(tn)))[1] - yn[1])/abs(yn[1]))
+        eglob = max(eglob, abs(yn[1] - dns_exact(y0[1], 0.0, tn)))
+        nsteps += 1
+        tprev = tn
+        yprev .= yn  # yn is the stepper's live buffer, so copy it
+    end
+    Logging.with_logger(Logging.NullLogger()) do
+        RK45.solve(dns_stepper(h; precon=precon, rtol=rtol, locextrap=locextrap),
+                   tmax; stepfun=probe)
+    end
+    (eloc=eloc, eslope=eslope, eglob=eglob, egap=egap, nsteps=nsteps, dterr=dterr)
+end
+
+# A step must leave ks[1] alone: the FSAL move belongs to the *next* step, after
+# the dense output of this one has been consumed. (For the PreconStepper the
+# first step's rebase of ks[1] is prop!(., t, t), an exact identity, so the
+# comparison is bitwise for both stepper types.)
+for dns_precon in (false, true)
+    s = dns_stepper(0.1; precon=dns_precon)
+    dns_k1 = copy(s.ks[1])
+    @test RK45.step!(s)
+    @test s.ks[1] == dns_k1  # still pending...
+    @test RK45.step!(s)
+    @test s.ks[1] != dns_k1  # ...and performed by the next step
+end
+
+for dns_precon in (false, true)
+    r1 = dns_probe(0.1; precon=dns_precon)
+    r2 = dns_probe(0.025; precon=dns_precon)
+    # the steps really were pinned to h, so the convergence study is meaningful
+    @test r1.dterr < 1e-9
+    @test r2.dterr < 1e-9
+    @test r1.nsteps >= 20
+    @test r2.nsteps >= 80
+    # The interpolant must leave the step start along f(y(tₙ)). With the FSAL
+    # move done too early this is wrong at the 40% (plain) / 2.5% (precon)
+    # level; correct, it is 2e-5 / 2e-7 at h = 0.1.
+    @test r1.eslope < 1e-3
+    @test r2.eslope < 1e-5
+    # Convergence order of the pure dense-output error: 4 or better. With the
+    # FSAL move done too early it is exactly 2.
+    @test log(r1.eloc/r2.eloc)/log(4) > 3.5
+    @test r1.eloc < 1e-4  # buggy: 1.6e-2 (plain), 1.0e-3 (precon)
+    # With min_dt == max_dt every step is accepted only because steplims!
+    # forces ok = true; the FSAL move must be made on those steps too, and the
+    # result must not depend on the tolerance that is being overridden.
+    @test dns_probe(0.1; precon=dns_precon, rtol=1e-14) == r1
+end
 
