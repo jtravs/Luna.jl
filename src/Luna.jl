@@ -40,15 +40,27 @@ Set number of threads to be used by FFTW. If set to `0`, the number of threads u
 FFTW is determined automatically (see [`Utils.FFTWthreads()`](@ref)).
 
 An explicit `nthr > 0` takes effect even when Julia itself runs single-threaded, in
-which case libfftw3 uses its own native pthreads pool rather than Julia tasks. This is
-the recommended way to run threaded FFTs on Julia ≥ 1.12, where the Julia-task FFTW
-callback can segfault: start Julia with one thread and call `set_fftw_threads(n)`
-(e.g. in a Slurm scan script, together with `SlurmExec(...; nthreads=1, cpus=n)`).
+which case libfftw3 uses its own native pthreads pool rather than Julia tasks.
+
+On Julia ≥ 1.12 with more than one Julia thread, FFTW.jl's Julia-task threading callback
+(which can segfault there) is deregistered automatically and libfftw3's native pthreads
+pool is used instead — so `JULIA_NUM_THREADS > 1` (for Luna's threaded elementwise
+kernels) combines safely with threaded FFTs. On a single Julia thread the callback is
+never installed and nothing needs deregistering.
 """
 function set_fftw_threads(nthr=0)
     settings["fftw_threads"] = nthr
     FFTW.set_num_threads(Utils.FFTWthreads())
+    if VERSION >= v"1.12" && Threads.nthreads() > 1
+        if Utils.use_native_fftw_threads() && !_native_fftw_logged[]
+            _native_fftw_logged[] = true
+            Logging.@info("Julia ≥ 1.12 with $(Threads.nthreads()) threads: " *
+                          "using libfftw3's native pthreads for FFTs " *
+                          "(FFTW.jl's Julia-task callback deregistered).")
+        end
+    end
 end
+const _native_fftw_logged = Ref(false)
 
 function __init__()
     set_fftw_threads()

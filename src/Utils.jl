@@ -87,6 +87,95 @@ function FFTWthreads()
     Threads.nthreads() == 1 ? 1 : 4*Threads.nthreads()
 end
 
+"""
+    use_native_fftw_threads()
+
+Hand FFT threading back to libfftw3's own pthread pool by deregistering FFTW.jl's
+Julia-task (partr) threading callback, which segfaults on Julia ≥ 1.12. This makes
+`JULIA_NUM_THREADS > 1` safe to combine with threaded FFTs. Bit-identical: the callback
+only changes how FFTW's parallel jobs are executed, never the plans or their results.
+
+Returns `true` if the callback was deregistered, `false` if not applicable (MKL provider,
+or FFTW.jl internals changed).
+"""
+function use_native_fftw_threads()
+    # Coupled to FFTW.jl internals (verified against FFTW.jl 1.10): feature-detect and
+    # bail out gracefully rather than erroring on future versions.
+    FFTW.fftw_provider == "fftw" || return false
+    (isdefined(FFTW, :libfftw3) && isdefined(FFTW, :libfftw3f)) || return false
+    try
+        # Force both libraries to load first: on Julia ≥ 1.11, FFTW.jl installs its
+        # callback lazily at first library load, so deregistering before both are loaded
+        # would be silently undone. set_num_threads ccalls into both libraries.
+        FFTW.set_num_threads(FFTWthreads())
+        ccall((:fftw_threads_set_callback, FFTW.libfftw3), Cvoid,
+              (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL)
+        ccall((:fftwf_threads_set_callback, FFTW.libfftw3f), Cvoid,
+              (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL)
+        return true
+    catch e
+        Logging.@warn("Could not deregister the FFTW.jl threading callback: $e")
+        return false
+    end
+end
+
+# Global switches for the threaded elementwise kernels: `THREADING[]` turns them off
+# entirely; arrays smaller than `THREADING_MINLEN[]` always run serially (threading
+# overhead dominates there, e.g. for modal propagation).
+const THREADING = Ref(true)
+const THREADING_MINLEN = Ref(1<<20)
+
+"Enable or disable Luna's threaded elementwise kernels (threaded and serial execution
+are bit-identical; this only matters for benchmarking and testing)."
+set_threading(on::Bool) = (THREADING[] = on)
+
+_threading(n) = THREADING[] && n >= THREADING_MINLEN[] && Threads.nthreads() > 1
+
+"""
+    tforeach(f, n)
+
+Call `f(i)` for every `i in 1:n`, splitting the range into one contiguous chunk per
+thread for large `n` (see `THREADING_MINLEN`). The work must be elementwise-independent;
+threaded and serial execution are then bit-identical.
+"""
+function tforeach(f, n::Integer)
+    if _threading(n)
+        nchunks = Threads.nthreads()
+        Threads.@threads :static for c in 1:nchunks
+            for i in (n*(c-1))÷nchunks + 1 : (n*c)÷nchunks
+                f(i)
+            end
+        end
+    else
+        for i in 1:n
+            f(i)
+        end
+    end
+    return nothing
+end
+
+"""
+    tchunks(f, arrs...)
+
+Call `f` on matching contiguous linear-index views of `arrs`, one chunk per thread for
+large arrays; `f(arrs...)` directly otherwise. Use to thread a fused elementwise
+broadcast: `tchunks((d, s) -> (@. d = 2s), dest, src)`. The broadcast must be purely
+elementwise; threaded and serial execution are then bit-identical.
+"""
+function tchunks(f, arrs...)
+    n = length(first(arrs))
+    if _threading(n)
+        nchunks = Threads.nthreads()
+        Threads.@threads :static for c in 1:nchunks
+            rng = (n*(c-1))÷nchunks + 1 : (n*c)÷nchunks
+            f(map(a -> view(a, rng), arrs)...)
+        end
+    else
+        f(arrs...)
+    end
+    return nothing
+end
+
 function loadFFTwisdom()
     FFTW.set_num_threads(FFTWthreads())
     fpath = joinpath(cachedir(), "FFTWcache_$(FFTWthreads())threads")

@@ -68,6 +68,25 @@ end
     @test isequal(zref, zmat)
 end
 
+@testset "threaded kernels" begin
+    import Luna: Utils
+    # lower the size threshold so the small test arrays actually exercise the threaded
+    # code paths (they are dormant below THREADING_MINLEN); with a single Julia thread
+    # both runs are serial and this test is trivial
+    minlen_old = Utils.THREADING_MINLEN[]
+    Utils.THREADING_MINLEN[] = 1
+    try
+        Eth, zth = propagate_free3d()
+        Utils.set_threading(false)
+        Eser, zser = propagate_free3d()
+        @test isequal(Eth, Eser)
+        @test isequal(zth, zser)
+    finally
+        Utils.set_threading(true)
+        Utils.THREADING_MINLEN[] = minlen_old
+    end
+end
+
 @testset "pointwise Kerr agreement" begin
     import Luna: Nonlinear, NonlinearRHS
     for (resp, TT) in ((Nonlinear.Kerr_env(1e-25), ComplexF64),

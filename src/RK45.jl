@@ -2,7 +2,8 @@ module RK45
 import Dates
 import Logging
 import Printf: @sprintf
-import Luna.Utils: format_elapsed
+import Luna: Utils
+import Luna.Utils: format_elapsed, tchunks
 
 #Get Butcher tableau etc from separate file (for convenience of changing if wanted)
 include("dopri.jl")
@@ -203,7 +204,9 @@ function step!(s)
         k1, k2, k3, k4, k5, k6, k7 = s.ks
         c1 = s.dt*b5[1]; c3 = s.dt*b5[3]; c4 = s.dt*b5[4]
         c5 = s.dt*b5[5]; c6 = s.dt*b5[6]; c7 = s.dt*b5[7]
-        @. s.yn = s.y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6 + c7*k7
+        tchunks(s.yn, s.y, k1, k3, k4, k5, k6, k7) do yn, y, k1, k3, k4, k5, k6, k7
+            @. yn = y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6 + c7*k7
+        end
     end
 
     s.err = errnorm(s)
@@ -226,22 +229,34 @@ function stage!(yn, y, dt, ks, ii)
     k1, k2, k3, k4, k5, k6, k7 = ks
     if ii == 1
         c1 = dt*B[1][1]
-        @. yn = y + c1*k1
+        tchunks(yn, y, k1) do yn, y, k1
+            @. yn = y + c1*k1
+        end
     elseif ii == 2
         c1 = dt*B[2][1]; c2 = dt*B[2][2]
-        @. yn = y + c1*k1 + c2*k2
+        tchunks(yn, y, k1, k2) do yn, y, k1, k2
+            @. yn = y + c1*k1 + c2*k2
+        end
     elseif ii == 3
         c1 = dt*B[3][1]; c2 = dt*B[3][2]; c3 = dt*B[3][3]
-        @. yn = y + c1*k1 + c2*k2 + c3*k3
+        tchunks(yn, y, k1, k2, k3) do yn, y, k1, k2, k3
+            @. yn = y + c1*k1 + c2*k2 + c3*k3
+        end
     elseif ii == 4
         c1 = dt*B[4][1]; c2 = dt*B[4][2]; c3 = dt*B[4][3]; c4 = dt*B[4][4]
-        @. yn = y + c1*k1 + c2*k2 + c3*k3 + c4*k4
+        tchunks(yn, y, k1, k2, k3, k4) do yn, y, k1, k2, k3, k4
+            @. yn = y + c1*k1 + c2*k2 + c3*k3 + c4*k4
+        end
     elseif ii == 5
         c1 = dt*B[5][1]; c2 = dt*B[5][2]; c3 = dt*B[5][3]; c4 = dt*B[5][4]; c5 = dt*B[5][5]
-        @. yn = y + c1*k1 + c2*k2 + c3*k3 + c4*k4 + c5*k5
+        tchunks(yn, y, k1, k2, k3, k4, k5) do yn, y, k1, k2, k3, k4, k5
+            @. yn = y + c1*k1 + c2*k2 + c3*k3 + c4*k4 + c5*k5
+        end
     else
         c1 = dt*B[6][1]; c3 = dt*B[6][3]; c4 = dt*B[6][4]; c5 = dt*B[6][5]; c6 = dt*B[6][6]
-        @. yn = y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6
+        tchunks(yn, y, k1, k3, k4, k5, k6) do yn, y, k1, k3, k4, k5, k6
+            @. yn = y + c1*k1 + c3*k3 + c4*k4 + c5*k5 + c6*k6
+        end
     end
 end
 
@@ -316,7 +331,9 @@ function interpolant!(s, ti::Float64)
     end
     k1, k2, k3, k4, k5, k6, k7 = s.ks
     w1 = b[1]; w2 = b[2]; w3 = b[3]; w4 = b[4]; w5 = b[5]; w6 = b[6]; w7 = b[7]
-    @. s.yi = 0 + k1*w1 + k2*w2 + k3*w3 + k4*w4 + k5*w5 + k6*w6 + k7*w7
+    tchunks(s.yi, k1, k2, k3, k4, k5, k6, k7) do yi, k1, k2, k3, k4, k5, k6, k7
+        @. yi = 0 + k1*w1 + k2*w2 + k3*w3 + k4*w4 + k5*w5 + k6*w6 + k7*w7
+    end
 end
 
 "Interpolate solution, aka dense output."
@@ -341,10 +358,9 @@ end
 function make_prop!(linop::AbstractArray, y0)
     prop! = let linop=linop
         function prop!(y, t1, t2, bwd=false)
-            if bwd
-                @. y *= exp(linop*(t1-t2))
-            else
-                @. y *= exp(linop*(t2-t1))
+            dt = bwd ? (t1-t2) : (t2-t1)
+            tchunks(y, linop) do y, linop
+                @. y *= exp(linop*dt)
             end
         end
     end
@@ -360,7 +376,9 @@ function make_prop!(linop!, y0)
         (lastt2[1] != t2) && linop!(linop_int, t2)
         lastt2[1] = t2
         dt = bwd ? (t1-t2) : (t2-t1)
-        @. y *= exp(linop_int*dt)
+        tchunks(y, linop_int) do y, linop_int
+            @. y *= exp(linop_int*dt)
+        end
     end
     return prop!
 end
@@ -484,7 +502,9 @@ function errnorm(s)
     e1 = errest[1]; e3 = errest[3]; e4 = errest[4] # errest[2] == 0 and is skipped
     e5 = errest[5]; e6 = errest[6]; e7 = errest[7]
     # single fused pass; left-associated + matches the sequential .+= accumulation
-    @. s.yerr = 0 + dt*k1*e1 + dt*k3*e3 + dt*k4*e4 + dt*k5*e5 + dt*k6*e6 + dt*k7*e7
+    tchunks(s.yerr, k1, k3, k4, k5, k6, k7) do yerr, k1, k3, k4, k5, k6, k7
+        @. yerr = 0 + dt*k1*e1 + dt*k3*e3 + dt*k4*e4 + dt*k5*e5 + dt*k6*e6 + dt*k7*e7
+    end
     return s.norm(s.yerr, s.y, s.yn, s.rtol, s.atol)
 end
 

@@ -5,7 +5,7 @@ import Cubature
 import Base: show
 import LinearAlgebra: mul!, ldiv!
 import NumericalIntegration: integrate, SimpsonEven
-import Luna: PhysData, Modes, Maths, Grid, Nonlinear
+import Luna: PhysData, Modes, Maths, Grid, Nonlinear, Utils
 import Luna.PhysData: wlfreq
 
 """
@@ -159,7 +159,9 @@ function Et_to_Pt_ordered!(Pt, Et, responses::Tuple, density::Number, idcs)
     fill!(Pt, 0)
     for resp! in responses
         if Nonlinear.pointwise(resp!)
-            Pt .+= Nonlinear.pointwise_P.(Ref(resp!), Et, density)
+            Utils.tchunks(Pt, Et) do Pt, Et
+                Pt .+= Nonlinear.pointwise_P.(Ref(resp!), Et, density)
+            end
         else
             for i in idcs
                 resp!(view(Pt, :, i), view(Et, :, i), density)
@@ -181,7 +183,9 @@ corresponding input sample). Reproduces `Et_to_Pt!`'s zero-fill + accumulate seq
 per element, so the result is bit-identical to the columnwise version.
 """
 function pointwise_Pt!(Pt, Et, responses::Tuple, density::Number)
-    Pt .= _pointwise_P_total.(Ref(responses), Et, density)
+    Utils.tchunks(Pt, Et) do Pt, Et
+        Pt .= _pointwise_P_total.(Ref(responses), Et, density)
+    end
 end
 
 @inline _pointwise_P_total(responses, E, density) = _pw_accum(zero(E), responses, E, density)
@@ -832,9 +836,21 @@ function trans_free_fast!(nl, t::TransFree, Eωk, z)
         Pto = t.Pto
         Et_to_Pt_ordered!(t.Pto, t.Eto, t.resp, ρ, t.idcs)
     end
-    @. Pto *= t.grid.towin # apodisation
+    towin = t.grid.towin
+    idcs = t.idcs
+    Utils.tforeach(length(idcs)) do ii # apodisation, threaded over transverse points
+        Pcol = view(Pto, :, idcs[ii])
+        @. Pcol *= towin
+    end
     mul!(nl, t.FT, Pto) # transform (t, y, x) -> (ω, ky, kx)
-    nl .*= t.grid.ωwin .* (-im.*t.grid.ω)./(2 .* t.normfun(z))
+    norm = t.normfun(z)
+    ωwin = t.grid.ωwin
+    ω = t.grid.ω
+    Utils.tforeach(length(idcs)) do ii # scaling, threaded over transverse points
+        nlcol = view(nl, :, idcs[ii])
+        normcol = view(norm, :, idcs[ii])
+        @. nlcol *= ωwin * (-im*ω) / (2 * normcol)
+    end
 end
 
 """
