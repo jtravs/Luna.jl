@@ -47,4 +47,34 @@ end
     @test isequal(z1, z2)
 end
 
+@testset "TransFree fast path" begin
+    Eref, zref = propagate_free3d(setup_kwargs=(; fastpath=false))
+    Efast, zfast = propagate_free3d()
+    @test isequal(Eref, Efast)
+    @test isequal(zref, zfast)
+end
+
+@testset "pointwise Kerr agreement" begin
+    import Luna: Nonlinear, NonlinearRHS
+    for (resp, TT) in ((Nonlinear.Kerr_env(1e-25), ComplexF64),
+                       (Nonlinear.Kerr_field(1e-25), Float64))
+        @test Nonlinear.pointwise(resp)
+        Et = TT <: Complex ? (randn(64, 4, 4) .+ im .* randn(64, 4, 4)) : randn(64, 4, 4)
+        Et = TT.(1e8 .* Et)
+        ρ = 2.5e25
+        Pref = zero(Et)
+        NonlinearRHS.Et_to_Pt!(Pref, Et, (resp,), ρ, CartesianIndices((4, 4)))
+        Pord = zero(Et)
+        NonlinearRHS.Et_to_Pt_ordered!(Pord, Et, (resp,), ρ, CartesianIndices((4, 4)))
+        @test isequal(Pref, Pord)
+        Ppw = zero(Et)
+        NonlinearRHS.pointwise_Pt!(Ppw, Et, (resp,), ρ)
+        @test isequal(Pref, Ppw)
+        # in-place (aliased) application
+        Pal = copy(Et)
+        NonlinearRHS.pointwise_Pt!(Pal, Pal, (resp,), ρ)
+        @test isequal(Pref, Pal)
+    end
+end
+
 end

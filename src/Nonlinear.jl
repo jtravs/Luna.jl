@@ -20,18 +20,27 @@ function KerrVector!(out, E, fac)
     end
 end
 
-"Kerr response for real field"
-function Kerr_field(γ3)
-    Kerr = let γ3 = γ3
-        function Kerr(out, E, ρ)
-            if size(E,2) == 1
-                KerrScalar!(out, E, ρ*ε_0*γ3)
-            else
-                KerrVector!(out, E, ρ*ε_0*γ3)
-            end
-        end
+"""
+    KerrField(γ3)
+
+Kerr response for a real field. Callable as `K(out, E, ρ)`, accumulating the nonlinear
+polarisation induced by `E` at density `ρ` into `out`. Pointwise for scalar fields
+(see [`pointwise`](@ref)).
+"""
+struct KerrField{T}
+    γ3::T
+end
+
+function (K::KerrField)(out, E, ρ)
+    if size(E,2) == 1
+        KerrScalar!(out, E, ρ*ε_0*K.γ3)
+    else
+        KerrVector!(out, E, ρ*ε_0*K.γ3)
     end
 end
+
+"Kerr response for real field"
+Kerr_field(γ3) = KerrField(γ3)
 
 "Kerr response for real field but without THG"
 function Kerr_field_nothg(γ3, n)
@@ -59,18 +68,50 @@ function KerrVectorEnv!(out, E, fac)
     end
 end
 
-"Kerr response for envelope"
-function Kerr_env(γ3)
-    Kerr = let γ3 = γ3
-        function Kerr(out, E, ρ)
-            if size(E,2) == 1
-                KerrScalarEnv!(out, E, ρ*ε_0*γ3)
-            else
-                KerrVectorEnv!(out, E, ρ*ε_0*γ3)
-            end
-        end
+"""
+    KerrEnv(γ3)
+
+Kerr response for an envelope field. Callable as `K(out, E, ρ)`, accumulating the
+nonlinear polarisation induced by `E` at density `ρ` into `out`. Pointwise for scalar
+fields (see [`pointwise`](@ref)).
+"""
+struct KerrEnv{T}
+    γ3::T
+end
+
+function (K::KerrEnv)(out, E, ρ)
+    if size(E,2) == 1
+        KerrScalarEnv!(out, E, ρ*ε_0*K.γ3)
+    else
+        KerrVectorEnv!(out, E, ρ*ε_0*K.γ3)
     end
 end
+
+"Kerr response for envelope"
+Kerr_env(γ3) = KerrEnv(γ3)
+
+"""
+    pointwise(resp)
+
+Trait: `true` if `resp` is a pointwise response for scalar fields, i.e. the nonlinear
+polarisation at each sample depends only on the field at that same sample. Pointwise
+responses implement [`pointwise_P`](@ref) and can be applied to whole (multi-dimensional)
+field arrays in a single broadcast instead of column-by-column, which is both faster and
+GPU-compatible. Defaults to `false`.
+"""
+pointwise(resp) = false
+pointwise(::KerrField) = true
+pointwise(::KerrEnv) = true
+
+"""
+    pointwise_P(resp, E, ρ)
+
+The scalar nonlinear polarisation sample induced by the scalar field sample `E` at density
+`ρ`. Implementations must perform the same floating-point operations in the same order as
+the columnwise call of `resp`, so that both paths produce bit-identical results.
+"""
+@inline pointwise_P(K::KerrField, E, ρ) = (ρ*ε_0*K.γ3)*E^3
+@inline pointwise_P(K::KerrEnv, E, ρ) = 3/4*(ρ*ε_0*K.γ3)*abs2(E)*E
 
 "Kerr response for envelope but with THG"
 # see Eq. 4, Genty et al., Opt. Express 15 5382 (2007)

@@ -5,7 +5,7 @@ import Cubature
 import Base: show
 import LinearAlgebra: mul!, ldiv!
 import NumericalIntegration: integrate, SimpsonEven
-import Luna: PhysData, Modes, Maths, Grid
+import Luna: PhysData, Modes, Maths, Grid, Nonlinear
 import Luna.PhysData: wlfreq
 
 """
@@ -145,6 +145,49 @@ function Et_to_Pt!(Pt, Et, responses, density, idcs)
         Et_to_Pt!(view(Pt, :, i), view(Et, :, i), responses, density)
     end
 end
+
+"""
+    Et_to_Pt_ordered!(Pt, Et, responses, density, idcs)
+
+Like `Et_to_Pt!(Pt, Et, responses, density, idcs)` but applies pointwise responses
+(see [`Nonlinear.pointwise`](@ref Luna.Nonlinear.pointwise)) as whole-array broadcasts.
+Responses are applied in tuple order, so each element of `Pt` accumulates its
+contributions in exactly the same order as the columnwise version — the results are
+bit-identical.
+"""
+function Et_to_Pt_ordered!(Pt, Et, responses::Tuple, density::Number, idcs)
+    fill!(Pt, 0)
+    for resp! in responses
+        if Nonlinear.pointwise(resp!)
+            Pt .+= Nonlinear.pointwise_P.(Ref(resp!), Et, density)
+        else
+            for i in idcs
+                resp!(view(Pt, :, i), view(Et, :, i), density)
+            end
+        end
+    end
+end
+
+# fallback (e.g. gas mixtures, where density is a vector and responses is a tuple of
+# tuples): use the columnwise version
+Et_to_Pt_ordered!(Pt, Et, responses, density, idcs) = Et_to_Pt!(Pt, Et, responses, density, idcs)
+
+"""
+    pointwise_Pt!(Pt, Et, responses, density)
+
+Compute the total nonlinear polarisation for a tuple of purely pointwise responses in a
+single broadcast. `Pt` may alias `Et` (each output sample depends only on the
+corresponding input sample). Reproduces `Et_to_Pt!`'s zero-fill + accumulate sequence
+per element, so the result is bit-identical to the columnwise version.
+"""
+function pointwise_Pt!(Pt, Et, responses::Tuple, density::Number)
+    Pt .= _pointwise_P_total.(Ref(responses), Et, density)
+end
+
+@inline _pointwise_P_total(responses, E, density) = _pw_accum(zero(E), responses, E, density)
+@inline _pw_accum(p, ::Tuple{}, E, density) = p
+@inline _pw_accum(p, resp::Tuple, E, density) =
+    _pw_accum(p + Nonlinear.pointwise_P(first(resp), E, density), Base.tail(resp), E, density)
 
 """
     TransModal
@@ -640,18 +683,28 @@ Transform E(ω) -> Pₙₗ(ω) for 3D free-space propagation.
   for the modified shot-noise model, or `nothing`.
 - `Et_nl`: preallocated buffer for the combined field + noise, passed to `Et_to_Pt!`. The
   propagating field (`Eto`) is never modified.
+
+# Fast path
+When the grid is not oversampled (`length(grid.ωo) == length(grid.ω)`, `scale == 1` — the
+usual case for `EnvGrid` with `thg=false`), the field is complex, and no noise field is
+present, the copy through the oversampled buffers is an exact identity and is skipped:
+`Eωo` and `Pωo` are `nothing` and the FFTs run directly between the solution array, `Eto`
+and the output. If additionally all responses are pointwise
+(see [`Nonlinear.pointwise`](@ref Luna.Nonlinear.pointwise)), the polarisation overwrites
+`Eto` in place and `Pto` is `nothing` too. Both fast paths are bit-identical to the
+general path; disable with the constructor keyword `fastpath=false`.
 """
-mutable struct TransFree{TT, FTT, nT, rT, gT, xygT, dT, iT, eT, nlT}
+mutable struct TransFree{TT, FTT, nT, rT, gT, xygT, dT, pT, oT, iT, eT, nlT}
     FT::FTT # 3D Fourier transform (space to k-space and time to frequency)
     normfun::nT # Function which returns normalisation factor
     resp::rT # nonlinear responses (tuple of callables)
     grid::gT # time grid
     xygrid::xygT
     densityfun::dT # callable which returns density
-    Pto::Array{TT, 3} # buffer for oversampled time-domain NL polarisation
+    Pto::pT # buffer for oversampled time-domain NL polarisation, or nothing (fast path, all-pointwise)
     Eto::Array{TT, 3} # buffer for oversampled time-domain field
-    Eωo::Array{ComplexF64, 3} # buffer for oversampled frequency-domain field
-    Pωo::Array{ComplexF64, 3} # buffer for oversampled frequency-domain NL polarisation
+    Eωo::oT # buffer for oversampled frequency-domain field, or nothing (fast path)
+    Pωo::oT # buffer for oversampled frequency-domain NL polarisation, or nothing (fast path)
     scale::Float64 # scale factor to be applied during oversampling
     idcs::iT # iterating over these slices Eto/Pto into Vectors, one at each position
     Et_noise::eT # time-domain noise for modified shot-noise model, or nothing
@@ -669,7 +722,8 @@ function show(io::IO, t::TransFree)
 end
 
 """
-    TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun; noise_field=nothing)
+    TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
+              noise_field=nothing, fastpath=true)
 
 Construct a `TransFree` to calculate the reciprocal-domain nonlinear polarisation for 3D
 free-space propagation.
@@ -679,15 +733,28 @@ free-space propagation.
   modified shot-noise model. When provided, it is converted to the real-space oversampled
   time domain `(nto, ny, nx)` via `copy_scale!` and 3D inverse FFT, and stored as `Et_noise`.
   Generate with [`Fields.generate_noise_field`](@ref Luna.Fields.generate_noise_field).
+- `fastpath=true`: allow the bit-identical fast path which skips the oversampled buffers
+  when the grid is not oversampled (see [`TransFree`](@ref)). Set to `false` to force the
+  general path (e.g. for testing).
 """
 function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
-                   noise_field=nothing)
+                   noise_field=nothing, fastpath=true)
     Ny = length(xygrid.y)
     Nx = length(xygrid.x)
-    Eωo = zeros(ComplexF64, (length(grid.ωo), Ny, Nx))
+    # The fast path is only exact (and only safe: c2r ldiv! would destroy its input) for
+    # complex (envelope) fields on a non-oversampled grid without a noise field.
+    fast = (fastpath && TT <: Complex && length(grid.ωo) == length(grid.ω)
+            && scale == 1 && isnothing(noise_field))
     Eto = zeros(TT, (length(grid.to), Ny, Nx))
-    Pto = similar(Eto)
-    Pωo = similar(Eωo)
+    if fast
+        Eωo = nothing
+        Pωo = nothing
+        Pto = all(Nonlinear.pointwise, responses) ? nothing : similar(Eto)
+    else
+        Eωo = zeros(ComplexF64, (length(grid.ωo), Ny, Nx))
+        Pωo = similar(Eωo)
+        Pto = similar(Eto)
+    end
     idcs = CartesianIndices((Ny, Nx))
     # Precompute time-domain noise in real space:
     # copy_scale! into oversampled spectral grid, then 3D IFFT: (ω,ky,kx) → (t,y,x)
@@ -727,6 +794,14 @@ Calculate the reciprocal-domain (ω-kx-ky-space) nonlinear response due to the f
 and place the result in `nl`.
 """
 function (t::TransFree)(nl, Eωk, z)
+    if t.Eωo === nothing # fast path (branch resolved at compile time)
+        trans_free_fast!(nl, t, Eωk, z)
+    else
+        trans_free_general!(nl, t, Eωk, z)
+    end
+end
+
+function trans_free_general!(nl, t::TransFree, Eωk, z)
     fill!(t.Eωo, 0)
     copy_scale!(t.Eωo, Eωk, length(t.grid.ω), t.scale)
     ldiv!(t.Eto, t.FT, t.Eωo) # transform (ω, ky, kx) -> (t, y, x)
@@ -741,6 +816,24 @@ function (t::TransFree)(nl, Eωk, z)
     @. t.Pto *= t.grid.towin # apodisation
     mul!(t.Pωo, t.FT, t.Pto) # transform (t, y, x) -> (ω, ky, kx)
     copy_scale!(nl, t.Pωo, length(t.grid.ω), 1/t.scale)
+    nl .*= t.grid.ωwin .* (-im.*t.grid.ω)./(2 .* t.normfun(z))
+end
+
+# Fast path: no oversampling (scale == 1), complex field, no noise — the oversampled
+# buffers would be exact copies, so transform directly between Eωk, Eto and nl.
+# Bit-identical to trans_free_general! (see TransFree docstring).
+function trans_free_fast!(nl, t::TransFree, Eωk, z)
+    ldiv!(t.Eto, t.FT, Eωk) # transform (ω, ky, kx) -> (t, y, x); preserves Eωk (c2c)
+    ρ = t.densityfun(z)
+    if t.Pto === nothing # all responses pointwise: polarisation overwrites Eto
+        Pto = t.Eto
+        pointwise_Pt!(Pto, t.Eto, t.resp, ρ)
+    else
+        Pto = t.Pto
+        Et_to_Pt_ordered!(t.Pto, t.Eto, t.resp, ρ, t.idcs)
+    end
+    @. Pto *= t.grid.towin # apodisation
+    mul!(nl, t.FT, Pto) # transform (t, y, x) -> (ω, ky, kx)
     nl .*= t.grid.ωwin .* (-im.*t.grid.ω)./(2 .* t.normfun(z))
 end
 

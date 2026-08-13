@@ -3,6 +3,9 @@ import Logging: @info
 
 testdir = dirname(@__FILE__)
 
+# Bring Luna's exported module names (Fields, Grid, …) into Main: several test files
+# rely on an earlier file having done `using Luna`, which subset runs may skip.
+using Luna
 import Luna: set_fftw_mode
 set_fftw_mode(:estimate)
 

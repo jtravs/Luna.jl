@@ -315,7 +315,7 @@ function setup(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
 end
 
 function setup(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
-               densityfun, normfun, responses, inputs; noise_field=nothing)
+               densityfun, normfun, responses, inputs; noise_field=nothing, fastpath=true)
     Logging.@info("Setting up and planning FFTs...")
     flush(stderr)
     Utils.loadFFTwisdom()
@@ -325,11 +325,15 @@ function setup(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
     FT = FFTW.plan_fft(xr, (1, 2, 3), flags=settings["fftw_flag"])
     Eωk = zeros(ComplexF64, length(grid.ω), length(y), length(x))
     doinputs_fs!(Eωk, grid, xygrid, FT, inputs)
-    xo = Array{ComplexF64}(undef, length(grid.to), length(y), length(x))
-    FTo = FFTW.plan_fft(xo, (1, 2, 3), flags=settings["fftw_flag"])
+    if length(grid.to) == length(grid.t)
+        FTo = FT # no oversampling: the two plans would be identical, so share one
+    else
+        xo = Array{ComplexF64}(undef, length(grid.to), length(y), length(x))
+        FTo = FFTW.plan_fft(xo, (1, 2, 3), flags=settings["fftw_flag"])
+    end
     transform = NonlinearRHS.TransFree(grid, xygrid, FTo,
                                        responses, densityfun, normfun;
-                                       noise_field)
+                                       noise_field, fastpath)
     inv(FT) # create inverse FT plans now, so wisdom is saved
     inv(FTo)
     Utils.saveFFTwisdom()
