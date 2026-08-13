@@ -389,15 +389,28 @@ function run(Eω, grid,
              linop, transform, FT, output;
              min_dz=0, max_dz=grid.zmax/2, init_dz=1e-4, z0=0.0,
              rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
-             status_period=1, step_on=nothing, preserve_input=true)
+             status_period=1, step_on=nothing, preserve_input=true,
+             twin_period::Int=1)
 
-    Et = FT \ Eω
+    # reuse the transform's time-domain buffer (dead between RHS evaluations) as the
+    # window-application scratch where possible, instead of allocating another field
+    scr = NonlinearRHS.scratch(transform)
+    Et = scr === nothing ? FT \ Eω : scr
 
+    # twin_period > 1 applies the spectral/temporal windows only on every twin_period-th
+    # accepted step (and always immediately before a save). NOTE: the windowing feeds
+    # back into the propagation, so this changes results at the apodisation-leakage
+    # level — the default of 1 reproduces the historical behavior exactly.
+    nstep = 0
     function stepfun(Eω, z, dz, interpolant)
-        Eω .*= grid.ωwin
-        ldiv!(Et, FT, Eω)
-        Et .*= grid.twin
-        mul!(Eω, FT, Et)
+        nstep += 1
+        if twin_period == 1 || nstep % twin_period == 0 ||
+           Output.willsave(output, Eω, z, dz)
+            Eω .*= grid.ωwin
+            ldiv!(Et, FT, Eω)
+            Et .*= grid.twin
+            mul!(Eω, FT, Et)
+        end
         output(Eω, z, dz, interpolant)
     end
 

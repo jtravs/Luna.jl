@@ -112,6 +112,17 @@ end
     @test isequal(collect(nfac), nmat)
 end
 
+@testset "run scratch reuse and twin_period" begin
+    # scratch reuse is exercised by every propagation above (EnvGrid, no oversampling).
+    # twin_period is a physics-level (non-bit-identical) option: the windowing feeds back
+    # into the trajectory, so only sanity-check it here (~5e-4 relative in this strongly
+    # nonlinear toy case); production use requires its own A/B validation.
+    Eref, zref = propagate_free3d()
+    E4, z4 = propagate_free3d(run_kwargs=(; twin_period=4))
+    @test isequal(zref, z4)
+    @test 0 < maximum(abs, E4 .- Eref)/maximum(abs, Eref) < 1e-2
+end
+
 @testset "pointwise Kerr agreement" begin
     import Luna: Nonlinear, NonlinearRHS
     for (resp, TT) in ((Nonlinear.Kerr_env(1e-25), ComplexF64),

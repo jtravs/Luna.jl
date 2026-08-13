@@ -792,6 +792,17 @@ function TransFree(grid::Grid.EnvGrid, args...; kwargs...)
 end
 
 """
+    scratch(transform)
+
+Return a time-domain buffer owned by `transform` which is dead between RHS evaluations
+and matches the shape of `FT \\ Eω` on the coarse grid, or `nothing` if no compatible
+buffer exists. `Luna.run` reuses it as its window-application scratch instead of
+allocating another field-sized array.
+"""
+scratch(t) = nothing
+scratch(t::TransFree) = length(t.grid.to) == length(t.grid.t) ? t.Eto : nothing
+
+"""
     (t::TransFree)(nl, Eω, z)
 
 Calculate the reciprocal-domain (ω-kx-ky-space) nonlinear response due to the field `Eω`

@@ -87,6 +87,17 @@ function append_stats!(o::MemoryOutput, d)
     end
 end
 
+"""
+    willsave(o, y, t, dt)
+
+Whether calling the output handler `o` with the current solution would save at least one
+data point. Used by `Luna.run` to guarantee the spectral/temporal windows are applied
+before every save even when `twin_period > 1`. Falls back to `true` (conservative) for
+output handlers without a known save condition.
+"""
+willsave(o, y, t, dt) = true
+willsave(o::MemoryOutput, y, t, dt) = first(o.save_cond(y, t, dt, o.saved))
+
 function append_stat!(o::MemoryOutput, name, value::Number)
     if ~haskey(o.data["stats"], name)
         o.data["stats"][name] = [value]
@@ -156,6 +167,8 @@ mutable struct HDF5Output{sT, S} <: AbstractOutput
     cachehash::UInt64 # safety hash to prevent cache-continuing for different propagations
     readonly::Bool
 end
+
+willsave(o::HDF5Output, y, t, dt) = first(o.save_cond(y, t, dt, o.saved))
 
 "Simple constructor"
 function HDF5Output(fpath, tmin, tmax, saveN::Integer, statsfun=nostats;
