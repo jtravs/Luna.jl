@@ -13,9 +13,9 @@ import Test: @test, @testset
 using Luna
 Luna.set_fftw_mode(:estimate)
 
-function propagate_free3d(; N=16, R=400e-6, saveN=5, factored=false,
+function propagate_free3d(; N=16, R=400e-6, saveN=5, factored=false, raman=nothing,
                             setup_kwargs=(;), run_kwargs=(;))
-    gas = :Ar
+    gas = raman === nothing ? :Ar : :N2
     pres = 4
     τ = 30e-15
     λ0 = 800e-9
@@ -27,7 +27,14 @@ function propagate_free3d(; N=16, R=400e-6, saveN=5, factored=false,
     densityfun = let dens0=PhysData.density(gas, pres)
         z -> dens0
     end
-    responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(gas)),)
+    if raman === nothing
+        responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(gas)),)
+    else
+        rr = Raman.raman_response(grid.to, gas)
+        Rresp = raman === :batched ? Nonlinear.RamanPolarEnvBatched(grid.to, rr) :
+                                     Nonlinear.RamanPolarEnv(grid.to, rr)
+        responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(gas)), Rresp)
+    end
     nfun = PhysData.ref_index_fun(gas, pres)
     linop = LinearOps.make_const_linop(grid, xygrid, nfun; factored)
     normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored)
@@ -121,6 +128,33 @@ end
     E4, z4 = propagate_free3d(run_kwargs=(; twin_period=4))
     @test isequal(zref, z4)
     @test 0 < maximum(abs, E4 .- Eref)/maximum(abs, Eref) < 1e-2
+end
+
+@testset "batched Raman agreement" begin
+    import Luna: Raman
+    import Random
+    # unit-level: batched vs columnwise on the same random data
+    nt = 128
+    t = collect(range(-50e-15, 50e-15, length=nt))
+    rr = Raman.raman_response(t, :N2)
+    Rcol = Nonlinear.RamanPolarEnv(t, rr)
+    Rbat = Nonlinear.RamanPolarEnvBatched(t, rr)
+    rng = Random.Xoshiro(1234)
+    Et = 1e8 .* (randn(rng, nt, 4, 4) .+ im.*randn(rng, nt, 4, 4))
+    ρ = 2.5e25
+    Pcol = zeros(ComplexF64, nt, 4, 4)
+    for i in CartesianIndices((4, 4))
+        Rcol(view(Pcol, :, i), view(Et, :, i), ρ)
+    end
+    Pbat = zeros(ComplexF64, nt, 4, 4)
+    Rbat(Pbat, Et, ρ)
+    @test isapprox(Pcol, Pbat, rtol=1e-12)
+    # propagation-level: full runs agree to rounding accuracy (not bitwise — the batched
+    # FFT algorithm differs from the single-column one)
+    Ecol, zcol = propagate_free3d(raman=:columnwise)
+    Ebat, zbat = propagate_free3d(raman=:batched)
+    @test isequal(zcol, zbat)
+    @test isapprox(Ecol, Ebat, rtol=1e-10)
 end
 
 @testset "pointwise Kerr agreement" begin

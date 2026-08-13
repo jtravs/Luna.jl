@@ -373,4 +373,110 @@ function (R::RamanPolar)(out, Et, ρ)
     end
 end
 
+"""
+    batched(resp)
+
+Trait: `true` if `resp` is an array-level (batched) response, called once with the full
+multi-dimensional field array (`resp(out, Et, ρ)` with `out`/`Et` of shape
+`(nt, ny, nx)`) rather than once per transverse column. Defaults to `false`.
+"""
+batched(resp) = false
+
+"""
+    RamanPolarEnvBatched(t, r)
+
+Batched (array-level) version of [`RamanPolarEnv`](@ref) for 3D free-space propagation:
+computes the Raman polarisation for all transverse points at once using batched FFTs
+along the time dimension, instead of two small FFTs per transverse column. Also updates
+the density-dependent response function once per call instead of once per column (exact:
+the density is a scalar, identical for all columns).
+
+Results agree with `RamanPolarEnv` column-for-column to rounding accuracy (~1e-15
+relative; the FFT algorithm for batched transforms differs from the single-column one,
+so agreement is not bit-exact).
+
+The `(2nt, ny, nx)` work array (the doubled anti-wraparound convolution grid, exactly as
+in `RamanPolarEnv`) and its in-place FFT plans are allocated lazily on the first call,
+when the transverse grid size is known.
+"""
+mutable struct RamanPolarEnvBatched{TR, hvT, fT}
+    r::TR # Raman response function
+    h::Vector{Float64} # doubled buffer to hold response + padding
+    ht::hvT # view into first half of h
+    hω::Vector{ComplexF64} # the frequency domain Raman response function
+    hFT::fT # 1D Fourier transform plan for h
+    dt::Float64 # time step for scaling
+    nt::Int # length of the (undoubled) time grid
+    B::Union{Nothing, Array{ComplexF64, 3}} # (2nt, ny, nx) doubled work array (lazy)
+    FT::Any # in-place batched FFT plan along dim 1 of B (created with B)
+    IFT::Any # inverse of FT
+end
+
+batched(::RamanPolarEnvBatched) = true
+
+function RamanPolarEnvBatched(t, r)
+    h = zeros(length(t)*2) # note double grid size, see explanation in (R::RamanPolar)
+    ht = view(h, 1:length(t))
+    Utils.loadFFTwisdom()
+    hFT = FFTW.plan_fft(h, 1, flags=Luna.settings["fftw_flag"])
+    inv(hFT)
+    Utils.saveFFTwisdom()
+    hω = hFT * h
+    RamanPolarEnvBatched(r, h, ht, hω, hFT, t[2] - t[1], length(t),
+                         nothing, nothing, nothing)
+end
+
+function (R::RamanPolarEnvBatched)(out, Et, ρ)
+    nt = R.nt
+    size(Et, 1) == nt || error("RamanPolarEnvBatched: field time grid size $(size(Et, 1))"*
+                               " does not match response grid size $nt")
+    if R.B === nothing
+        R.B = zeros(ComplexF64, (2nt, size(Et, 2), size(Et, 3)))
+        Utils.loadFFTwisdom()
+        R.FT = FFTW.plan_fft!(R.B, 1, flags=Luna.settings["fftw_flag"])
+        R.IFT = FFTW.plan_ifft!(R.B, 1, flags=Luna.settings["fftw_flag"])
+        Utils.saveFFTwisdom()
+    end
+    # update the response function and its transform once per call — it depends only on
+    # the scalar density, so this is exact (RamanPolarEnv recomputes it per column)
+    R.r(R.ht, ρ)
+    R.hω .= R.hFT * R.h
+    _raman_batched!(out, Et, ρ, R.B, R.FT, R.IFT, R.hω, R.dt, nt)
+end
+
+# function barrier: B/FT/IFT fields are loosely typed on the struct
+function _raman_batched!(out, Et, ρ, B, FT, IFT, hω, dt, nt)
+    ncol = size(Et, 2)*size(Et, 3)
+    Etr = reshape(Et, nt, ncol)
+    Br = reshape(B, 2nt, ncol)
+    outr = reshape(out, nt, ncol)
+    Utils.tforeach(ncol; ntotal=length(B)) do i
+        @inbounds begin
+            Bcol = view(Br, :, i)
+            Ecol = view(Etr, :, i)
+            # squared envelope in the first half (cf. sqr!), zero padding in the second
+            # (the in-place FFTs overwrite the padding, so it is rebuilt every call)
+            @views @. Bcol[1:nt] = 1/2 * abs2(Ecol)
+            @views fill!(Bcol[nt+1:2nt], 0)
+        end
+    end
+    FT * B # batched (t → ω) in place
+    Utils.tforeach(ncol; ntotal=length(B)) do i
+        @inbounds begin
+            Bcol = view(Br, :, i)
+            # convolution by multiplication; dt scaling as in RamanPolar
+            @. Bcol = hω * Bcol * dt
+        end
+    end
+    IFT * B # batched (ω → t) in place
+    Utils.tforeach(ncol; ntotal=length(out)) do i
+        @inbounds begin
+            ocol = view(outr, :, i)
+            Ecol = view(Etr, :, i)
+            Pcol = view(Br, 1:nt, i)
+            @. ocol += ρ*Ecol*Pcol
+        end
+    end
+end
+
 end

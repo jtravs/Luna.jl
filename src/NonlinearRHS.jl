@@ -162,6 +162,8 @@ function Et_to_Pt_ordered!(Pt, Et, responses::Tuple, density::Number, idcs)
             Utils.tchunks(Pt, Et) do Pt, Et
                 Pt .+= Nonlinear.pointwise_P.(Ref(resp!), Et, density)
             end
+        elseif Nonlinear.batched(resp!)
+            resp!(Pt, Et, density) # array-level call with the full field
         else
             for i in idcs
                 resp!(view(Pt, :, i), view(Et, :, i), density)
@@ -749,6 +751,11 @@ function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
     # complex (envelope) fields on a non-oversampled grid without a noise field.
     fast = (fastpath && TT <: Complex && length(grid.ωo) == length(grid.ω)
             && scale == 1 && isnothing(noise_field))
+    if !fast && any(r -> Nonlinear.batched(r), responses)
+        error("Batched responses (e.g. RamanPolarEnvBatched) require the TransFree fast"*
+              " path: an EnvGrid without oversampling or a noise field. Use the"*
+              " columnwise response type instead.")
+    end
     Eto = zeros(TT, (length(grid.to), Ny, Nx))
     if fast
         Eωo = nothing
