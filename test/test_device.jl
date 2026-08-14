@@ -5,6 +5,7 @@ import GPUArraysCore
 import FFTW
 import AbstractFFTs
 import Adapt
+import Random
 
 # =============================================================================
 # Tests for Luna's device (GPU) support.
@@ -240,6 +241,62 @@ if have_jlarrays
         end
         @test n[] == 1
         @test Array(d) == 2 .* collect(1.0:64.0)
+    end
+
+    @testset "device error norms" begin
+        import Luna: RK45
+        JLArray = JLArrays.JLArray
+
+        # A stand-in for the stepper: `weaknorm_fused`/`errnorm` only read these fields.
+        mutable struct FakeStepper{T, N}
+            y::T
+            yn::T
+            ks::NTuple{7, T}
+            yerr::Union{Nothing, T}
+            dt::Float64
+            rtol::Float64
+            atol::Float64
+            norm::N
+        end
+
+        rng = Random.Xoshiro(20260814)
+        n = 512
+        mk() = randn(rng, ComplexF64, n)
+        y, yn = mk(), mk()
+        ks = ntuple(_ -> mk(), 7)
+        host = FakeStepper(y, yn, ks, nothing, 1.7e-4, 1e-8, 1e-10, RK45.weaknorm)
+        dev = FakeStepper(JLArray(y), JLArray(yn), map(JLArray, ks), nothing,
+                          host.dt, host.rtol, host.atol, RK45.weaknorm)
+
+        ehost = RK45.weaknorm_fused(host)
+        edev = RK45.weaknorm_fused(dev)
+        # Not bitwise: a parallel reduction sums in a different order. This tolerance is
+        # what the whole device path is validated to.
+        @test isapprox(ehost, edev; rtol=1e-12)
+
+        # The device path must not allocate the error estimate (a tenth field-sized
+        # buffer at production size)
+        @test dev.yerr === nothing
+
+        # ...and the fused version must agree with the materialised reference, which is
+        # what a custom norm would receive
+        yerr = @. host.dt*(ks[1]*RK45.errest[1] + ks[3]*RK45.errest[3] +
+                           ks[4]*RK45.errest[4] + ks[5]*RK45.errest[5] +
+                           ks[6]*RK45.errest[6] + ks[7]*RK45.errest[7])
+        @test isapprox(ehost, RK45.weaknorm(yerr, y, yn, host.rtol, host.atol);
+                       rtol=1e-12)
+
+        # A norm without a fused version must fail loudly on a device rather than
+        # silently allocating and running a host scalar loop
+        othernorm(yerr, y, yn, rtol, atol) = RK45.weaknorm(yerr, y, yn, rtol, atol)
+        devother = FakeStepper(dev.y, dev.yn, dev.ks, nothing,
+                               host.dt, host.rtol, host.atol, othernorm)
+        @test_throws ErrorException RK45.errnorm(devother)
+        # the same norm on the host still works, via the materialising path
+        hostother = FakeStepper(y, yn, ks, nothing, host.dt, host.rtol, host.atol,
+                                othernorm)
+        @test isapprox(RK45.errnorm(hostother), ehost; rtol=1e-12)
+        @test hostother.yerr !== nothing   # materialised, as documented
     end
 else
     @info "JLArrays not available — skipping functional device tests " *

@@ -475,11 +475,17 @@ fused_errnorm(::typeof(weaknorm)) = weaknorm_fused
 
 """
 Fused version of [`weaknorm`](@ref): the error estimate is computed element-by-element on
-the fly instead of being accumulated into a separate array. Performs the same
-floating-point operations in the same order as the materialised version, so the result is
-bit-identical.
+the fly instead of being accumulated into a separate array.
+
+On the host this performs the same floating-point operations in the same order as the
+materialised version, so the result is bit-identical. On a device it is a single
+reduction over the same expression; the accumulation order of a parallel reduction
+differs, so the result agrees only to rounding — which is expected and unavoidable, and
+is why device runs are validated against the host to a tolerance rather than bitwise.
 """
-function weaknorm_fused(s)
+weaknorm_fused(s) = _weaknorm_fused(Utils.backend(s.y), s)
+
+function _weaknorm_fused(::Utils.CPUBackend, s)
     dt = s.dt
     k1, k2, k3, k4, k5, k6, k7 = s.ks
     e1 = errest[1]; e3 = errest[3]; e4 = errest[4] # errest[2] == 0 and is skipped,
@@ -500,6 +506,29 @@ function weaknorm_fused(s)
     return sqrt(syerr)/s.rtol/errwt
 end
 
+# One reduction over eight arrays, accumulating the three sums as a tuple, so the error
+# estimate is never materialised: on a device that would be a tenth field-sized buffer
+# (2 GiB at production size) plus an extra pass. `mapreduce` over several arrays fuses
+# them into a single lazy broadcast, so nothing intermediate is allocated either.
+function _weaknorm_fused(::Utils.DeviceBackend, s)
+    dt = s.dt
+    k1, k2, k3, k4, k5, k6, k7 = s.ks
+    e1 = errest[1]; e3 = errest[3]; e4 = errest[4]
+    e5 = errest[5]; e6 = errest[6]; e7 = errest[7]
+    f = @inline function (y, yn, a1, a3, a4, a5, a6, a7)
+        yerr = 0 + dt*a1*e1 + dt*a3*e3 + dt*a4*e4 + dt*a5*e5 + dt*a6*e6 + dt*a7*e7
+        (abs2(y), abs2(yn), abs2(yerr))
+    end
+    sy, syn, syerr = mapreduce(f, _add3, s.y, s.yn, k1, k3, k4, k5, k6, k7;
+                               init=(0.0, 0.0, 0.0))
+    errwt = max(max(sqrt(sy), sqrt(syn)), s.atol)
+    return sqrt(syerr)/s.rtol/errwt
+end
+
+# Associative reduction operator for the three partial sums above. Defined as a named
+# function rather than a closure so it is isbits and can be passed into a device kernel.
+@inline _add3(a, b) = (a[1]+b[1], a[2]+b[2], a[3]+b[3])
+
 """
 Compute the error metric for the current step. Uses a fused, allocation-free version if
 one exists for `s.norm` (see [`fused_errnorm`](@ref)); otherwise materialises the error
@@ -508,6 +537,10 @@ estimate into `s.yerr` and calls `s.norm`.
 function errnorm(s)
     f = fused_errnorm(s.norm)
     f === nothing || return f(s)
+    return _errnorm_materialised(Utils.backend(s.y), s)
+end
+
+function _errnorm_materialised(::Utils.CPUBackend, s)
     if s.yerr === nothing
         s.yerr = similar(s.y)
     end
@@ -521,6 +554,14 @@ function errnorm(s)
     end
     return s.norm(s.yerr, s.y, s.yn, s.rtol, s.atol)
 end
+
+# Refuse rather than crawl: the materialising path would allocate a tenth field-sized
+# device array and then hand it to a norm which almost certainly indexes it scalar-wise.
+_errnorm_materialised(::Utils.DeviceBackend, s) = error(
+    "the error norm $(s.norm) has no `RK45.fused_errnorm` method, so it would need the "*
+    "error estimate materialised into an extra field-sized device array and evaluated "*
+    "by a host-side scalar loop. Define `RK45.fused_errnorm(::typeof(yournorm))` "*
+    "returning a function of the stepper (see `weaknorm_fused`).")
 
 "Simple proportional error controller, see e.g. Hairer eq. (4.13)."
 function stepcontrolP!(s)
