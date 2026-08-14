@@ -414,17 +414,48 @@ sym2string(other) = other
 
 save_modeinfo_maybe(output, t) = nothing
 
+"""
+    run(Eω, grid, linop, transform, FT, output; kwargs...)
+
+Run a propagation. If `Eω` is a device (GPU) array — see [`Luna.setup`](@ref)'s
+`arraytype` — the whole propagation runs there and saved fields are copied back to the
+host by a [`HostOutput`](@ref) wrapper, so `output` sees ordinary host arrays.
+
+!!! note "Device runs and save positions"
+    On a device, pass `step_on` matching your save positions. Otherwise every save is a
+    dense-output interpolation, which allocates two more field-sized device arrays (the
+    interpolant accumulator and its result) — at production sizes that is several GB.
+    Landing on the save positions makes each save an exact step endpoint instead.
+"""
 function run(Eω, grid,
              linop, transform, FT, output;
              min_dz=0, max_dz=grid.zmax/2, init_dz=1e-4, z0=0.0,
              rtol=1e-6, atol=1e-10, safety=0.9, norm=RK45.weaknorm,
              status_period=1, step_on=nothing, preserve_input=true,
-             twin_period::Int=1)
+             twin_period::Int=1, allow_device_stats=false)
+
+    ondevice = Utils.isdevice(Eω)
 
     # reuse the transform's time-domain buffer (dead between RHS evaluations) as the
     # window-application scratch where possible, instead of allocating another field
     scr = NonlinearRHS.scratch(transform)
     Et = scr === nothing ? FT \ Eω : scr
+
+    # The windows are host vectors on the grid; on a device the transform holds mirrors.
+    gv = NonlinearRHS.device_gridvectors(transform, grid)
+    ωwin = gv.ωwin
+    twin = gv.twin
+
+    if ondevice
+        # `statsfun` is called on every step with the solution array. Copying it back
+        # per step (rather than per save) would dominate the runtime, so require the
+        # default no-op statistics unless the caller explicitly opts in.
+        allow_device_stats || nostats_only(output) || error(
+            "device propagation with a statistics function would copy the whole field "*
+            "from the device on every step. Use `Output.nostats` (the default), or "*
+            "pass `allow_device_stats=true` to accept the transfer cost.")
+        output = HostOutput(output, Eω)
+    end
 
     # twin_period > 1 applies the spectral/temporal windows only on every twin_period-th
     # accepted step (and always immediately before a save). NOTE: the windowing feeds
@@ -435,9 +466,9 @@ function run(Eω, grid,
         nstep += 1
         if twin_period == 1 || nstep % twin_period == 0 ||
            Output.willsave(output, Eω, z, dz)
-            Eω .*= grid.ωwin
+            Eω .*= ωwin
             ldiv!(Et, FT, Eω)
-            Et .*= grid.twin
+            Et .*= twin
             mul!(Eω, FT, Et)
         end
         output(Eω, z, dz, interpolant)
@@ -447,7 +478,10 @@ function run(Eω, grid,
     Eωc, zc, dzc = Output.check_cache(output, Eω, z0, init_dz)
     if zc > z0
         Logging.@info("Found cached propagation. Resuming...")
-        Eω, z0, init_dz = Eωc, zc, dzc
+        # The cache is read from HDF5 as a host array. Upload it rather than adopting
+        # it, which would silently continue the run on the CPU.
+        Eω = ondevice ? copyto!(Eω, Eωc) : Eωc
+        z0, init_dz = zc, dzc
     end
 
     output(Grid.to_dict(grid), group="grid")

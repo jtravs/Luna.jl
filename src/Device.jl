@@ -172,6 +172,19 @@ needs_host_y(o) = false
 needs_host_y(o::Output.HDF5Output) = o.cache
 
 """
+    nostats_only(output) -> Bool
+
+Whether `output` collects no per-step statistics. Statistics functions are called with
+the solution array on every step, so on a device they would force a full device-to-host
+copy per step rather than per save; [`Luna.run`](@ref) refuses that by default.
+Conservatively `false` for output handlers whose statistics function cannot be
+inspected.
+"""
+nostats_only(o) = false
+nostats_only(o::Output.MemoryOutput) = o.statsfun === Output.nostats
+nostats_only(o::Output.HDF5Output) = o.statsfun === Output.nostats
+
+"""
     HostOutput(output, y)
 
 Wrap an output handler so that it receives host arrays while the propagation runs on a

@@ -461,6 +461,67 @@ if have_jlarrays
         @test isapprox(Array(outd2), outh; rtol=1e-10)
     end
 
+    @testset "end-to-end device propagation" begin
+        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields, Raman
+        JLArray = JLArrays.JLArray
+
+        # Same shape as the host bit-identity harness, small enough to stay quick.
+        function propagate(arraytype; raman=false, saveN=5, statsfun=Output.nostats,
+                           kwargs...)
+            λ0 = 800e-9
+            L = 5e-3
+            grid = Grid.EnvGrid(L, λ0, (400e-9, 2000e-9), 100e-15)
+            xygrid = Grid.FreeGrid(400e-6, 8)
+            gas = raman ? :N2 : :Ar
+            densityfun = let dens0 = PhysData.density(gas, 4); z -> dens0 end
+            nfun = PhysData.ref_index_fun(gas, 4)
+            responses = if raman
+                rr = Raman.raman_response(grid.to, gas)
+                (Nonlinear.Kerr_env(PhysData.γ3_gas(gas)),
+                 Nonlinear.RamanPolarEnvBatched(grid.to, rr))
+            else
+                (Nonlinear.Kerr_env(PhysData.γ3_gas(gas)),)
+            end
+            linop = LinearOps.make_const_linop(grid, xygrid, nfun;
+                                               factored=true, arraytype)
+            normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun;
+                                                   factored=true, arraytype)
+            inputs = Fields.GaussGaussField(λ0=λ0, τfwhm=30e-15, energy=30e-6, w0=100e-6)
+            Eω, transform, FT = Luna.setup(grid, xygrid, densityfun, normfun,
+                                           responses, inputs; arraytype)
+            output = Output.MemoryOutput(0, grid.zmax, saveN, statsfun)
+            zsave = collect(range(0, grid.zmax, saveN))
+            Luna.run(Eω, grid, linop, transform, FT, output;
+                     max_dz=Inf, init_dz=L/50, rtol=1e-8, step_on=zsave, kwargs...)
+            output.data["Eω"], output.data["z"]
+        end
+
+        # THE ACCEPTANCE CHECK: a whole propagation on a device array, versus the host.
+        # Not bitwise — different FFT path and a parallel error-norm reduction — so the
+        # adaptive stepper can also take a marginally different step sequence.
+        Eh, zh = propagate(Array)
+        Ed, zd = propagate(JLArray)
+        @test Ed isa Array                        # saves come back on the host
+        @test isapprox(zd, zh; rtol=1e-10)
+        @test isapprox(Array(Ed), Eh; rtol=1e-8)
+        relL2 = sqrt(sum(abs2, Array(Ed) .- Eh) / sum(abs2, Eh))
+        @test relL2 < 1e-10
+
+        # ...and with the delayed (Raman) response as well, since that adds the batched
+        # convolution and a second, non-pointwise response to the transform
+        Ehr, _ = propagate(Array; raman=true)
+        Edr, _ = propagate(JLArray; raman=true)
+        @test sqrt(sum(abs2, Array(Edr) .- Ehr) / sum(abs2, Ehr)) < 1e-10
+
+        # A statistics function would copy the field off the device on every step, so it
+        # is refused unless the caller explicitly accepts the transfer cost
+        somestats(y, z, dz) = Dict{String, Any}("max" => 0.0)
+        @test_throws ErrorException propagate(JLArray; statsfun=somestats)
+        @test (propagate(JLArray; statsfun=somestats, allow_device_stats=true); true)
+        # ...and it is not refused on the host
+        @test (propagate(Array; statsfun=somestats); true)
+    end
+
     @testset "device error norms" begin
         import Luna: RK45
         JLArray = JLArrays.JLArray

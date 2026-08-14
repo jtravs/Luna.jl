@@ -833,6 +833,17 @@ scratch(t) = nothing
 scratch(t::TransFree) = length(t.grid.to) == length(t.grid.t) ? t.Eto : nothing
 
 """
+    device_gridvectors(transform, grid)
+
+The grid vectors (`ω` and the apodisation windows) on the transform's own array type, so
+that `Luna.run`'s window kernels broadcast against a device state array correctly.
+Transforms which keep no mirror fall back to the grid's own (host) vectors, which is
+what every host propagation uses.
+"""
+device_gridvectors(t, grid) = Luna.gridvectors(grid)
+device_gridvectors(t::TransFree, grid) = t.gv
+
+"""
     (t::TransFree)(nl, Eω, z)
 
 Calculate the reciprocal-domain (ω-kx-ky-space) nonlinear response due to the field `Eω`
