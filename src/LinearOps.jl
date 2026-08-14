@@ -1,6 +1,7 @@
 module LinearOps
 import FFTW
 import Hankel
+import Adapt
 import Luna: Modes, Grid, PhysData, Maths, RK45, Utils
 import Luna.PhysData: wlfreq
 
@@ -30,14 +31,30 @@ factors — `k²(ω)` (a vector) and `k⊥²(ky, kx)` (a small matrix) — inste
 has a specialised threaded kernel for it, so the array is never materialised during
 propagation. Construct via `make_const_linop(...; factored=true)`.
 """
-struct FactoredFreeLinop <: AbstractArray{ComplexF64, 3}
-    ω::Vector{Float64}
-    k2::Vector{Float64} # (n(ω)·ω/c)² on the sidx region, 0 elsewhere
-    kperp2::Matrix{Float64} # (nky, nkx)
+struct FactoredFreeLinop{Vt, Mt} <: AbstractArray{ComplexF64, 3}
+    ω::Vt
+    k2::Vt # (n(ω)·ω/c)² on the sidx region, 0 elsewhere
+    kperp2::Mt # (nky, nkx)
     β1::Float64 # 1/velocity of the reference frame
     βref::Float64 # reference β0, subtracted for EnvGrid without THG
     subref::Bool # whether βref is subtracted (EnvGrid with thg=false)
 end
+
+# Parametrising the array fields removed the automatic conversion of the scalar ones, so
+# restore it: `β0ref` arrives as a `Complex` with zero imaginary part whenever the
+# refractive index function is complex-valued, and converting (rather than rejecting) it
+# is the pre-existing behaviour.
+FactoredFreeLinop(ω::Vt, k2::Vt, kperp2::Mt, β1, βref, subref) where {Vt, Mt} =
+    FactoredFreeLinop{Vt, Mt}(ω, k2, kperp2, β1, βref, subref)
+
+# The factors are small (a vector and a matrix), so a device copy is negligible next to
+# the field-sized array it replaces. NOTE that `getindex` below is then a host-side
+# scalar read of device memory and will (correctly) fail: on a device the operator is
+# only ever consumed by the broadcast kernel in `make_prop!`, which uses the factors
+# directly.
+Adapt.adapt_structure(to, l::FactoredFreeLinop) =
+    FactoredFreeLinop(Adapt.adapt(to, l.ω), Adapt.adapt(to, l.k2),
+                      Adapt.adapt(to, l.kperp2), l.β1, l.βref, l.subref)
 
 Base.size(l::FactoredFreeLinop) = (length(l.ω), size(l.kperp2, 1), size(l.kperp2, 2))
 Base.@propagate_inbounds function Base.getindex(l::FactoredFreeLinop,
@@ -98,20 +115,23 @@ end
 
 function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
                           n::AbstractArray, β1::Number, β0ref::Number;
-                          thg=false, factored::Bool=false)
+                          thg=false, factored::Bool=false, arraytype=Array)
     kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
     idcs = CartesianIndices((length(xygrid.ky), length(xygrid.kx)))
     k2 = zero(grid.ω)
     k2[grid.sidx] .= (n[grid.sidx].*grid.ω[grid.sidx]./PhysData.c).^2
-    factored && return FactoredFreeLinop(copy(grid.ω), k2, kperp2, float(β1),
-                                         float(β0ref), !thg)
+    if factored
+        l = FactoredFreeLinop(copy(grid.ω), k2, kperp2, float(β1), float(β0ref), !thg)
+        return arraytype === Array ? l : Adapt.adapt(arraytype, l)
+    end
+    _check_materialised_linop(arraytype)
     out = zeros(ComplexF64, (length(grid.ω), length(xygrid.ky), length(xygrid.kx)))
     _fill_linop_xy!(out, grid, β1, k2, kperp2, idcs, β0ref; thg=thg)
     return out
 end
 
 function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,
-                          thg=false; factored::Bool=false)
+                          thg=false; factored::Bool=false, arraytype=Array)
     n = zero(grid.ω)
     n[grid.sidx] = nfun.(wlfreq.(grid.ω[grid.sidx]))
     β1 = PhysData.dispersion_func(1, nfun)(grid.referenceλ)
@@ -120,7 +140,17 @@ function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,
     else
         β0const = grid.ω0/PhysData.c * nfun(wlfreq(grid.ω0))
     end
-    make_const_linop(grid, xygrid, n, β1, β0const; thg=thg, factored)
+    make_const_linop(grid, xygrid, n, β1, β0const; thg=thg, factored, arraytype)
+end
+
+# A materialised linear operator is a whole extra field-sized array on the device, and
+# building it needs a scalar fill loop. Refuse rather than silently doubling the device
+# memory or crawling.
+function _check_materialised_linop(arraytype)
+    arraytype === Array || error(
+        "device propagation requires `factored=true`: a materialised linear operator "*
+        "would occupy an entire extra field-sized device array (and is built by a "*
+        "host-side scalar loop). Pass `factored=true` to make_const_linop.")
 end
 
 """

@@ -403,11 +403,12 @@ mutable struct RamanPolarEnvBatched{TR, hvT, fT}
     r::TR # Raman response function
     h::Vector{Float64} # doubled buffer to hold response + padding
     ht::hvT # view into first half of h
-    hω::Vector{ComplexF64} # the frequency domain Raman response function
+    hω::Vector{ComplexF64} # the frequency domain Raman response function (host)
+    hωd::Any # `hω` on the field's array type; `hω` itself on the host (no copy)
     hFT::fT # 1D Fourier transform plan for h
     dt::Float64 # time step for scaling
     nt::Int # length of the (undoubled) time grid
-    B::Union{Nothing, Array{ComplexF64, 3}} # (2nt, ny, nx) doubled work array (lazy)
+    B::Any # (2nt, ny, nx) doubled work array, allocated lazily on the field's array type
     FT::Any # in-place batched FFT plan along dim 1 of B (created with B)
     IFT::Any # inverse of FT
 end
@@ -422,7 +423,7 @@ function RamanPolarEnvBatched(t, r)
     inv(hFT)
     Utils.saveFFTwisdom()
     hω = hFT * h
-    RamanPolarEnvBatched(r, h, ht, hω, hFT, t[2] - t[1], length(t),
+    RamanPolarEnvBatched(r, h, ht, hω, hω, hFT, t[2] - t[1], length(t),
                          nothing, nothing, nothing)
 end
 
@@ -431,17 +432,23 @@ function (R::RamanPolarEnvBatched)(out, Et, ρ)
     size(Et, 1) == nt || error("RamanPolarEnvBatched: field time grid size $(size(Et, 1))"*
                                " does not match response grid size $nt")
     if R.B === nothing
-        R.B = zeros(ComplexF64, (2nt, size(Et, 2), size(Et, 3)))
-        Utils.loadFFTwisdom()
-        R.FT = FFTW.plan_fft!(R.B, 1, flags=Luna.settings["fftw_flag"])
-        R.IFT = FFTW.plan_ifft!(R.B, 1, flags=Luna.settings["fftw_flag"])
-        Utils.saveFFTwisdom()
+        # The work buffer follows the field: `similar` puts it on the same device, and
+        # the plans are made by the matching planner.
+        R.B = similar(Et, ComplexF64, (2nt, size(Et, 2), size(Et, 3)))
+        Utils.loadFFTwisdom(Utils.backend(Et))
+        R.FT = Utils.plan_fft!_backend(R.B, 1)
+        R.IFT = Utils.plan_ifft!_backend(R.B, 1)
+        Utils.saveFFTwisdom(Utils.backend(Et))
+        # The response kernel is computed on the host (it is only 2nt long); on a device
+        # it needs a staging copy, which is refreshed per call below.
+        Utils.isdevice(Et) && (R.hωd = similar(Et, ComplexF64, length(R.hω)))
     end
     # update the response function and its transform once per call — it depends only on
     # the scalar density, so this is exact (RamanPolarEnv recomputes it per column)
     R.r(R.ht, ρ)
     R.hω .= R.hFT * R.h
-    _raman_batched!(out, Et, ρ, R.B, R.FT, R.IFT, R.hω, R.dt, nt)
+    R.hωd === R.hω || copyto!(R.hωd, R.hω)
+    _raman_batched!(out, Et, ρ, R.B, R.FT, R.IFT, R.hωd, R.dt, nt)
 end
 
 # function barrier: B/FT/IFT fields are loosely typed on the struct

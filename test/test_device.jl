@@ -4,6 +4,7 @@ import Luna: Utils, Output
 import GPUArraysCore
 import FFTW
 import AbstractFFTs
+import Adapt
 
 # =============================================================================
 # Tests for Luna's device (GPU) support.
@@ -165,6 +166,53 @@ end
     # The saving contract still works through the wrapper
     h(y, 0.0, 1e-4, t -> y)
     @test haskey(h, "Eω")
+end
+
+@testset "arraytype plumbing (host default)" begin
+    import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields
+    grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+    xygrid = Grid.FreeGrid(400e-6, 16)
+    nfun = PhysData.ref_index_fun(:Ar, 4)
+
+    # `arraytype=Array` must be exactly the previous behaviour, not merely equivalent
+    l = LinearOps.make_const_linop(grid, xygrid, nfun; factored=true)
+    la = LinearOps.make_const_linop(grid, xygrid, nfun; factored=true, arraytype=Array)
+    @test typeof(l) === typeof(la)
+    @test isequal(collect(l), collect(la))
+    n = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true)(0.0)
+    na = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true,
+                                      arraytype=Array)(0.0)
+    @test isequal(collect(n), collect(na))
+
+    # The lazy operators are Adapt-able, which is how their factors reach a device.
+    # Adapting to `Array` is the identity, so this also checks the rule is wired up.
+    @test Adapt.adapt(Array, l) isa LinearOps.FactoredFreeLinop
+    @test Adapt.adapt(Array, n) isa NonlinearRHS.FreeNorm
+    @test isequal(collect(Adapt.adapt(Array, l)), collect(l))
+    @test isequal(collect(Adapt.adapt(Array, n)), collect(n))
+
+    # A materialised operator is a whole extra field-sized device array, so a device
+    # request must be refused rather than silently doubling the footprint
+    @test_throws ErrorException LinearOps.make_const_linop(
+        grid, xygrid, nfun; factored=false, arraytype=DummyGPUArray)
+    @test_throws ErrorException NonlinearRHS.const_norm_free(
+        grid, xygrid, nfun; factored=false, arraytype=DummyGPUArray)
+
+    # The transform keeps grid-vector mirrors and (host) has no separate inverse plan
+    densityfun = z -> 1.0
+    responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(:Ar)),)
+    normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true)
+    inputs = Fields.GaussGaussField(λ0=800e-9, τfwhm=30e-15, energy=1e-6, w0=100e-6)
+    Eω, transform, FT = Luna.setup(grid, xygrid, densityfun, normfun, responses, inputs)
+    @test Eω isa Array{ComplexF64, 3}
+    @test transform.gv.ω === grid.ω          # aliased on the host: no copy
+    @test transform.IFT === nothing          # host keeps using ldiv! through FT
+    @test Utils.backend(transform.Eto) isa Utils.CPUBackend
+
+    # The transform call is the hot path: the added type parameters must not cost
+    # inference (a dynamic dispatch here would be a large silent slowdown)
+    nl = similar(Eω)
+    @test (@inferred transform(nl, Eω, 0.0); true)
 end
 
 # --- Functional device-path tests, skipped without JLArrays ------------------

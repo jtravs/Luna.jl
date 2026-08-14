@@ -2,6 +2,7 @@ module Luna
 import FFTW
 import Hankel
 import Logging
+import Adapt
 import LinearAlgebra: mul!, ldiv!
 Logging.disable_logging(Logging.BelowMinLevel)
 
@@ -327,28 +328,55 @@ function setup(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
     Eωk, transform, FT
 end
 
+"""
+    setup(grid::EnvGrid, xygrid::FreeGrid, densityfun, normfun, responses, inputs;
+          noise_field=nothing, fastpath=true, arraytype=Array)
+
+Set up a 3D free-space envelope propagation, returning `(Eωk, transform, FT)`.
+
+`arraytype` selects where the propagation runs. The default `Array` is the host. Passing
+a GPU array type (or use [`Luna.resolve_arraytype`](@ref) to name one lazily) allocates
+the transform buffers on that device, plans the FFTs with the device's own planner, and
+returns a device-resident `Eωk` — `Luna.run` then executes the whole propagation there.
+The input field is always built on the host (`Fields` is host-only) with a host plan and
+uploaded once, which costs one transfer at setup.
+"""
 function setup(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
-               densityfun, normfun, responses, inputs; noise_field=nothing, fastpath=true)
+               densityfun, normfun, responses, inputs;
+               noise_field=nothing, fastpath=true, arraytype=Array)
     Logging.@info("Setting up and planning FFTs...")
     flush(stderr)
-    Utils.loadFFTwisdom()
+    ondevice = arraytype !== Array
+    Utils.loadFFTwisdom() # host wisdom: the input field is always built on the host
     x = xygrid.x
     y = xygrid.y
     xr = Array{ComplexF64}(undef, length(grid.t), length(y), length(x))
-    FT = FFTW.plan_fft(xr, (1, 2, 3), flags=settings["fftw_flag"])
+    FTh = FFTW.plan_fft(xr, (1, 2, 3), flags=settings["fftw_flag"])
     Eωk = zeros(ComplexF64, length(grid.ω), length(y), length(x))
-    doinputs_fs!(Eωk, grid, xygrid, FT, inputs)
-    if length(grid.to) == length(grid.t)
-        FTo = FT # no oversampling: the two plans would be identical, so share one
+    doinputs_fs!(Eωk, grid, xygrid, FTh, inputs)
+    if ondevice
+        # Upload the input, then plan against it: at production sizes the device plan's
+        # prototype is the state array itself, so no host prototype is allocated.
+        Eωk = Adapt.adapt(arraytype, Eωk)
+        FT = Utils.plan_fft_backend(Eωk, (1, 2, 3))
+        length(grid.to) == length(grid.t) || error(
+            "device propagation requires a non-oversampled grid (length(grid.to) == "*
+            "length(grid.t)); got $(length(grid.to)) vs $(length(grid.t))")
+        FTo = FT
     else
-        xo = Array{ComplexF64}(undef, length(grid.to), length(y), length(x))
-        FTo = FFTW.plan_fft(xo, (1, 2, 3), flags=settings["fftw_flag"])
+        FT = FTh
+        if length(grid.to) == length(grid.t)
+            FTo = FT # no oversampling: the two plans would be identical, so share one
+        else
+            xo = Array{ComplexF64}(undef, length(grid.to), length(y), length(x))
+            FTo = FFTW.plan_fft(xo, (1, 2, 3), flags=settings["fftw_flag"])
+        end
     end
     transform = NonlinearRHS.TransFree(grid, xygrid, FTo,
                                        responses, densityfun, normfun;
-                                       noise_field, fastpath)
-    inv(FT) # create inverse FT plans now, so wisdom is saved
-    inv(FTo)
+                                       noise_field, fastpath, arraytype)
+    inv(FTh) # create inverse FT plans now, so wisdom is saved
+    ondevice || inv(FTo)
     Utils.saveFFTwisdom()
     Logging.@info("Setup finished.")
     flush(stderr)

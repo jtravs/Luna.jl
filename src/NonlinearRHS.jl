@@ -3,8 +3,10 @@ import FFTW
 import Hankel
 import Cubature
 import Base: show
+import Adapt
 import LinearAlgebra: mul!, ldiv!
 import NumericalIntegration: integrate, SimpsonEven
+import Luna
 import Luna: PhysData, Modes, Maths, Grid, Nonlinear, Utils
 import Luna.PhysData: wlfreq
 
@@ -700,15 +702,17 @@ and the output. If additionally all responses are pointwise
 `Eto` in place and `Pto` is `nothing` too. Both fast paths are bit-identical to the
 general path; disable with the constructor keyword `fastpath=false`.
 """
-mutable struct TransFree{TT, FTT, nT, rT, gT, xygT, dT, pT, oT, iT, eT, nlT}
+mutable struct TransFree{FTT, iFTT, nT, rT, gT, gvT, xygT, dT, tT, pT, oT, iT, eT, nlT}
     FT::FTT # 3D Fourier transform (space to k-space and time to frequency)
+    IFT::iFTT # explicit inverse of FT on a device, `nothing` on the host (see below)
     normfun::nT # Function which returns normalisation factor
     resp::rT # nonlinear responses (tuple of callables)
     grid::gT # time grid
+    gv::gvT # grid vectors (ω and the apodisation windows) on the buffers' array type
     xygrid::xygT
     densityfun::dT # callable which returns density
     Pto::pT # buffer for oversampled time-domain NL polarisation, or nothing (fast path, all-pointwise)
-    Eto::Array{TT, 3} # buffer for oversampled time-domain field
+    Eto::tT # buffer for oversampled time-domain field
     Eωo::oT # buffer for oversampled frequency-domain field, or nothing (fast path)
     Pωo::oT # buffer for oversampled frequency-domain NL polarisation, or nothing (fast path)
     scale::Float64 # scale factor to be applied during oversampling
@@ -729,7 +733,7 @@ end
 
 """
     TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
-              noise_field=nothing, fastpath=true)
+              noise_field=nothing, fastpath=true, arraytype=Array)
 
 Construct a `TransFree` to calculate the reciprocal-domain nonlinear polarisation for 3D
 free-space propagation.
@@ -742,9 +746,13 @@ free-space propagation.
 - `fastpath=true`: allow the bit-identical fast path which skips the oversampled buffers
   when the grid is not oversampled (see [`TransFree`](@ref)). Set to `false` to force the
   general path (e.g. for testing).
+- `arraytype=Array`: array type for the working buffers. Pass a GPU array type to run the
+  transform on a device; the grid vectors are mirrored to the same type (see
+  [`Luna.GridVectors`](@ref)) and an explicit inverse FFT plan is stored, because
+  `ldiv!` through a device plan's `ScaledPlan` would otherwise be built per call.
 """
 function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
-                   noise_field=nothing, fastpath=true)
+                   noise_field=nothing, fastpath=true, arraytype=Array)
     Ny = length(xygrid.y)
     Nx = length(xygrid.x)
     # The fast path is only exact (and only safe: c2r ldiv! would destroy its input) for
@@ -756,7 +764,13 @@ function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
               " path: an EnvGrid without oversampling or a noise field. Use the"*
               " columnwise response type instead.")
     end
-    Eto = zeros(TT, (length(grid.to), Ny, Nx))
+    ondevice = arraytype !== Array
+    if ondevice && !fast
+        error("Device (GPU) propagation requires the TransFree fast path: an EnvGrid"*
+              " without oversampling or a noise field, and fastpath=true. The general"*
+              " path uses columnwise kernels which cannot run on a device.")
+    end
+    Eto = Luna.device_zeros(arraytype, TT, (length(grid.to), Ny, Nx))
     if fast
         Eωo = nothing
         Pωo = nothing
@@ -780,7 +794,11 @@ function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
         Et_noise = nothing
         Et_nl = nothing
     end
-    TransFree(FT, normfun, responses, grid, xygrid, densityfun,
+    # The host path keeps using `ldiv!(dest, FT, src)` exactly as before; only the device
+    # path needs the inverse plan materialised up front.
+    IFT = ondevice ? inv(FT) : nothing
+    gv = Luna.gridvectors(grid, arraytype)
+    TransFree(FT, IFT, normfun, responses, grid, gv, xygrid, densityfun,
               Pto, Eto, Eωo, Pωo, scale, idcs, Et_noise, Et_nl)
 end
 
@@ -879,11 +897,16 @@ Lazy normalisation-factor array for 3D free-space propagation: stores only `k²(
 full `(nω, nky, nkx)` `Float64` array. Elements are identical (bit-for-bit) to those
 produced by [`norm_free`](@ref). Construct via `const_norm_free(...; factored=true)`.
 """
-struct FreeNorm <: AbstractArray{Float64, 3}
-    ω::Vector{Float64}
-    k2::Vector{Float64}
-    kperp2::Matrix{Float64}
+struct FreeNorm{Vt, Mt} <: AbstractArray{Float64, 3}
+    ω::Vt
+    k2::Vt
+    kperp2::Mt
 end
+
+# See the note on `LinearOps.FactoredFreeLinop`: adapting moves the small factors to the
+# device, where they are consumed by a broadcast kernel rather than by `getindex`.
+Adapt.adapt_structure(to, n::FreeNorm) =
+    FreeNorm(Adapt.adapt(to, n.ω), Adapt.adapt(to, n.k2), Adapt.adapt(to, n.kperp2))
 
 Base.size(n::FreeNorm) = (length(n.ω), size(n.kperp2, 1), size(n.kperp2, 2))
 Base.@propagate_inbounds function Base.getindex(n::FreeNorm, iω::Int, iy::Int, ix::Int)
@@ -901,15 +924,20 @@ Make function to return normalisation factor for 3D propagation without re-calcu
 every step. With `factored=true` the returned function yields a lazy [`FreeNorm`](@ref)
 (bit-identical elements, no field-sized cache).
 """
-function const_norm_free(grid, xygrid, nfun; factored::Bool=false)
+function const_norm_free(grid, xygrid, nfun; factored::Bool=false, arraytype=Array)
     if factored
         kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
         k2 = zero(grid.ω)
         # same k² as norm_free computes (z-independent here, so evaluated once)
         k2[grid.sidx] = (nfun.(wlfreq.(grid.ω[grid.sidx])).*grid.ω[grid.sidx]./PhysData.c).^2
         out = FreeNorm(copy(grid.ω), k2, kperp2)
+        arraytype === Array || (out = Adapt.adapt(arraytype, out))
         return z -> out
     end
+    arraytype === Array || error(
+        "device propagation requires `factored=true`: a materialised normalisation "*
+        "factor would occupy half a field-sized device array. Pass `factored=true` to "*
+        "const_norm_free.")
     nfunω = (ω; z) -> nfun(wlfreq(ω))
     normfun = norm_free(grid, xygrid, nfunω)
     out = copy(normfun(0.0))
