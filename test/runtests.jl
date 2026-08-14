@@ -47,6 +47,7 @@ const TESTFILES = [
     "Linear propagation" => ["test_linearprop.jl"],
     "GNLSE interface" => ["test_gnlse.jl"],
     "Noise model" => ["test_noise.jl"],
+    "Device support" => ["test_device.jl"],
 ]
 
 const testpatterns = String.(ARGS)

@@ -1,6 +1,8 @@
 module Utils
 import Dates
 import FFTW
+import AbstractFFTs
+import GPUArraysCore
 import Logging
 import LibGit2
 import FileWatching.Pidfile: mkpidlock
@@ -119,6 +121,50 @@ function use_native_fftw_threads()
     end
 end
 
+#=================================================#
+#===============  ARRAY BACKENDS   ===============#
+#=================================================#
+
+"""
+    Backend
+
+Trait distinguishing host arrays ([`CPUBackend`](@ref)) from device/GPU arrays
+([`DeviceBackend`](@ref)). Luna dispatches its elementwise kernels on this so that the
+same propagation code runs on either, without Luna depending on any GPU package: a
+device array is anything subtyping `GPUArraysCore.AbstractGPUArray` (`CuArray`,
+`ROCArray`, `JLArray`, …).
+
+Use [`backend`](@ref) to query it.
+"""
+abstract type Backend end
+
+"Trait value for host (CPU) arrays. See [`Backend`](@ref)."
+struct CPUBackend <: Backend end
+
+"Trait value for device (GPU) arrays. See [`Backend`](@ref)."
+struct DeviceBackend <: Backend end
+
+"""
+    backend(x)
+
+Return [`CPUBackend()`](@ref CPUBackend) or [`DeviceBackend()`](@ref DeviceBackend) for
+the array (or array type) `x`. Wrappers (`SubArray`, `ReshapedArray`,
+`PermutedDimsArray`) report the backend of their parent, so a view of a device array is
+correctly identified — this matters because [`tchunks`](@ref) hands views to its callback.
+
+Anything unrecognised is treated as a host array: mis-classifying an exotic host wrapper
+as CPU is a no-op, whereas the reverse would break it.
+"""
+backend(x) = backend(typeof(x))
+backend(::Type) = CPUBackend()
+backend(::Type{<:GPUArraysCore.AbstractGPUArray}) = DeviceBackend()
+backend(::Type{<:SubArray{T, N, P}}) where {T, N, P} = backend(P)
+backend(::Type{<:Base.ReshapedArray{T, N, P}}) where {T, N, P} = backend(P)
+backend(::Type{<:PermutedDimsArray{T, N, A, B, P}}) where {T, N, A, B, P} = backend(P)
+
+"Whether `x` lives on a device (GPU)."
+isdevice(x) = backend(x) isa DeviceBackend
+
 # Global switches for the threaded elementwise kernels: `THREADING[]` turns them off
 # entirely; arrays smaller than `THREADING_MINLEN[]` always run serially (threading
 # overhead dominates there, e.g. for modal propagation).
@@ -163,8 +209,17 @@ Call `f` on matching contiguous linear-index views of `arrs`, one chunk per thre
 large arrays; `f(arrs...)` directly otherwise. Use to thread a fused elementwise
 broadcast: `tchunks((d, s) -> (@. d = 2s), dest, src)`. The broadcast must be purely
 elementwise; threaded and serial execution are then bit-identical.
+
+On device arrays (see [`backend`](@ref)) `f` is called once with the whole arrays: the
+fused broadcast inside `f` is then a single device kernel, which is exactly the right
+granularity there — host-side chunking would only serialise it.
 """
-function tchunks(f, arrs...)
+tchunks(f, arrs...) = _tchunks(backend(first(arrs)), f, arrs...)
+
+# One kernel over the whole array; the GPU does its own partitioning.
+_tchunks(::DeviceBackend, f, arrs...) = (f(arrs...); nothing)
+
+function _tchunks(::CPUBackend, f, arrs...)
     n = length(first(arrs))
     if _threading(n)
         nchunks = Threads.nthreads()
@@ -203,6 +258,46 @@ function saveFFTwisdom()
     end
     Logging.@info("FFTW wisdom saved to $fpath")
 end
+
+# FFTW wisdom is an FFTW-only concept (and involves filesystem locking), so device
+# planning skips it entirely.
+loadFFTwisdom(::CPUBackend) = loadFFTwisdom()
+loadFFTwisdom(::DeviceBackend) = nothing
+saveFFTwisdom(::CPUBackend) = saveFFTwisdom()
+saveFFTwisdom(::DeviceBackend) = nothing
+
+"""
+    plan_fft_backend(x, dims)
+    plan_fft!_backend(x, dims)
+    plan_ifft!_backend(x, dims)
+    plan_rfft_backend(x, dims)
+
+Plan an FFT over `dims` for the array `x`, choosing the planner that fits its
+[`backend`](@ref): FFTW with Luna's configured planning flags on the host, or the generic
+`AbstractFFTs` planner on a device. The distinction is necessary because device FFT
+libraries (cuFFT and friends) accept no FFTW planner flags.
+
+Luna never names a GPU package: `AbstractFFTs.plan_fft(::CuArray, …)` resolves to CUFFT
+through CUDA.jl's own `AbstractFFTs` integration once CUDA is loaded.
+"""
+plan_fft_backend(x, dims) = _plan_fft(backend(x), x, dims)
+_plan_fft(::CPUBackend, x, dims) = FFTW.plan_fft(x, dims, flags=settings["fftw_flag"])
+_plan_fft(::DeviceBackend, x, dims) = AbstractFFTs.plan_fft(x, dims)
+
+@doc (@doc plan_fft_backend)
+plan_fft!_backend(x, dims) = _plan_fft!(backend(x), x, dims)
+_plan_fft!(::CPUBackend, x, dims) = FFTW.plan_fft!(x, dims, flags=settings["fftw_flag"])
+_plan_fft!(::DeviceBackend, x, dims) = AbstractFFTs.plan_fft!(x, dims)
+
+@doc (@doc plan_fft_backend)
+plan_ifft!_backend(x, dims) = _plan_ifft!(backend(x), x, dims)
+_plan_ifft!(::CPUBackend, x, dims) = FFTW.plan_ifft!(x, dims, flags=settings["fftw_flag"])
+_plan_ifft!(::DeviceBackend, x, dims) = AbstractFFTs.plan_ifft!(x, dims)
+
+@doc (@doc plan_fft_backend)
+plan_rfft_backend(x, dims) = _plan_rfft(backend(x), x, dims)
+_plan_rfft(::CPUBackend, x, dims) = FFTW.plan_rfft(x, dims, flags=settings["fftw_flag"])
+_plan_rfft(::DeviceBackend, x, dims) = AbstractFFTs.plan_rfft(x, dims)
 
 function save_dict_h5(fpath, d; force=false, rmold=false)
     if isfile(fpath) && rmold

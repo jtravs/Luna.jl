@@ -72,6 +72,7 @@ include("Output.jl")
 include("Maths.jl")
 include("PhysData.jl")
 include("Grid.jl")
+include("Device.jl") # device (GPU) scaffolding; needs Utils, Output and Grid
 include("Modes.jl")
 include("Fields.jl")
 include("RK45.jl")
