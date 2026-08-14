@@ -48,6 +48,8 @@ const TESTFILES = [
     "GNLSE interface" => ["test_gnlse.jl"],
     "Noise model" => ["test_noise.jl"],
     "Device support" => ["test_device.jl"],
+    # Hardware-gated: no-ops unless LUNA_TEST_CUDA=1 and a GPU is present.
+    "CUDA" => ["test_cuda.jl"],
 ]
 
 const testpatterns = String.(ARGS)

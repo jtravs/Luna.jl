@@ -106,9 +106,19 @@ Scratch = "1"
 SpecialFunctions = "0.10.3, 1, 2"
 StaticArrays = "1"
 Statistics = "1.9"
+CUDA = "5, 6"
 Test = "1.9"
 Unitful = "1"
 julia = "1.9"
+
+# CUDA is a weak dependency: Luna's device code is generic over the array type, so only
+# device management (selection, memory pool, memory query) needs CUDA-specific code.
+# Loading CUDA activates ext/LunaCUDAExt.jl; Luna itself never loads it.
+[weakdeps]
+CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
+
+[extensions]
+LunaCUDAExt = "CUDA"
 
 # JLArrays provides a CPU-backed AbstractGPUArray which enforces the same
 # no-scalar-indexing contract as CuArray, so the device code paths can be tested
