@@ -243,6 +243,74 @@ if have_jlarrays
         @test Array(d) == 2 .* collect(1.0:64.0)
     end
 
+    @testset "factored operators on device" begin
+        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, RK45
+        JLArray = JLArrays.JLArray
+
+        grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+        xygrid = Grid.FreeGrid(400e-6, 8)
+        nfun = PhysData.ref_index_fun(:Ar, 4)
+        lh = LinearOps.make_const_linop(grid, xygrid, nfun; factored=true)
+        nh = NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true)(0.0)
+        ld = Adapt.adapt(JLArray, lh)
+        nd = Adapt.adapt(JLArray, nh)
+
+        # Adapting moves the factors, not the scalars
+        @test ld.ω isa JLArray
+        @test ld.β1 === lh.β1 && ld.subref === lh.subref
+        @test nd.kperp2 isa JLArray
+
+        # The device propagator computes the operator on the fly. Its elements must be
+        # bit-identical to the host's, since both evaluate the same shared element
+        # function — only the exponential and the multiply are done by the device.
+        dz = 3.7e-5
+        rng = Random.Xoshiro(4242)
+        y = randn(rng, ComplexF64, size(lh))
+        yh = copy(y)
+        yd = JLArray(copy(y))
+        RK45.make_prop!(lh, yh)(yh, 0.0, dz)
+        RK45.make_prop!(ld, yd)(yd, 0.0, dz)
+        @test isapprox(Array(yd), yh; rtol=1e-13)
+
+        # ...and the backward direction
+        yh2 = copy(y); yd2 = JLArray(copy(y))
+        RK45.make_prop!(lh, yh2)(yh2, 0.0, dz, true)
+        RK45.make_prop!(ld, yd2)(yd2, 0.0, dz, true)
+        @test isapprox(Array(yd2), yh2; rtol=1e-13)
+
+        # The evanescent branch (k⊥² > k², giving real attenuation rather than phase) is
+        # not reached on a physically-sized grid, so exercise it with synthetic factors
+        # spanning both sides of the cutoff. Branch divergence is the one place a device
+        # kernel could plausibly differ from the host loop.
+        ω = collect(range(1e15, 4e15, length=5))
+        k2 = (ω .* (1.5/PhysData.c)).^2
+        kperp2 = collect(reshape(range(0.0, 3*maximum(k2), length=9), 3, 3))
+        lsyn = LinearOps.FactoredFreeLinop(ω, k2, kperp2, 5e-9, 1.2e7, true)
+        @test any(<(0), minimum(k2) .- kperp2)   # evanescent region present
+        @test any(>(0), maximum(k2) .- kperp2)   # propagating region present
+        ysyn = randn(rng, ComplexF64, size(lsyn))
+        yhs = copy(ysyn); yds = JLArray(copy(ysyn))
+        RK45.make_prop!(lsyn, yhs)(yhs, 0.0, dz)
+        RK45.make_prop!(Adapt.adapt(JLArray, lsyn), yds)(yds, 0.0, dz)
+        @test isapprox(Array(yds), yhs; rtol=1e-13)
+
+        # The lazy structs must never be consumed elementwise once adapted: `getindex`
+        # reads their factor arrays, which on a device is scalar indexing and throws.
+        # This is why `_prop_factored!` broadcasts the factors instead.
+        @test_throws Exception collect(ld)
+        @test_throws Exception ld[1, 1, 1]
+        # NOTE: on CUDA, putting the struct itself into a device broadcast additionally
+        # fails at BroadcastStyle combination (a non-device AbstractArray operand) and
+        # again at kernel launch (non-isbits fields). JLArray does NOT reproduce either
+        # rejection, so that is asserted in the hardware-gated test_cuda.jl instead.
+
+        # The shared element functions are what the lazy host getindex evaluates
+        el = LinearOps._linop_xy_element(lh.ω[3], lh.β1, lh.k2[3], lh.kperp2[2, 2])
+        @test lh[3, 2, 2] == (lh.subref ? el - (-im*lh.βref) : el)
+        @test NonlinearRHS._freenorm_element(nh.ω[3], nh.k2[3], nh.kperp2[2, 2]) ==
+              nh[3, 2, 2]
+    end
+
     @testset "device error norms" begin
         import Luna: RK45
         JLArray = JLArrays.JLArray

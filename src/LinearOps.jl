@@ -63,26 +63,62 @@ Base.@propagate_inbounds function Base.getindex(l::FactoredFreeLinop,
     l.subref ? val - (-im*l.βref) : val
 end
 
-"Threaded RK45 propagator kernel for the factored linear operator: the operator elements
-and their exponentials are computed on the fly — no array-sized reads or storage."
+"""
+RK45 propagator kernel for the factored linear operator: the operator elements and their
+exponentials are computed on the fly — no array-sized reads or storage. This is the
+single largest elementwise cost of a step (it runs 8 times per step), which is why it
+gets a backend-specialised kernel rather than going through the generic
+`make_prop!(::AbstractArray, y0)`.
+"""
 function RK45.make_prop!(linop::FactoredFreeLinop, y0)
     prop! = let linop=linop
         function prop!(y, t1, t2, bwd=false)
             dt = bwd ? (t1-t2) : (t2-t1)
-            ω = linop.ω; k2 = linop.k2; kperp2 = linop.kperp2
-            β1 = linop.β1; βref = linop.βref; subref = linop.subref
-            nω = length(ω)
-            Utils.tforeach(length(kperp2); ntotal=length(y)) do ii
-                kp = kperp2[ii]
-                base = (ii-1)*nω
-                @inbounds for iω in 1:nω
-                    l = _linop_xy_element(ω[iω], β1, k2[iω], kp)
-                    subref && (l -= -im*βref)
-                    y[base+iω] *= exp(l*dt)
-                end
-            end
+            _prop_factored!(Utils.backend(y), y, linop, dt)
         end
     end
+end
+
+# Host: threaded over transverse points, with the ω loop innermost so each thread walks
+# contiguous memory.
+function _prop_factored!(::Utils.CPUBackend, y, linop, dt)
+    ω = linop.ω; k2 = linop.k2; kperp2 = linop.kperp2
+    β1 = linop.β1; βref = linop.βref; subref = linop.subref
+    nω = length(ω)
+    Utils.tforeach(length(kperp2); ntotal=length(y)) do ii
+        kp = kperp2[ii]
+        base = (ii-1)*nω
+        @inbounds for iω in 1:nω
+            l = _linop_xy_element(ω[iω], β1, k2[iω], kp)
+            subref && (l -= -im*βref)
+            y[base+iω] *= exp(l*dt)
+        end
+    end
+end
+
+# Device: one broadcast over the SEPARABLE FACTORS, reshaped to (nω,1,1) and (1,nky,nkx)
+# so they expand against the state array without materialising anything.
+#
+# Note this deliberately does NOT put the `FactoredFreeLinop` itself into the broadcast.
+# It is an `AbstractArray` but not a device array, so combining it with one is rejected
+# at the BroadcastStyle level; and even forced through, the struct's array fields are not
+# isbits and would fail at kernel launch. Broadcasting the factors sidesteps both.
+function _prop_factored!(::Utils.DeviceBackend, y, linop, dt)
+    ω = reshape(linop.ω, :, 1, 1)
+    k2 = reshape(linop.k2, :, 1, 1)
+    kperp2 = reshape(linop.kperp2, 1, size(linop.kperp2)...)
+    β1 = linop.β1; βref = linop.βref; subref = linop.subref
+    @. y *= exp(_linop_xy_dt(ω, β1, k2, kperp2, βref, subref, dt))
+    return nothing
+end
+
+# The exponent for one element, including the reference-phase subtraction. Kept as a
+# scalar function of scalars so the device broadcast and the host loop above evaluate
+# exactly the same expression.
+@inline function _linop_xy_dt(ω, β1, k2ω, kperp2i, βref, subref, dt)
+    l = _linop_xy_element(ω, β1, k2ω, kperp2i)
+    subref && (l -= -im*βref)
+    return l*dt
 end
 
 """

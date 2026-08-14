@@ -903,19 +903,24 @@ struct FreeNorm{Vt, Mt} <: AbstractArray{Float64, 3}
     kperp2::Mt
 end
 
+# Single-element normalisation factor, shared between `getindex` below and the device
+# scaling kernel, so the lazy and broadcast forms can never drift apart (the same
+# arrangement as `LinearOps._linop_xy_element`).
+@inline function _freenorm_element(ω, k2ω, kperp2i)
+    ω == 0 && return 1.0
+    βsq = k2ω - kperp2i
+    βsq <= 0 && return 1.0
+    return sqrt(βsq)/(PhysData.μ_0*ω)
+end
+
 # See the note on `LinearOps.FactoredFreeLinop`: adapting moves the small factors to the
 # device, where they are consumed by a broadcast kernel rather than by `getindex`.
 Adapt.adapt_structure(to, n::FreeNorm) =
     FreeNorm(Adapt.adapt(to, n.ω), Adapt.adapt(to, n.k2), Adapt.adapt(to, n.kperp2))
 
 Base.size(n::FreeNorm) = (length(n.ω), size(n.kperp2, 1), size(n.kperp2, 2))
-Base.@propagate_inbounds function Base.getindex(n::FreeNorm, iω::Int, iy::Int, ix::Int)
-    ω = n.ω[iω]
-    ω == 0 && return 1.0
-    βsq = n.k2[iω] - n.kperp2[iy, ix]
-    βsq <= 0 && return 1.0
-    return sqrt(βsq)/(PhysData.μ_0*ω)
-end
+Base.@propagate_inbounds Base.getindex(n::FreeNorm, iω::Int, iy::Int, ix::Int) =
+    _freenorm_element(n.ω[iω], n.k2[iω], n.kperp2[iy, ix])
 
 """
     const_norm_free(grid, xygrid, nfun)
