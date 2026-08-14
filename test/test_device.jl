@@ -340,15 +340,13 @@ if have_jlarrays
         RK45.make_prop!(Adapt.adapt(JLArray, lsyn), yds)(yds, 0.0, dz)
         @test isapprox(Array(yds), yhs; rtol=1e-13)
 
-        # The lazy structs must never be consumed elementwise once adapted: `getindex`
-        # reads their factor arrays, which on a device is scalar indexing and throws.
-        # This is why `_prop_factored!` broadcasts the factors instead.
+        # An adapted operator cannot be consumed elementwise from the host: `getindex`
+        # reads its factor arrays, which is scalar indexing of device memory.
         @test_throws Exception collect(ld)
         @test_throws Exception ld[1, 1, 1]
-        # NOTE: on CUDA, putting the struct itself into a device broadcast additionally
-        # fails at BroadcastStyle combination (a non-device AbstractArray operand) and
-        # again at kernel launch (non-isbits fields). JLArray does NOT reproduce either
-        # rejection, so that is asserted in the hardware-gated test_cuda.jl instead.
+        # (Inside a device broadcast the same `getindex` is fine on backends that adapt
+        # non-native AbstractArray operands — CUDA does, measured on an A40. Luna
+        # broadcasts the factors instead so as not to depend on that.)
 
         # The shared element functions are what the lazy host getindex evaluates
         el = LinearOps._linop_xy_element(lh.ω[3], lh.β1, lh.k2[3], lh.kperp2[2, 2])

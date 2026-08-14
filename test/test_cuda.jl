@@ -39,10 +39,19 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
             @testset "environment" begin
                 @test Utils.backend(CuArray(zeros(4))) isa Utils.DeviceBackend
                 @test Luna.resolve_arraytype(:cuda) === CuArray
-                # the extension must have replaced the no-op stubs
+                # The extension must have installed its hooks. These are function-valued
+                # rather than methods precisely so the extension can precompile: an
+                # extension cannot overwrite an identically-signatured stub, and the
+                # resulting precompilation failure is easy to miss because the extension
+                # still loads (just recompiled in every process — once per delay point
+                # under `instances`).
+                @test Luna._DEVICE_RECLAIM[] !== nothing
+                @test Luna._DEVICE_MEMORY_STATUS[] !== nothing
+                @test Luna._DEVICE_SELECT[] !== nothing
                 @test Luna.device_memory_status() !== nothing
                 free, total = Luna.device_memory_status()
                 @test 0 < free <= total
+                @test Luna.device_reclaim() === nothing   # runs, returns nothing
                 @info "CUDA device" name=CUDA.name(CUDA.device()) free_GiB=free/2^30 total_GiB=total/2^30
             end
 
@@ -64,16 +73,32 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                 @test inv(p) === ip
             end
 
-            @testset "lazy operators are rejected by a device broadcast" begin
-                # The reason the device kernels broadcast the separable FACTORS rather
-                # than the operator struct. JLArrays does not reproduce this rejection.
+            @testset "factor broadcast vs adapted-struct broadcast" begin
+                # The device propagator broadcasts the operator's separable FACTORS. An
+                # adapted operator struct ALSO works inside a CUDA broadcast, because
+                # CUDA adapts non-native AbstractArray operands and the struct carries
+                # an Adapt rule — so check the two agree. Luna uses the factor form so
+                # as not to depend on that behaviour (it is backend-specific), and to
+                # hoist the reference-phase test out of the per-element work.
                 grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
                 xygrid = Grid.FreeGrid(400e-6, 8)
                 nfun = PhysData.ref_index_fun(:Ar, 4)
                 l = LinearOps.make_const_linop(grid, xygrid, nfun;
                                                factored=true, arraytype=CuArray)
-                y = CuArray(randn(ComplexF64, size(l)))
-                @test_throws Exception (y .*= l)
+                y0 = randn(ComplexF64, size(l))
+                dz = 3.7e-5
+
+                yk = CuArray(copy(y0))                        # factor kernel
+                RK45.make_prop!(l, yk)(yk, 0.0, dz)
+                ys = CuArray(copy(y0))                        # adapted struct
+                ys .*= exp.(l .* dz)
+                @test isapprox(Array(yk), Array(ys); rtol=1e-12)
+
+                # ...and both agree with the host
+                lh = LinearOps.make_const_linop(grid, xygrid, nfun; factored=true)
+                yh = copy(y0)
+                RK45.make_prop!(lh, yh)(yh, 0.0, dz)
+                @test isapprox(Array(yk), yh; rtol=1e-12)
             end
 
             @testset "end-to-end propagation vs host" begin

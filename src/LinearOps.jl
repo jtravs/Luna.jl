@@ -99,10 +99,11 @@ end
 # Device: one broadcast over the SEPARABLE FACTORS, reshaped to (nω,1,1) and (1,nky,nkx)
 # so they expand against the state array without materialising anything.
 #
-# Note this deliberately does NOT put the `FactoredFreeLinop` itself into the broadcast.
-# It is an `AbstractArray` but not a device array, so combining it with one is rejected
-# at the BroadcastStyle level; and even forced through, the struct's array fields are not
-# isbits and would fail at kernel launch. Broadcasting the factors sidesteps both.
+# Broadcasting the factors rather than the `FactoredFreeLinop` itself keeps this
+# independent of whether a given backend adapts non-native `AbstractArray` operands
+# inside a broadcast. (CUDA does, via the `Adapt` rule on the struct — measured on an
+# A40 — so that route also works there; it just is not something to rely on.) The
+# factors additionally hoist the `subref` test out of the per-element work.
 function _prop_factored!(::Utils.DeviceBackend, y, linop, dt)
     ω = reshape(linop.ω, :, 1, 1)
     k2 = reshape(linop.k2, :, 1, 1)
