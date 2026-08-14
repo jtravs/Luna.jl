@@ -6,6 +6,7 @@ import FFTW
 import AbstractFFTs
 import Adapt
 import Random
+import LinearAlgebra
 
 # =============================================================================
 # Tests for Luna's device (GPU) support.
@@ -309,6 +310,92 @@ if have_jlarrays
         @test lh[3, 2, 2] == (lh.subref ? el - (-im*lh.βref) : el)
         @test NonlinearRHS._freenorm_element(nh.ω[3], nh.k2[3], nh.kperp2[2, 2]) ==
               nh[3, 2, 2]
+    end
+
+    @testset "TransFree device path" begin
+        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields
+        JLArray = JLArrays.JLArray
+
+        # cuFFT-equivalent plans for JLArray. Deliberately no `ldiv!` method: that forces
+        # AbstractFFTs' generic route (inv -> ScaledPlan -> mul! + rmul!), which is
+        # exactly the dispatch a real device plan takes, so the transform's use of an
+        # explicit inverse plan is exercised the same way here as on hardware.
+        # `pinv` is part of the AbstractFFTs.Plan contract: `inv` memoises into it. Its
+        # presence here means the shim goes through the same plan machinery as a real
+        # device plan.
+        mutable struct JLPlan{T, N, P} <: AbstractFFTs.Plan{T}
+            hp::P
+            sz::NTuple{N, Int}
+            dims::Any
+            pinv::AbstractFFTs.ScaledPlan
+            JLPlan{T, N, P}(hp, sz, dims) where {T, N, P} = new{T, N, P}(hp, sz, dims)
+        end
+        JLPlan(hp, sz::NTuple{N, Int}, dims) where {N} =
+            JLPlan{ComplexF64, N, typeof(hp)}(hp, sz, dims)
+        Base.size(p::JLPlan) = p.sz
+        Base.eltype(::JLPlan{T}) where {T} = T
+        AbstractFFTs.plan_fft(x::JLArrays.JLArray, dims) =
+            JLPlan(FFTW.plan_fft(Array(x), dims), size(x), dims)
+        AbstractFFTs.plan_inv(p::JLPlan) =
+            AbstractFFTs.ScaledPlan(JLPlan(inv(p.hp).p, p.sz, p.dims),
+                                    AbstractFFTs.normalization(Float64, p.sz, p.dims))
+        Base.:*(p::JLPlan, x::JLArrays.JLArray) = JLArray(p.hp * Array(x))
+        LinearAlgebra.mul!(y::JLArrays.JLArray, p::JLPlan, x::JLArrays.JLArray) =
+            (copyto!(y, p.hp * Array(x)); y)
+
+        grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+        xygrid = Grid.FreeGrid(400e-6, 8)
+        nfun = PhysData.ref_index_fun(:Ar, 4)
+        densityfun = z -> PhysData.density(:Ar, 4)
+        responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(:Ar)),)
+
+        function mktransform(arraytype)
+            normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun;
+                                                   factored=true, arraytype)
+            proto = Luna.device_zeros(arraytype, ComplexF64,
+                                      (length(grid.t), length(xygrid.y), length(xygrid.x)))
+            FT = Utils.plan_fft_backend(proto, (1, 2, 3))
+            NonlinearRHS.TransFree(grid, xygrid, FT, responses, densityfun, normfun;
+                                   arraytype)
+        end
+
+        th = mktransform(Array)
+        td = mktransform(JLArray)
+        @test th.IFT === nothing            # host keeps ldiv! through the forward plan
+        @test td.IFT !== nothing            # device stores the inverse explicitly
+        @test Utils.backend(td.Eto) isa Utils.DeviceBackend
+        @test td.gv.towin isa JLArray       # grid vectors mirrored to the device
+
+        rng = Random.Xoshiro(99)
+        Eωk = 1e4 .* randn(rng, ComplexF64, length(grid.ω), length(xygrid.y),
+                           length(xygrid.x))
+        nlh = similar(Eωk)
+        nld = JLArray(similar(Eωk))
+        Eωkd = JLArray(copy(Eωk))
+        th(nlh, Eωk, 0.0)
+        td(nld, Eωkd, 0.0)
+        @test isapprox(Array(nld), nlh; rtol=1e-10)
+        # the transform must not modify its input (the solver relies on this)
+        @test isequal(Array(Eωkd), Eωk)
+
+        # Unsupported combinations must fail loudly rather than crawl or silently
+        # fall back to the host
+        @test_throws ErrorException NonlinearRHS.TransFree(
+            grid, xygrid, td.FT, responses, densityfun,
+            NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true,
+                                         arraytype=JLArray);
+            arraytype=JLArray, fastpath=false)
+        rgrid = Grid.RealGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+        @test_throws ErrorException NonlinearRHS.TransFree(
+            rgrid, xygrid, td.FT, responses, densityfun,
+            NonlinearRHS.const_norm_free(rgrid, xygrid, nfun; factored=true,
+                                         arraytype=JLArray);
+            arraytype=JLArray)
+        # a columnwise response cannot be evaluated on a device
+        rr = Luna.Raman.raman_response(grid.to, :N2)
+        @test_throws ErrorException NonlinearRHS.Et_to_Pt_ordered!(
+            td.Eto, td.Eto, (Nonlinear.RamanPolarEnv(grid.to, rr),),
+            1.0, td.idcs)
     end
 
     @testset "device error norms" begin

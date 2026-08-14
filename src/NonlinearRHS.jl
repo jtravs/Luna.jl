@@ -167,6 +167,11 @@ function Et_to_Pt_ordered!(Pt, Et, responses::Tuple, density::Number, idcs)
         elseif Nonlinear.batched(resp!)
             resp!(Pt, Et, density) # array-level call with the full field
         else
+            Utils.isdevice(Pt) && error(
+                "response $(typeof(resp!)) is evaluated column by column, which cannot "*
+                "run on a device. Use a response with a pointwise "*
+                "(`Nonlinear.pointwise`) or batched (`Nonlinear.batched`) method — e.g. "*
+                "`RamanPolarEnvBatched` instead of `RamanPolarEnv`.")
             for i in idcs
                 resp!(view(Pt, :, i), view(Et, :, i), density)
             end
@@ -841,7 +846,7 @@ function (t::TransFree)(nl, Eωk, z)
     end
 end
 
-function trans_free_general!(nl, t::TransFree, Eωk, z)
+function _trans_free_general!(::Utils.CPUBackend, nl, t::TransFree, Eωk, z)
     fill!(t.Eωo, 0)
     copy_scale!(t.Eωo, Eωk, length(t.grid.ω), t.scale)
     ldiv!(t.Eto, t.FT, t.Eωo) # transform (ω, ky, kx) -> (t, y, x)
@@ -863,7 +868,10 @@ end
 # buffers would be exact copies, so transform directly between Eωk, Eto and nl.
 # Bit-identical to trans_free_general! (see TransFree docstring).
 function trans_free_fast!(nl, t::TransFree, Eωk, z)
-    ldiv!(t.Eto, t.FT, Eωk) # transform (ω, ky, kx) -> (t, y, x); preserves Eωk (c2c)
+    # ω -> t. On the host `ldiv!` through the forward plan is FFTW's fused normalisation;
+    # on a device the inverse plan is stored explicitly (`ldiv!` would build a ScaledPlan
+    # per call). Both preserve Eωk, which the caller relies on.
+    _to_time!(t.Eto, t, Eωk)
     ρ = t.densityfun(z)
     if t.Pto === nothing # all responses pointwise: polarisation overwrites Eto
         Pto = t.Eto
@@ -872,22 +880,54 @@ function trans_free_fast!(nl, t::TransFree, Eωk, z)
         Pto = t.Pto
         Et_to_Pt_ordered!(t.Pto, t.Eto, t.resp, ρ, t.idcs)
     end
-    towin = t.grid.towin
-    idcs = t.idcs
-    Utils.tforeach(length(idcs)) do ii # apodisation, threaded over transverse points
+    _apply_towin!(Utils.backend(Pto), Pto, t.gv.towin, t.idcs)
+    mul!(nl, t.FT, Pto) # transform (t, y, x) -> (ω, ky, kx)
+    _scale_nl!(Utils.backend(nl), nl, t, t.normfun(z))
+end
+
+_to_time!(Eto, t::TransFree, Eωk) = _to_time!(Eto, t, Eωk, t.IFT)
+_to_time!(Eto, t::TransFree, Eωk, ::Nothing) = ldiv!(Eto, t.FT, Eωk)
+_to_time!(Eto, t::TransFree, Eωk, IFT) = mul!(Eto, IFT, Eωk)
+
+# Time-domain apodisation, threaded over transverse points (host) or as one broadcast
+# over the whole array (device). `towin` is a length-nt vector which expands along the
+# leading dimension in both cases.
+function _apply_towin!(::Utils.CPUBackend, Pto, towin, idcs)
+    Utils.tforeach(length(idcs)) do ii
         Pcol = view(Pto, :, idcs[ii])
         @. Pcol *= towin
     end
-    mul!(nl, t.FT, Pto) # transform (t, y, x) -> (ω, ky, kx)
-    norm = t.normfun(z)
-    ωwin = t.grid.ωwin
-    ω = t.grid.ω
-    Utils.tforeach(length(idcs)) do ii # scaling, threaded over transverse points
+end
+
+_apply_towin!(::Utils.DeviceBackend, Pto, towin, idcs) = (Pto .*= towin; nothing)
+
+# Spectral window, shock term and normalisation.
+function _scale_nl!(::Utils.CPUBackend, nl, t::TransFree, norm)
+    ωwin = t.gv.ωwin
+    ω = t.gv.ω
+    idcs = t.idcs
+    Utils.tforeach(length(idcs)) do ii
         nlcol = view(nl, :, idcs[ii])
         normcol = view(norm, :, idcs[ii])
         @. nlcol *= ωwin * (-im*ω) / (2 * normcol)
     end
 end
+
+# The FreeNorm-specialised device method is defined below, once that type exists.
+_scale_nl!(::Utils.DeviceBackend, nl, t::TransFree, norm) = error(
+    "device propagation needs a factored normalisation (`const_norm_free(...; "*
+    "factored=true)`); got a $(typeof(norm)).")
+
+trans_free_general!(nl, t::TransFree, Eωk, z) =
+    _trans_free_general!(Utils.backend(nl), nl, t, Eωk, z)
+
+# The general path uses columnwise kernels and the scalar `copy_scale!` loops, neither of
+# which can run on a device. The constructor already refuses this combination; this is
+# the backstop.
+_trans_free_general!(::Utils.DeviceBackend, nl, t::TransFree, Eωk, z) = error(
+    "the general TransFree path cannot run on a device: it uses columnwise response "*
+    "evaluation and scalar oversampling copies. Use an EnvGrid without oversampling "*
+    "and without a noise field.")
 
 """
     FreeNorm
@@ -921,6 +961,19 @@ Adapt.adapt_structure(to, n::FreeNorm) =
 Base.size(n::FreeNorm) = (length(n.ω), size(n.kperp2, 1), size(n.kperp2, 2))
 Base.@propagate_inbounds Base.getindex(n::FreeNorm, iω::Int, iy::Int, ix::Int) =
     _freenorm_element(n.ω[iω], n.k2[iω], n.kperp2[iy, ix])
+
+# Device scaling kernel: broadcast the normalisation's separable factors rather than the
+# lazy struct itself (see `LinearOps._prop_factored!` for why the struct must stay out of
+# a device broadcast). Same element function as `getindex` above, so the two agree.
+function _scale_nl!(::Utils.DeviceBackend, nl, t::TransFree, norm::FreeNorm)
+    ωwin = reshape(t.gv.ωwin, :, 1, 1)
+    ω = reshape(t.gv.ω, :, 1, 1)
+    nω = reshape(norm.ω, :, 1, 1)
+    k2 = reshape(norm.k2, :, 1, 1)
+    kperp2 = reshape(norm.kperp2, 1, size(norm.kperp2)...)
+    @. nl *= ωwin * (-im*ω) / (2 * _freenorm_element(nω, k2, kperp2))
+    return nothing
+end
 
 """
     const_norm_free(grid, xygrid, nfun)
