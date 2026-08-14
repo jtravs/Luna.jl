@@ -386,6 +386,37 @@ end
 if !Sys.iswindows()
 
 ##
+@testset "SlurmExec GPU support" begin
+    # `gres` is emitted as an sbatch directive
+    ex = Scans.SlurmExec("/tmp/test.jl", 4; gres="gpu:2", partition="gpu",
+                          instances=2, cpus=8)
+    @test ex.gres == "gpu:2"
+    lines = Scans._slurm_script_lines(ex, "/tmp", "myscan")
+    @test any(l -> l == "#SBATCH --gres=gpu:2", lines)
+    @test any(l -> l == "#SBATCH --partition=gpu", lines)
+
+    # Each respawning instance is pinned to its own device, so a one-shot process sees
+    # exactly one GPU. The index is 0-based while the shell loop counts from 1.
+    @test any(l -> occursin("export CUDA_VISIBLE_DEVICES=\$((i-1))", l), lines)
+    # ...and the pinning sits inside the per-instance subshell, before the respawn loop
+    ipin = findfirst(l -> occursin("CUDA_VISIBLE_DEVICES", l), lines)
+    iloop = findfirst(l -> occursin("until [ -f", l), lines)
+    isub = findfirst(l -> strip(l) == "(", lines)
+    @test isub < ipin < iloop
+
+    # No GPU requested: nothing about devices appears
+    exc = Scans.SlurmExec("/tmp/test.jl", 4; instances=2, cpus=8)
+    linesc = Scans._slurm_script_lines(exc, "/tmp", "myscan")
+    @test !any(l -> occursin("--gres", l), linesc)
+    @test !any(l -> occursin("CUDA_VISIBLE_DEVICES", l), linesc)
+
+    # Distributed workers inherit the environment, so they cannot be pinned per GPU
+    @test_throws ArgumentError Scans.SlurmExec("/tmp/test.jl", 4; gres="gpu:2", procs=2)
+    # Shell-injection guard applies to gres as to the other passthrough strings
+    @test_throws ArgumentError Scans.SlurmExec("/tmp/test.jl", 4; gres="gpu:1\nrm -rf /")
+    @test_throws ArgumentError Scans.SlurmExec("/tmp/test.jl", 4; gres="gpu:\"1\"")
+end
+
 @testset "SlurmExec construction" begin
     # Backward compatibility: positional args only
     ex = Scans.SlurmExec("/tmp/test.jl", 4)

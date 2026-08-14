@@ -162,6 +162,13 @@ the "Execution on Slurm" section of the documentation for a worked example.
 - `#SBATCH --cpus-per-task` is set to `max(procs, 1) * nthreads` when `cpus == 0`, i.e.
   one core per concurrent worker times the threads each worker uses. (The coordinating
   parent process is effectively idle while the workers run, so it needs no extra core.)
+- `gres::String`: Generic resources, emitted as `#SBATCH --gres=...` — in practice
+  `"gpu:N"` for a GPU run. With `instances`, each respawning subshell gets
+  `CUDA_VISIBLE_DEVICES` narrowed to one distinct device, so every one-shot process
+  owns a GPU and needs no explicit device selection; set `instances` equal to the
+  number of GPUs requested. Cannot be combined with `procs` (Distributed workers
+  inherit the parent's environment and would all share one device). Must not contain
+  double quotes or newlines.
 - `workdir::String`: Working directory for the Slurm job. The generated `.sh` script,
   stdout/stderr files, and queue file are all placed here. If `""` (the default), a
   subdirectory `<scanname>_slurm` is automatically created inside the script's directory.
@@ -235,6 +242,7 @@ struct SlurmExec <: AbstractExec
     partition::String
     cpus::Int
     instances::Int
+    gres::String
 end
 
 function SlurmExec(scriptfile, ncores;
@@ -249,7 +257,8 @@ function SlurmExec(scriptfile, ncores;
                    time="",
                    partition="",
                    cpus=0,
-                   instances=0)
+                   instances=0,
+                   gres="")
     ncores >= 1 || throw(ArgumentError("`ncores` must be ≥ 1, got $ncores"))
     cpus >= 0 || throw(ArgumentError("`cpus` must be ≥ 0, got $cpus"))
     nthreads >= 1 || throw(ArgumentError("`nthreads` must be ≥ 1, got $nthreads"))
@@ -277,8 +286,10 @@ function SlurmExec(scriptfile, ncores;
             "got \"$time\""))
     end
     partition = strip(partition)
-    # Validate project, workdir, partition: no quotes or newlines (shell injection prevention)
-    for (name, val) in [("project", project), ("workdir", workdir), ("partition", partition)]
+    gres = strip(gres)
+    # Validate project, workdir, partition, gres: no quotes or newlines (shell injection prevention)
+    for (name, val) in [("project", project), ("workdir", workdir),
+                        ("partition", partition), ("gres", gres)]
         if occursin(r"[\"\n\r]", val)
             throw(ArgumentError("`$name` must not contain quotes or newlines, got \"$val\""))
         end
@@ -295,8 +306,17 @@ function SlurmExec(scriptfile, ncores;
         "`instances` and `procs` are mutually exclusive: both control how many concurrent " *
         "simulations one array task runs. Use `instances` for one-process-per-point " *
         "(memory returned to the OS after every point) or `procs` for persistent workers."))
+    # GPUs are assigned per process via CUDA_VISIBLE_DEVICES, which the instances loop
+    # sets for each of its subshells. `procs` workers are spawned by addprocs from
+    # inside Julia and inherit the parent's environment, so they would all land on the
+    # same device and exhaust its memory.
+    !isempty(gres) && procs > 0 && throw(ArgumentError(
+        "`gres` cannot be combined with `procs`: Distributed workers inherit the " *
+        "parent's environment, so every worker would use the same GPU. Use " *
+        "`instances` (one process per point, each pinned to its own device) or " *
+        "`arraymode=:batch` with one GPU per array task."))
     SlurmExec(scriptfile, ncores, memory, project, nthreads, procs, workdir, arraymode,
-              time, partition, cpus, instances)
+              time, partition, cpus, instances, gres)
 end
 
 """
@@ -827,6 +847,9 @@ function _slurm_script_lines(exec::SlurmExec, workdir::String, scanname::String=
     if !isempty(exec.partition)
         push!(lines, "#SBATCH --partition=$(exec.partition)")
     end
+    if !isempty(exec.gres)
+        push!(lines, "#SBATCH --gres=$(exec.gres)")
+    end
     # Prevent Julia startup crash from restrictive system ulimit on virtual memory.
     # This does NOT bypass Slurm's cgroup --mem limit (which tracks RSS, not VIRT).
     push!(lines, "ulimit -v unlimited")
@@ -881,6 +904,11 @@ function _slurm_script_lines(exec::SlurmExec, workdir::String, scanname::String=
             "NOWORKFILE=\"$noworkfile\"",
             "for i in \$(seq 1 $(exec.instances)); do",
             "    (",
+            # With a GPU allocation, give each instance its own device: Slurm restricts
+            # the task to the --gres devices, numbered 0..N-1, and each respawning
+            # subshell narrows that to exactly one. Every one-shot Julia process then
+            # sees a single GPU and needs no explicit device selection.
+            (isempty(exec.gres) ? [] : ["        export CUDA_VISIBLE_DEVICES=\$((i-1))"])...,
             "        until [ -f \"\$DONEFILE\" ] || [ -f \"\$NOWORKFILE\" ]; do",
             "            $juliacmd --queue --maxpoints 1 || sleep 10",
             "        done",
