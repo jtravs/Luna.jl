@@ -452,7 +452,10 @@ function (R::RamanPolarEnvBatched)(out, Et, ρ)
 end
 
 # function barrier: B/FT/IFT fields are loosely typed on the struct
-function _raman_batched!(out, Et, ρ, B, FT, IFT, hω, dt, nt)
+_raman_batched!(out, Et, ρ, B, FT, IFT, hω, dt, nt) =
+    _raman_batched!(Utils.backend(out), out, Et, ρ, B, FT, IFT, hω, dt, nt)
+
+function _raman_batched!(::Utils.CPUBackend, out, Et, ρ, B, FT, IFT, hω, dt, nt)
     ncol = size(Et, 2)*size(Et, 3)
     Etr = reshape(Et, nt, ncol)
     Br = reshape(B, 2nt, ncol)
@@ -484,6 +487,26 @@ function _raman_batched!(out, Et, ρ, B, FT, IFT, hω, dt, nt)
             @. ocol += ρ*Ecol*Pcol
         end
     end
+end
+
+# Device: the same four elementwise stages, each as one broadcast over the whole array
+# instead of a loop over transverse columns. The doubled-grid layout is unchanged, so
+# this computes exactly the same convolution as the host version.
+function _raman_batched!(::Utils.DeviceBackend, out, Et, ρ, B, FT, IFT, hω, dt, nt)
+    # squared envelope in the first half, zero padding in the second. Views of the
+    # leading dimension are contiguous, so these stay device-friendly strided arrays.
+    Bfirst = view(B, 1:nt, :, :)
+    Bsecond = view(B, nt+1:2nt, :, :)
+    @. Bfirst = 1/2 * abs2(Et)
+    fill!(Bsecond, 0)
+    FT * B # batched (t → ω) in place
+    # convolution by multiplication; hω expands along the (doubled) time dimension.
+    # Same factor order as the host loop, so the two agree as closely as the differing
+    # FFT implementations allow.
+    @. B = hω * B * dt
+    IFT * B # batched (ω → t) in place
+    @. out += ρ*Et*Bfirst
+    return nothing
 end
 
 end

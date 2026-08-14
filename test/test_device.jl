@@ -226,6 +226,51 @@ catch
 end
 
 if have_jlarrays
+    # --- AbstractFFTs plan shims for JLArray -------------------------------------
+    # JLArrays provides no FFTs, so supply the minimum the device paths need, backed by
+    # FFTW. Deliberately NO `ldiv!` method: that forces AbstractFFTs' generic route
+    # (inv -> ScaledPlan -> mul! + rmul!), which is exactly the dispatch a real device
+    # plan takes, so the transform's use of an explicit inverse plan is exercised here
+    # the same way it will be on hardware. `pinv` is part of the Plan contract (`inv`
+    # memoises into it).
+    mutable struct JLPlan{T, N, P} <: AbstractFFTs.Plan{T}
+        hp::P
+        sz::NTuple{N, Int}
+        dims::Any
+        pinv::AbstractFFTs.ScaledPlan
+        JLPlan{T, N, P}(hp, sz, dims) where {T, N, P} = new{T, N, P}(hp, sz, dims)
+    end
+    JLPlan(hp, sz::NTuple{N, Int}, dims) where {N} =
+        JLPlan{ComplexF64, N, typeof(hp)}(hp, sz, dims)
+    Base.size(p::JLPlan) = p.sz
+    Base.eltype(::JLPlan{T}) where {T} = T
+    AbstractFFTs.plan_fft(x::JLArrays.JLArray, dims) =
+        JLPlan(FFTW.plan_fft(Array(x), dims), size(x), dims)
+    AbstractFFTs.plan_inv(p::JLPlan) =
+        AbstractFFTs.ScaledPlan(JLPlan(inv(p.hp).p, p.sz, p.dims),
+                                AbstractFFTs.normalization(Float64, p.sz, p.dims))
+    Base.:*(p::JLPlan, x::JLArrays.JLArray) = JLArrays.JLArray(p.hp * Array(x))
+    LinearAlgebra.mul!(y::JLArrays.JLArray, p::JLPlan, x::JLArrays.JLArray) =
+        (copyto!(y, p.hp * Array(x)); y)
+
+    # In-place variant, used by the batched Raman work buffer.
+    mutable struct JLPlanInplace{T, N, P} <: AbstractFFTs.Plan{T}
+        hp::P
+        sz::NTuple{N, Int}
+        dims::Any
+        pinv::AbstractFFTs.ScaledPlan
+        JLPlanInplace{T, N, P}(hp, sz, dims) where {T, N, P} = new{T, N, P}(hp, sz, dims)
+    end
+    JLPlanInplace(hp, sz::NTuple{N, Int}, dims) where {N} =
+        JLPlanInplace{ComplexF64, N, typeof(hp)}(hp, sz, dims)
+    Base.size(p::JLPlanInplace) = p.sz
+    Base.eltype(::JLPlanInplace{T}) where {T} = T
+    AbstractFFTs.plan_fft!(x::JLArrays.JLArray, dims) =
+        JLPlanInplace(FFTW.plan_fft(Array(x), dims), size(x), dims)
+    AbstractFFTs.plan_ifft!(x::JLArrays.JLArray, dims) =
+        JLPlanInplace(FFTW.plan_ifft(Array(x), dims), size(x), dims)
+    Base.:*(p::JLPlanInplace, x::JLArrays.JLArray) = (copyto!(x, p.hp * Array(x)); x)
+
     @testset "JLArray backend" begin
         JLArray = JLArrays.JLArray
         @test Utils.backend(JLArray(zeros(4))) isa Utils.DeviceBackend
@@ -316,33 +361,6 @@ if have_jlarrays
         import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields
         JLArray = JLArrays.JLArray
 
-        # cuFFT-equivalent plans for JLArray. Deliberately no `ldiv!` method: that forces
-        # AbstractFFTs' generic route (inv -> ScaledPlan -> mul! + rmul!), which is
-        # exactly the dispatch a real device plan takes, so the transform's use of an
-        # explicit inverse plan is exercised the same way here as on hardware.
-        # `pinv` is part of the AbstractFFTs.Plan contract: `inv` memoises into it. Its
-        # presence here means the shim goes through the same plan machinery as a real
-        # device plan.
-        mutable struct JLPlan{T, N, P} <: AbstractFFTs.Plan{T}
-            hp::P
-            sz::NTuple{N, Int}
-            dims::Any
-            pinv::AbstractFFTs.ScaledPlan
-            JLPlan{T, N, P}(hp, sz, dims) where {T, N, P} = new{T, N, P}(hp, sz, dims)
-        end
-        JLPlan(hp, sz::NTuple{N, Int}, dims) where {N} =
-            JLPlan{ComplexF64, N, typeof(hp)}(hp, sz, dims)
-        Base.size(p::JLPlan) = p.sz
-        Base.eltype(::JLPlan{T}) where {T} = T
-        AbstractFFTs.plan_fft(x::JLArrays.JLArray, dims) =
-            JLPlan(FFTW.plan_fft(Array(x), dims), size(x), dims)
-        AbstractFFTs.plan_inv(p::JLPlan) =
-            AbstractFFTs.ScaledPlan(JLPlan(inv(p.hp).p, p.sz, p.dims),
-                                    AbstractFFTs.normalization(Float64, p.sz, p.dims))
-        Base.:*(p::JLPlan, x::JLArrays.JLArray) = JLArray(p.hp * Array(x))
-        LinearAlgebra.mul!(y::JLArrays.JLArray, p::JLPlan, x::JLArrays.JLArray) =
-            (copyto!(y, p.hp * Array(x)); y)
-
         grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
         xygrid = Grid.FreeGrid(400e-6, 8)
         nfun = PhysData.ref_index_fun(:Ar, 4)
@@ -396,6 +414,51 @@ if have_jlarrays
         @test_throws ErrorException NonlinearRHS.Et_to_Pt_ordered!(
             td.Eto, td.Eto, (Nonlinear.RamanPolarEnv(grid.to, rr),),
             1.0, td.idcs)
+    end
+
+    @testset "batched Raman on device" begin
+        import Luna: Grid, Nonlinear, Raman
+        JLArray = JLArrays.JLArray
+        nt = 32
+        t = collect(range(-50e-15, 50e-15, length=nt))
+        rr = Raman.raman_response(t, :N2)
+        ny, nx = 3, 2
+        rng = Random.Xoshiro(7)
+        Et = 1e8 .* (randn(rng, ComplexF64, nt, ny, nx))
+        ρ = 2.5e25
+
+        Rh = Nonlinear.RamanPolarEnvBatched(t, rr)
+        Rd = Nonlinear.RamanPolarEnvBatched(t, rr)
+        outh = zeros(ComplexF64, nt, ny, nx)
+        outd = JLArray(zeros(ComplexF64, nt, ny, nx))
+        Rh(outh, Et, ρ)
+        Rd(outd, JLArray(Et), ρ)
+        @test isapprox(Array(outd), outh; rtol=1e-10)
+
+        # The work buffer follows the field onto the device, and the response kernel is
+        # staged there (it is computed on the host — only 2nt long)
+        @test Utils.backend(Rd.B) isa Utils.DeviceBackend
+        @test size(Rd.B) == (2nt, ny, nx)
+        @test Utils.backend(Rd.hωd) isa Utils.DeviceBackend
+        @test Rh.hωd === Rh.hω          # host: no staging copy at all
+        @test Array(Rd.hωd) ≈ Rd.hω
+
+        # Agreement with the columnwise reference response, which is the physics
+        # definition the batched form reproduces
+        Rcol = Nonlinear.RamanPolarEnv(t, rr)
+        outcol = zeros(ComplexF64, nt, ny, nx)
+        for i in CartesianIndices((ny, nx))
+            Rcol(view(outcol, :, i), view(Et, :, i), ρ)
+        end
+        @test isapprox(Array(outd), outcol; rtol=1e-10)
+
+        # Calling again must reuse the work buffer rather than reallocate it. NB the
+        # response ACCUMULATES into `out`, so this needs a fresh output array.
+        Bptr = Rd.B
+        outd2 = JLArray(zeros(ComplexF64, nt, ny, nx))
+        Rd(outd2, JLArray(Et), ρ)
+        @test Rd.B === Bptr
+        @test isapprox(Array(outd2), outh; rtol=1e-10)
     end
 
     @testset "device error norms" begin
