@@ -99,7 +99,30 @@ struct EnvGrid{T} <: TimeGrid
 end
 
 """
-    EnvGrid(zmax, referenceλ, λ_lims, trange; δt=1, thg=false)
+    _fftsize(needed, mode) -> Int
+
+Round the required sample count `needed` up to a transform size, per `mode`:
+`:pow2` for the next power of two, `:smooth` for the next EVEN 2,3,5-smooth size.
+Evenness is required by the grid layout (`t = (n - N/2)*δt`) and by `fftshift`
+symmetry, so odd smooth sizes are skipped.
+"""
+function _fftsize(needed, mode::Symbol)
+    n = ceil(Int, needed)
+    if mode === :pow2
+        return 2^(ceil(Int, log2(needed)))
+    elseif mode === :smooth
+        m = nextprod([2, 3, 5], n)
+        while isodd(m)
+            m = nextprod([2, 3, 5], m + 1)
+        end
+        return m
+    else
+        throw(ArgumentError("`fftsize` must be :pow2 or :smooth, got :$mode"))
+    end
+end
+
+"""
+    EnvGrid(zmax, referenceλ, λ_lims, trange; δt=1, thg=false, fftsize=:pow2)
 
 Time grid for simulations with envelope (a.k.a. analytic) fields
 
@@ -112,7 +135,7 @@ Time grid for simulations with envelope (a.k.a. analytic) fields
     required to satisfy `trange` and `λ_lims`, whichever is smaller.
 - `thg::Bool` : Whether the grid should include space for the third hamonic (default: false)
 """
-function EnvGrid(zmax, referenceλ, λ_lims, trange; δt=1, thg=false)
+function EnvGrid(zmax, referenceλ, λ_lims, trange; δt=1, thg=false, fftsize=:pow2)
     fmin = PhysData.c/maximum(λ_lims)
     fmax = PhysData.c/minimum(λ_lims)
     fmax_win = 1.1*fmax # extended frequency window to accommodate apodisation
@@ -138,7 +161,15 @@ function EnvGrid(zmax, referenceλ, λ_lims, trange; δt=1, thg=false)
         δto = δt
         oversampling = true
     end
-    samples = 2^(ceil(Int, log2(trange/δto))) # samples for grid (power of 2)
+    # `fftsize` controls how the sample count is rounded up from the requirement.
+    # `:pow2` (default, unchanged) takes the next power of two; `:smooth` takes the
+    # next even 2,3,5-smooth size, which FFTW handles just as efficiently but which
+    # tracks the requirement far more closely. The difference is only ever a rounding
+    # choice, but it is a large one near a power-of-two boundary: a requirement of 281
+    # samples rounds to 512 under `:pow2` and to 288 under `:smooth` — 1.8x the memory
+    # and transform work for nothing. (Cf. `optimal_spatial_grid` in ModelPNPS, which
+    # made the same switch for the transverse grid.)
+    samples = _fftsize(trange/δto, fftsize)
     trange_even = δto*samples # keep frequency window fixed, expand time window as necessary
     Logging.@info @sprintf("Samples needed: %.2f, samples: %d, δt = %.2f as",
     trange/δto, samples, δto*1e18)
