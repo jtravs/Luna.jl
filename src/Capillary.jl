@@ -7,7 +7,8 @@ using Reexport
 @reexport using Luna.Modes
 import Luna: Maths, Grid
 import Luna.PhysData: c, ε_0, μ_0, ref_index_fun, roomtemp, densityspline, sellmeier_gas
-import Luna.Modes: AbstractMode, dimlimits, neff, field, Aeff, N, modeinfo
+import Luna.Modes: AbstractMode, dimlimits, neff, field, Aeff, N, modeinfo,
+                   zconstant, scale_invariant, azimuthal_order
 import Luna.LinearOps: make_linop, conj_clamp, neff_grid, neff_β_grid
 import Luna.PhysData: wlfreq, roomtemp
 import Luna.Utils: subscript
@@ -265,6 +266,12 @@ radius(m::MarcatiliMode{<:Number, Tco, Tcl, LT}, z) where {Tcl, Tco, LT} = m.a
 radius(m::MarcatiliMode, z) = m.a(z)
 
 dimlimits(m::MarcatiliMode; z=0) = (:polar, (0.0, 0.0), (radius(m, z), 2π))
+
+# geometry traits used by the fixed-quadrature modal transform: a numeric radius means the
+# transverse profile never changes; a tapered radius only rescales it (see Modes.scale_invariant)
+zconstant(m::MarcatiliMode{<:Number, Tco, Tcl, LT}) where {Tcl, Tco, LT} = true
+scale_invariant(m::MarcatiliMode) = true
+azimuthal_order(m::MarcatiliMode) = m.kind == :HE ? m.n - 1 : 1
 
 # we use polar coords, so xs = (r, θ)
 function field(m::MarcatiliMode, xs; z=0)

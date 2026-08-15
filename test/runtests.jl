@@ -23,6 +23,7 @@ const TESTFILES = [
     "Ionisation" => ["test_ionisation.jl"],
     "Output" => ["test_output.jl"],
     "Multimode" => ["test_multimode.jl"],
+    "Modal quadrature" => ["test_modal_quadrature.jl"],
     "Polarisation" => ["test_polarisation.jl", "test_polarisation_field.jl",
                        "test_polarisation_env.jl"],
     "Tools" => ["test_tools.jl"],
