@@ -11,6 +11,7 @@ import Luna: settings
 import Roots: fzero
 import Dierckx
 import Peaks
+import Adapt
 
 #= Pre-created finite difference methods for speed.
    Use (order+6)th order central finite differences with 2 adaptive steps up to
@@ -335,6 +336,36 @@ as `δx` directly
 """
 _dx(x, i) = x[i] - x[i-1]
 _dx(δx::Number, i) = δx
+
+"""
+    cumtrapz_scan!(out, y, δx, tmp)
+
+Trapezoidal cumulative integral of `y` along its first dimension with uniform spacing `δx`,
+into `out`, using only whole-array broadcasts on views: an inclusive prefix sum by
+Hillis–Steele doubling (`ceil(log2(n))` ping-pong passes between `out` and the scratch
+`tmp`, all three the same size as `y`), followed by the trapezoid correction
+`out = δx*(cumsum(y) - (y + y[1])/2)`. This runs on any array type which supports
+broadcasting over views (host or GPU); it is the device implementation of
+[`cumtrapz!`](@ref), which needs neither scalar indexing nor a native scan.
+
+The result agrees with the sequential `cumtrapz!` to rounding (the summation order differs).
+"""
+function cumtrapz_scan!(out, y, δx, tmp)
+    n = size(y, 1)
+    copyto!(out, y)
+    a, b = out, tmp
+    k = 1
+    while k < n
+        selectdim(b, 1, 1:k) .= selectdim(a, 1, 1:k)
+        selectdim(b, 1, k+1:n) .= selectdim(a, 1, k+1:n) .+ selectdim(a, 1, 1:n-k)
+        a, b = b, a
+        k *= 2
+    end
+    a === out || copyto!(out, a)
+    y1 = selectdim(y, 1, 1:1)
+    @. out = δx*(out - (y + y1)/2)
+    out
+end
 
 
 """
@@ -837,15 +868,32 @@ function (c::CSpline)(x0)
         x0 < c.x[1] && throw(DomainError("CSpline evaulated out of bounds, $x0 < $(c.x[1])"))
         x0 > c.x[end] && throw(DomainError("CSpline evaulated out of bounds, $x0 > $(c.x[end])"))
     end
+    spline_eval(c, x0)
+end
+
+"""
+    spline_eval(c::CSpline, x0)
+
+Evaluate `c` at `x0` **without** the bounds check (and without the exception paths, whose
+string formatting cannot be compiled for a GPU): the kernel used by device-side callers.
+`(c::CSpline)(x0)` is this plus the optional bounds check.
+"""
+@inline function spline_eval(c::CSpline, x0)
     i = c.ifun(x0)
     x0 == c.x[i] && return c.y[i]
     x0 == c.x[i-1] && return c.y[i-1]
     t = (x0 - c.x[i - 1])/(c.x[i] - c.x[i - 1])
-    (c.y[i - 1] 
-        + c.D[i - 1]*t 
-        + (3*(c.y[i] - c.y[i - 1]) - 2*c.D[i - 1] - c.D[i])*t^2 
+    (c.y[i - 1]
+        + c.D[i - 1]*t
+        + (3*(c.y[i] - c.y[i - 1]) - 2*c.D[i - 1] - c.D[i])*t^2
         + (2*(c.y[i - 1] - c.y[i]) + c.D[i - 1] + c.D[i])*t^3)
 end
+
+# Move the knot/coefficient arrays to a device; the uniform-grid index function is an
+# isbits closure and survives unchanged (a FastFinder does not: it is stateful).
+Adapt.adapt_structure(to, c::CSpline) =
+    CSpline(Adapt.adapt(to, c.x), Adapt.adapt(to, c.y), Adapt.adapt(to, c.D), c.ifun,
+            c.bounds_error)
 
 """
     linterp(x, x1, y1, x2, y2)

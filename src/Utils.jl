@@ -175,19 +175,21 @@ const THREADING_MINLEN = Ref(1<<20)
 are bit-identical; this only matters for benchmarking and testing)."
 set_threading(on::Bool) = (THREADING[] = on)
 
-_threading(n) = THREADING[] && n >= THREADING_MINLEN[] && Threads.nthreads() > 1
+_threading(n, minlen=THREADING_MINLEN[]) = THREADING[] && n >= minlen && Threads.nthreads() > 1
 
 """
-    tforeach(f, n; ntotal=n)
+    tforeach(f, n; ntotal=n, minlen=THREADING_MINLEN[])
 
 Call `f(i)` for every `i in 1:n`, splitting the range into one contiguous chunk per
 thread for large `n` (see `THREADING_MINLEN`). The work must be elementwise-independent;
 threaded and serial execution are then bit-identical. When each `f(i)` covers more than
 one element (e.g. one transverse column), pass the total element count as `ntotal` so the
-threading threshold reflects the actual work.
+threading threshold reflects the actual work. `minlen` overrides the element-count
+threshold for work whose cost per element is far above that of an elementwise kernel
+(e.g. an ionisation-rate evaluation and three cumulative integrals per column).
 """
-function tforeach(f, n::Integer; ntotal::Integer=n)
-    if _threading(ntotal)
+function tforeach(f, n::Integer; ntotal::Integer=n, minlen::Integer=THREADING_MINLEN[])
+    if _threading(ntotal, minlen)
         nchunks = Threads.nthreads()
         Threads.@threads :static for c in 1:nchunks
             for i in (n*(c-1))÷nchunks + 1 : (n*c)÷nchunks

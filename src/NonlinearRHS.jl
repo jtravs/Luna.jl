@@ -15,7 +15,7 @@ import Luna.PhysData: wlfreq
 
 Transform ``A(ω)`` on normal grid to ``A(t)`` on oversampled time grid.
 """
-function to_time!(Ato::Array{<:Real, D}, Aω, Aωo, IFTplan) where D
+function to_time!(Ato::AbstractArray{<:Real}, Aω, Aωo, IFTplan)
     N = size(Aω, 1)
     No = size(Aωo, 1)
     scale = (No-1)/(N-1) # Scale factor makes up for difference in FFT array length
@@ -24,7 +24,7 @@ function to_time!(Ato::Array{<:Real, D}, Aω, Aωo, IFTplan) where D
     mul!(Ato, IFTplan, Aωo)
 end
 
-function to_time!(Ato::Array{<:Complex, D}, Aω, Aωo, IFTplan) where D
+function to_time!(Ato::AbstractArray{<:Complex}, Aω, Aωo, IFTplan)
     N = size(Aω, 1)
     No = size(Aωo, 1)
     scale = No/N # Scale factor makes up for difference in FFT array length
@@ -38,7 +38,7 @@ end
 
 Transform oversampled A(t) to A(ω) on normal grid
 """
-function to_freq!(Aω, Aωo, Ato::Array{<:Real, D}, FTplan) where D
+function to_freq!(Aω, Aωo, Ato::AbstractArray{<:Real}, FTplan)
     N = size(Aω, 1)
     No = size(Aωo, 1)
     scale = (N-1)/(No-1) # Scale factor makes up for difference in FFT array length
@@ -46,7 +46,7 @@ function to_freq!(Aω, Aωo, Ato::Array{<:Real, D}, FTplan) where D
     copy_scale!(Aω, Aωo, N, scale)
 end
 
-function to_freq!(Aω, Aωo, Ato::Array{<:Complex, D}, FTplan) where D
+function to_freq!(Aω, Aωo, Ato::AbstractArray{<:Complex}, FTplan)
     N = size(Aω, 1)
     No = size(Aωo, 1)
     scale = N/No # Scale factor makes up for difference in FFT array length
@@ -83,10 +83,21 @@ function copy_scale_both!(dest::Vector, source::Vector, N, scale)
 end
 
 function copy_scale!(dest, source, N, scale)
-    (size(dest)[2:end] == size(source)[2:end] 
+    (size(dest)[2:end] == size(source)[2:end]
      || error("dest and source must be same size except along first dimension"))
+    _copy_scale!(Utils.backend(dest), dest, source, N, scale)
+end
+
+function _copy_scale!(::Utils.CPUBackend, dest, source, N, scale)
     idcs = CartesianIndices(size(dest)[2:end])
     _cpsc_core(dest, source, N, scale, idcs)
+end
+
+# On a device the scalar loop cannot run; the leading block is one broadcast over views.
+function _copy_scale!(::Utils.DeviceBackend, dest, source, N, scale)
+    view(dest, 1:N, ntuple(_ -> Colon(), ndims(dest)-1)...) .=
+        scale .* view(source, 1:N, ntuple(_ -> Colon(), ndims(source)-1)...)
+    nothing
 end
 
 function _cpsc_core(dest, source, N, scale, idcs)
@@ -98,10 +109,23 @@ function _cpsc_core(dest, source, N, scale, idcs)
 end
 
 function copy_scale_both!(dest, source, N, scale)
-    (size(dest)[2:end] == size(source)[2:end] 
+    (size(dest)[2:end] == size(source)[2:end]
      || error("dest and source must be same size except along first dimension"))
+    _copy_scale_both!(Utils.backend(dest), dest, source, N, scale)
+end
+
+function _copy_scale_both!(::Utils.CPUBackend, dest, source, N, scale)
     idcs = CartesianIndices(size(dest)[2:end])
     _cpscb_core(dest, source, N, scale, idcs)
+end
+
+function _copy_scale_both!(::Utils.DeviceBackend, dest, source, N, scale)
+    cd = ntuple(_ -> Colon(), ndims(dest)-1)
+    cs = ntuple(_ -> Colon(), ndims(source)-1)
+    view(dest, 1:N, cd...) .= scale .* view(source, 1:N, cs...)
+    nd = size(dest, 1); ns = size(source, 1)
+    view(dest, nd-N+1:nd, cd...) .= scale .* view(source, ns-N+1:ns, cs...)
+    nothing
 end
 
 function _cpscb_core(dest, source, N, scale, idcs)
@@ -203,6 +227,16 @@ end
     _pw_accum(p + Nonlinear.pointwise_P(first(resp), E, density), Base.tail(resp), E, density)
 
 """
+    AbstractTransModal
+
+Supertype of the multimode (modal) transforms [`TransModal`](@ref) (adaptive cubature) and
+[`TransModalFixed`](@ref) (fixed quadrature). Both hold the mode collection in a
+`Modes.ToSpace` under the field `ts` and the responses under `resp`, which `Stats`,
+`Luna.save_modeinfo_maybe` and `Plotting.get_modes` rely on.
+"""
+abstract type AbstractTransModal end
+
+"""
     TransModal
 
 Transform E(ω) -> Pₙₗ(ω) for multimode propagation via spatial integration.
@@ -215,7 +249,7 @@ Transform E(ω) -> Pₙₗ(ω) for multimode propagation via spatial integration
 - `Er_noise`: preallocated buffer for the real-space time-domain noise, same shape as `Er`.
 - `Er_nl`: preallocated buffer for the combined field + noise, passed to `Et_to_Pt!`.
 """
-mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT, eT, enT, enlT}
+mutable struct TransModal{tsT, lT, TT, FTT, rT, gT, dT, ddT, nT, eT, enT, enlT} <: AbstractTransModal
     ts::tsT
     full::Bool
     dimlimits::lT
@@ -400,17 +434,324 @@ function (t::TransModal)(nl, Eω, z)
 end
 
 """
-    norm_modal(grid; shock=true)
+    norm_modal(grid; shock=true, arraytype=Array)
 
 Normalisation function for modal propagation. If `shock` is `false`, the intrinsic frequency
 dependence of the nonlinear response is ignored, which turns off optical shock formation/
-self-steepening.
+self-steepening. `arraytype` is the array type of the field the function will be applied
+to; for a device array type the frequency axis is mirrored there.
 """
-function norm_modal(grid; shock=true)
+function norm_modal(grid; shock=true, arraytype=Array)
     ω0 = PhysData.wlfreq(grid.referenceλ)
-    withshock!(nl) = @. nl *= (-im * grid.ω/4)
+    ω = arraytype === Array ? grid.ω : Adapt.adapt(arraytype, grid.ω)
+    withshock!(nl) = @. nl *= (-im * ω/4)
     withoutshock!(nl) = @. nl *= (-im * ω0/4)
     shock ? withshock! : withoutshock!
+end
+
+"""
+    TransModalFixed
+
+Transform E(ω) -> Pₙₗ(ω) for multimode propagation on a **fixed** transverse quadrature
+rule (see [`Modes.TransverseQuadrature`](@ref)) — the array-generic replacement for the
+adaptive-cubature [`TransModal`](@ref).
+
+Per evaluation: the whole modal field `(nω × nmodes)` is transformed to the oversampled time
+domain with one batched FFT, synthesised on the quadrature nodes with a GEMM
+(`Et = Emt * S`), the nonlinear responses are applied to the whole `(nto, npol, npts)`
+array, the result is projected back onto the modes with a second GEMM (`Pmt = Pt * Wp`,
+quadrature weights folded into `Wp`) and transformed back with one batched FFT. All
+operations are GEMMs, batched FFT plans and broadcasts, so the transform runs unchanged on
+host arrays (threaded) and on device arrays (`arraytype`).
+
+# Fields of note
+- `ts::Modes.ToSpace`, `resp`: the mode collection and the responses as passed by the user
+  (what `show`, `Stats` and `Luna.save_modeinfo_maybe` inspect); `resp_eval` are the
+  responses actually evaluated (array-level variants where available, see
+  [`Nonlinear.batched_response`](@ref)).
+- `quad`: the quadrature rule; `S`, `Wp`, `Wc`: synthesis, projection and coarse
+  (embedded-rule) projection matrices for the current `z`; `S0`, `Wp0`, `Wc0`: the same at
+  the reference radius for scale-invariant tapers.
+- `err`: the embedded error estimate `P_coarse - P_fine` of the last evaluation, filled by
+  [`integral_error!`](@ref) on demand.
+- `Et_scratch`: a `(nt × nmodes)` buffer of the field's element type which `Luna.run` uses
+  as its window scratch (see [`scratch`](@ref)).
+"""
+mutable struct TransModalFixed{tsT, qT, ST, WT, EωT, EtmT, EtT, ErrT, FTT, IFTT, rT, reT,
+                               gT, gvT, dT, ddT, nT, enT, enlT, esT} <: AbstractTransModal
+    ts::tsT
+    full::Bool
+    quad::qT
+    zconstant::Bool
+    scale_invariant::Bool
+    a0::Float64 # reference core radius for scale-invariant modes
+    zmat::Float64 # z at which S/Wp/Wc were last built
+    S::ST # (nmodes × npol⋅npts) synthesis matrix
+    Wp::WT # (npol⋅npts × nmodes) projection matrix (fine rule)
+    Wc::WT # (npol⋅npts × nmodes) projection matrix (embedded coarse rule)
+    S0::ST
+    Wp0::WT
+    Wc0::WT
+    Emωo::EωT # (nωo × nmodes) oversampled modal spectrum
+    Emt::EtmT # (nto × nmodes) modal field in time
+    Emt_nl::enlT # (nto × nmodes) field + noise, or nothing
+    Emt_noise::enT # (nto × nmodes) modal noise in time, or nothing
+    Et::EtT # (nto × npol⋅npts) real-space field
+    Pt::EtT # (nto × npol⋅npts) real-space polarisation
+    Pmt::EtmT # (nto × nmodes) modal polarisation in time
+    Pmωo::EωT # (nωo × nmodes)
+    err::ErrT # (nω × nmodes) embedded error estimate
+    FT::FTT # forward plan on (nto × nmodes)
+    IFT::IFTT # explicit inverse plan
+    resp::rT
+    resp_eval::reT
+    grid::gT
+    gv::gvT # grid vectors on the buffers' array type
+    densityfun::dT
+    density::ddT
+    norm!::nT
+    z::Float64
+    Et_scratch::esT # (nt × nmodes) scratch for Luna.run
+    ncalls::Int # number of quadrature points (kept for Stats compatibility)
+end
+
+function show(io::IO, t::TransModalFixed)
+    grid = "grid type: $(typeof(t.grid))"
+    modes = "modes: $(t.ts.nmodes)\n"*" "^4*join([string(mi) for mi in t.ts.ms], "\n    ")
+    p = t.ts.indices == 1:2 ? "x,y" : t.ts.indices == 1 ? "x" : "y"
+    pol = "polarisation: $p"
+    samples = "time grid size: $(length(t.grid.t)) / $(length(t.grid.to))"
+    resp = "responses: "*join([string(typeof(ri)) for ri in t.resp], "\n    ")
+    full = "full: $(t.full)"
+    q = t.quad
+    quad = "quadrature: $(q.kind), nr=$(q.nr), nθ=$(q.nθ), kronrod=$(q.kronrod)"
+    out = join(["TransModalFixed", modes, pol, grid, samples, full, quad, resp], "\n  ")
+    print(io, out)
+end
+
+"""
+    TransModalFixed(grid, ts, resp, densityfun, norm!; kwargs...)
+
+Construct a [`TransModalFixed`](@ref).
+
+# Arguments
+- `grid::AbstractGrid`: the grid used in the simulation
+- `ts::Modes.ToSpace`: the mode collection and polarisation components
+- `resp`: `Tuple` of response functions (or tuple of tuples for gas mixtures)
+- `densityfun`: callable which returns the gas density as a function of `z`
+- `norm!`: normalisation function, see [`norm_modal`](@ref)
+
+# Keyword arguments
+- `full::Bool=false`: `true` for the 2-D (r,θ) rule, `false` for the radial rule with an
+  azimuthally symmetric integrand (HE₁ₘ mode sets).
+- `nr::Int=128`, `nθ::Int=16`: nodes along r (or x) and θ (or y).
+- `kronrod::Bool=false`: use a Gauss–Kronrod rule in r (`nr` rounded up to odd) so that
+  [`integral_error!`](@ref) has an embedded coarse rule to compare against.
+- `noise_field=nothing`: optional `(nω, nmodes)` modal noise field for the modified
+  shot-noise model (see [`TransModal`](@ref)).
+- `zconstant=nothing`: whether the mode profiles are independent of `z`; `nothing` uses
+  `Modes.zconstant` of the modes.
+- `arraytype=Array`: array type of the buffers; pass a GPU array type to evaluate on a device.
+"""
+function TransModalFixed(tT, grid, ts::Modes.ToSpace, resp, densityfun, norm!;
+                         full=false, nr=128, nθ=16, kronrod=false, noise_field=nothing,
+                         zconstant=nothing, arraytype=Array)
+    ms = ts.ms
+    nmodes = ts.nmodes
+    npol = ts.npol
+    dl = Modes.dimlimits(ms[1], z=0.0)
+    (dl[1] == :cartesian && !full) && error(
+        "cartesian modes need the full 2-D quadrature rule (full=true)")
+    quad = Modes.transverse_quadrature(dl, full; nr, nθ, kronrod)
+    npts = length(quad)
+    zc = isnothing(zconstant) ? all(Modes.zconstant, ms) : zconstant
+    si = !zc && all(Modes.scale_invariant, ms) && dl[1] == :polar
+    a0 = dl[1] == :polar ? dl[3][1] : NaN
+    if full && quad.kind == :polar
+        hs = [Modes.azimuthal_order(m) for m in ms]
+        if all(!isnothing, hs)
+            hmax = maximum(hs)
+            nθ < 4hmax + 1 && @warn(
+                "nθ=$nθ is below the exactness bound 4⋅$(hmax)+1 for cubic products of "*
+                "modes with azimuthal order up to $hmax; use nθ >= $(4hmax+1).")
+        end
+    end
+    # host copies of the matrices at z=0
+    Sh, Wph, Wch = _mode_matrices(tT, ts, quad, 0.0)
+    S = _to_arraytype(arraytype, Sh); Wp = _to_arraytype(arraytype, Wph)
+    Wc = _to_arraytype(arraytype, Wch)
+    S0 = si ? copy(S) : S; Wp0 = si ? copy(Wp) : Wp; Wc0 = si ? copy(Wc) : Wc
+    nω = length(grid.ω); nωo = length(grid.ωo); nt = length(grid.t); nto = length(grid.to)
+    Emωo = Luna.device_zeros(arraytype, ComplexF64, (nωo, nmodes))
+    Pmωo = Luna.device_zeros(arraytype, ComplexF64, (nωo, nmodes))
+    Emt = Luna.device_zeros(arraytype, tT, (nto, nmodes))
+    Pmt = Luna.device_zeros(arraytype, tT, (nto, nmodes))
+    Et = Luna.device_zeros(arraytype, tT, (nto, npol*npts))
+    Pt = Luna.device_zeros(arraytype, tT, (nto, npol*npts))
+    err = Luna.device_zeros(arraytype, ComplexF64, (nω, nmodes))
+    Et_scratch = Luna.device_zeros(arraytype, tT, (nt, nmodes))
+    FT = _plan_forward(Emt, 1)
+    IFT = inv(FT)
+    if !isnothing(noise_field)
+        # the noise enters linearly, so it can be transformed to the time domain once
+        Emt_noise_h = zeros(tT, (nto, nmodes))
+        FTh = arraytype === Array ? FT : _plan_forward(Emt_noise_h, 1)
+        to_time!(Emt_noise_h, noise_field, zeros(ComplexF64, (nωo, nmodes)), inv(FTh))
+        Emt_noise = _to_arraytype(arraytype, Emt_noise_h)
+        Emt_nl = similar(Emt)
+    else
+        Emt_noise = nothing
+        Emt_nl = nothing
+    end
+    gv = Luna.gridvectors(grid, arraytype)
+    resp_eval = Nonlinear.batched_responses(resp; arraytype)
+    TransModalFixed(ts, full, quad, zc, si, a0, 0.0, S, Wp, Wc, S0, Wp0, Wc0,
+                    Emωo, Emt, Emt_nl, Emt_noise, Et, Pt, Pmt, Pmωo, err, FT, IFT,
+                    resp, resp_eval, grid, gv, densityfun, densityfun(0.0), norm!, 0.0,
+                    Et_scratch, npts)
+end
+
+function TransModalFixed(grid::Grid.RealGrid, args...; kwargs...)
+    TransModalFixed(Float64, grid, args...; kwargs...)
+end
+
+function TransModalFixed(grid::Grid.EnvGrid, args...; kwargs...)
+    TransModalFixed(ComplexF64, grid, args...; kwargs...)
+end
+
+_to_arraytype(::Type{Array}, x) = x
+_to_arraytype(arraytype, x) = Adapt.adapt(arraytype, x)
+
+# forward FFT plan along `dims` for a real (r2c) or complex (c2c) prototype, on its backend
+_plan_forward(x::AbstractArray{<:Real}, dims) = Utils.plan_rfft_backend(x, dims)
+_plan_forward(x::AbstractArray{<:Complex}, dims) = Utils.plan_fft_backend(x, dims)
+
+# Synthesis and projection matrices on the host for the mode collection at position z.
+# Column p + (i-1)*npol of S (row of Wp) is polarisation component p at quadrature node i,
+# matching a (nto, npol, npts) reshape of the real-space arrays.
+function _mode_matrices(tT, ts::Modes.ToSpace, quad, z)
+    dl = Modes.dimlimits(ts.ms[1], z=z)
+    Ems = Modes.mode_matrix(ts.ms, ts.indices, Modes.quadrature_nodes(quad, dl); z)
+    nmodes, npol, npts = size(Ems)
+    w = Modes.quadrature_weights(quad, dl)
+    wc = Modes.quadrature_weights(quad, dl; coarse=true)
+    S = Matrix{tT}(reshape(Ems, nmodes, npol*npts))
+    Wp = Matrix{tT}(transpose(reshape(Ems .* reshape(w, 1, 1, npts), nmodes, npol*npts)))
+    Wc = Matrix{tT}(transpose(reshape(Ems .* reshape(wc, 1, 1, npts), nmodes, npol*npts)))
+    S, Wp, Wc
+end
+
+"""
+    update_matrices!(t::TransModalFixed, z)
+
+Bring the synthesis/projection matrices of `t` to position `z`: nothing to do for
+`z`-independent modes; a rescaling for scale-invariant (tapered Marcatili-type) modes;
+otherwise a re-evaluation of the mode fields on the host and an upload.
+"""
+function update_matrices!(t::TransModalFixed, z)
+    (t.zconstant || z == t.zmat) && return
+    if t.scale_invariant
+        a = Modes.dimlimits(t.ts.ms[1], z=z)[3][1]
+        s = t.a0/a
+        t.S .= t.S0 .* s
+        t.Wp .= t.Wp0 ./ s
+        t.Wc .= t.Wc0 ./ s
+    else
+        Sh, Wph, Wch = _mode_matrices(eltype(t.S), t.ts, t.quad, z)
+        copyto!(t.S, Sh); copyto!(t.Wp, Wph); copyto!(t.Wc, Wch)
+    end
+    t.zmat = z
+    nothing
+end
+
+function (t::TransModalFixed)(nl, Eω, z)
+    t.z = z
+    t.density = t.densityfun(z)
+    update_matrices!(t, z)
+    to_time!(t.Emt, Eω, t.Emωo, t.IFT) # (nω × nmodes) -> (nto × nmodes)
+    Emt = t.Emt
+    if !isnothing(t.Emt_noise)
+        # Modified shot-noise model: field + noise in a separate buffer, the propagating
+        # field is never contaminated.
+        @. t.Emt_nl = t.Emt + t.Emt_noise
+        Emt = t.Emt_nl
+    end
+    mul!(t.Et, Emt, t.S) # synthesise on the quadrature nodes
+    apply_responses!(t.Pt, t.Et, t.resp_eval, t.density, t.ts.npol)
+    mul!(t.Pmt, t.Pt, t.Wp) # project back onto the modes
+    _finish_modal!(nl, t, t.Pmt)
+end
+
+# time window, transform to frequency, spectral window and normalisation of a modal
+# time-domain polarisation
+function _finish_modal!(nl, t::TransModalFixed, Pmt)
+    Pmt .*= t.gv.towin # (nto × nmodes) .* (nto,)
+    to_freq!(nl, t.Pmωo, Pmt, t.FT)
+    nl .*= t.gv.ωwin
+    t.norm!(nl)
+    nl
+end
+
+"""
+    integral_error!(t::TransModalFixed)
+
+Fill `t.err` with the embedded error estimate `P_coarse(ω) - P_fine(ω)` of the **last**
+evaluation of `t` (the real-space polarisation is still held in `t.Pt`), where the coarse
+rule is the Gauss subset of the Kronrod rule in r (only if constructed with
+`kronrod=true`) and every other node in θ. Returns `t.err`.
+"""
+function integral_error!(t::TransModalFixed)
+    mul!(t.Pmt, t.Pt, t.Wc)
+    mul!(t.Pmt, t.Pt, t.Wp, -1.0, 1.0)
+    _finish_modal!(t.err, t, t.Pmt)
+end
+
+"""
+    apply_responses!(Pt, Et, responses, density, npol)
+
+Accumulate the nonlinear polarisation of the real-space field `Et` (shape
+`(nto, npol⋅npts)`, polarisation component fastest) into `Pt` for the modal transforms.
+Scalar fields (`npol == 1`) use [`Et_to_Pt_ordered!`](@ref) (pointwise/batched responses as
+whole-array operations). Vector fields use array-level `(nto, npol, npts)` methods for
+responses with `Nonlinear.batched(resp, npol)`, and otherwise the serial column-by-column
+call with a contiguous `(nto, npol)` view per node — the legacy responses own internal
+buffers and are not thread-safe, and this path cannot run on a device.
+"""
+function apply_responses!(Pt, Et, responses, density, npol)
+    if npol == 1
+        Et_to_Pt_ordered!(Pt, Et, responses, density, CartesianIndices((size(Et, 2),)))
+    else
+        nto = size(Et, 1)
+        npts = size(Et, 2) ÷ npol
+        Et3 = reshape(Et, nto, npol, npts)
+        Pt3 = reshape(Pt, nto, npol, npts)
+        fill!(Pt3, 0)
+        _apply_vector!(Pt3, Et3, responses, density)
+    end
+    Pt
+end
+
+function _apply_vector!(Pt3, Et3, responses::Tuple, density::Number)
+    npol = size(Et3, 2)
+    for resp! in responses
+        if Nonlinear.batched(resp!, npol)
+            resp!(Pt3, Et3, density)
+        else
+            Utils.isdevice(Pt3) && error(
+                "response $(typeof(resp!)) has no array-level method for vector fields "*
+                "and is evaluated column by column, which cannot run on a device.")
+            for i in 1:size(Et3, 3)
+                resp!(view(Pt3, :, :, i), view(Et3, :, :, i), density)
+            end
+        end
+    end
+end
+
+# gas mixtures: responses is a tuple of tuples, density a vector
+function _apply_vector!(Pt3, Et3, responses, density::AbstractVector)
+    for ii in eachindex(density)
+        _apply_vector!(Pt3, Et3, responses[ii], density[ii])
+    end
 end
 
 """
@@ -831,6 +1172,7 @@ allocating another field-sized array.
 """
 scratch(t) = nothing
 scratch(t::TransFree) = length(t.grid.to) == length(t.grid.t) ? t.Eto : nothing
+scratch(t::TransModalFixed) = t.Et_scratch
 
 """
     device_gridvectors(transform, grid)
@@ -842,6 +1184,7 @@ what every host propagation uses.
 """
 device_gridvectors(t, grid) = Luna.gridvectors(grid)
 device_gridvectors(t::TransFree, grid) = t.gv
+device_gridvectors(t::TransModalFixed, grid) = t.gv
 
 """
     (t::TransFree)(nl, Eω, z)

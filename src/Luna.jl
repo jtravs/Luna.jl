@@ -194,54 +194,87 @@ function doinput_mm!(Eω, grid, inputs::Fields.TimeField, FT)
     doinput_mm!(Eω, grid, ((mode=1, fields=(inputs,)),), FT)
 end
 
+"""
+    setup(grid, densityfun, responses, inputs, modes, components; kwargs...)
+
+Set up a multimode (modal) propagation, returning `(Eω, transform, FT)`.
+
+# Keyword arguments
+- `modal_integral=:adaptive`: how the transverse nonlinear integral is evaluated:
+  `:adaptive` builds a [`NonlinearRHS.TransModal`](@ref) (adaptive cubature, host only) and
+  `:fixed` a [`NonlinearRHS.TransModalFixed`](@ref) (fixed quadrature; threaded on the host,
+  runs on a device with `arraytype`).
+- `full=false`: use the full 2-D transverse integral rather than the radial one.
+- `norm!`: normalisation function, defaults to [`NonlinearRHS.norm_modal`](@ref).
+- `rtol=1e-3, atol=0.0, mfcn=512`: cubature tolerances for `:adaptive`.
+- `nr=128, nθ=16, kronrod=false`: quadrature rule for `:fixed`, see
+  [`NonlinearRHS.TransModalFixed`](@ref).
+- `noise_field=nothing`: modal noise field for the modified shot-noise model.
+- `arraytype=Array`: array type of the state and transform buffers (`:fixed` only). Passing
+  a GPU array type runs the whole propagation on that device (see [`Luna.run`](@ref)).
+"""
 function setup(grid::Grid.RealGrid, densityfun, responses, inputs,
                modes::Modes.ModeCollection, components;
-               full=false, norm! = NonlinearRHS.norm_modal(grid),
-               rtol=1e-3, atol=0.0, mfcn=512, noise_field=nothing)
-    Logging.@info("Setting up and planning FFTs...")
-    flush(stderr)
-    ts = Modes.ToSpace(modes, components=components)
-    Utils.loadFFTwisdom()
-    xt = Array{Float64}(undef, length(grid.t))
-    FTt = FFTW.plan_rfft(xt, 1, flags=settings["fftw_flag"])
-    Eω = zeros(ComplexF64, length(grid.ω), length(modes))
-    doinput_mm!(Eω, grid, inputs, FTt)
-    x = Array{Float64}(undef, length(grid.t), length(modes))
-    FT = FFTW.plan_rfft(x, 1, flags=settings["fftw_flag"])
-    xo = Array{Float64}(undef, length(grid.to), ts.npol)
-    FTo = FFTW.plan_rfft(xo, 1, flags=settings["fftw_flag"])
-    transform = NonlinearRHS.TransModal(grid, ts, FTo,
-                                 responses, densityfun, norm!;
-                                 rtol, atol, mfcn, full, noise_field)
-    inv(FT) # create inverse FT plans now, so wisdom is saved
-    inv(FTo)
-    Utils.saveFFTwisdom()
-    Logging.@info("Setup finished.")
-    flush(stderr)
-    Eω, transform, FT
+               modal_integral=:adaptive, arraytype=Array,
+               full=false, norm! = NonlinearRHS.norm_modal(grid; arraytype),
+               rtol=1e-3, atol=0.0, mfcn=512, nr=128, nθ=16, kronrod=false,
+               noise_field=nothing)
+    _setup_modal(Float64, grid, densityfun, responses, inputs, modes, components;
+                 modal_integral, arraytype, full, norm!, rtol, atol, mfcn, nr, nθ, kronrod,
+                 noise_field)
 end
 
 function setup(grid::Grid.EnvGrid, densityfun, responses, inputs,
                modes::Modes.ModeCollection, components;
-               full=false, norm! = NonlinearRHS.norm_modal(grid),
-               rtol=1e-3, atol=0.0, mfcn=512, noise_field=nothing)
+               modal_integral=:adaptive, arraytype=Array,
+               full=false, norm! = NonlinearRHS.norm_modal(grid; arraytype),
+               rtol=1e-3, atol=0.0, mfcn=512, nr=128, nθ=16, kronrod=false,
+               noise_field=nothing)
+    _setup_modal(ComplexF64, grid, densityfun, responses, inputs, modes, components;
+                 modal_integral, arraytype, full, norm!, rtol, atol, mfcn, nr, nθ, kronrod,
+                 noise_field)
+end
+
+_plan_forward_host(x::Array{Float64}) = FFTW.plan_rfft(x, 1, flags=settings["fftw_flag"])
+_plan_forward_host(x::Array{ComplexF64}) = FFTW.plan_fft(x, 1, flags=settings["fftw_flag"])
+
+function _setup_modal(TT, grid, densityfun, responses, inputs, modes, components;
+                      modal_integral, arraytype, full, norm!, rtol, atol, mfcn, nr, nθ,
+                      kronrod, noise_field)
     Logging.@info("Setting up and planning FFTs...")
     flush(stderr)
+    ondevice = arraytype !== Array
+    ondevice && modal_integral != :fixed && error(
+        "device propagation requires modal_integral=:fixed; the adaptive-cubature "*
+        "TransModal is host only.")
     ts = Modes.ToSpace(modes, components=components)
-    Utils.loadFFTwisdom()
-    xt = Array{ComplexF64}(undef, length(grid.t))
-    FTt = FFTW.plan_fft(xt, 1, flags=settings["fftw_flag"])
+    Utils.loadFFTwisdom() # host wisdom: the input field is always built on the host
+    xt = Array{TT}(undef, length(grid.t))
+    FTt = _plan_forward_host(xt)
     Eω = zeros(ComplexF64, length(grid.ω), length(modes))
     doinput_mm!(Eω, grid, inputs, FTt)
-    x = Array{ComplexF64}(undef, length(grid.t), length(modes))
-    FT = FFTW.plan_fft(x, 1, flags=settings["fftw_flag"])
-    xo = Array{ComplexF64}(undef, length(grid.to), ts.npol)
-    FTo = FFTW.plan_fft(xo, 1, flags=settings["fftw_flag"])
-    transform = NonlinearRHS.TransModal(grid, ts, FTo,
-                                 responses, densityfun, norm!;
-                                 rtol, atol, mfcn, full, noise_field)
-    inv(FT) # create inverse FT plans now, so wisdom is saved
-    inv(FTo)
+    if modal_integral == :adaptive
+        x = Array{TT}(undef, length(grid.t), length(modes))
+        FT = _plan_forward_host(x)
+        xo = Array{TT}(undef, length(grid.to), ts.npol)
+        FTo = _plan_forward_host(xo)
+        transform = NonlinearRHS.TransModal(grid, ts, FTo,
+                                            responses, densityfun, norm!;
+                                            rtol, atol, mfcn, full, noise_field)
+        inv(FT) # create inverse FT plans now, so wisdom is saved
+        inv(FTo)
+    elseif modal_integral == :fixed
+        transform = NonlinearRHS.TransModalFixed(grid, ts, responses, densityfun, norm!;
+                                                 full, nr, nθ, kronrod, noise_field,
+                                                 arraytype)
+        # the state plan is made on the transform's scratch buffer (already on the device
+        # if there is one), so no extra prototype array is needed
+        FT = NonlinearRHS._plan_forward(NonlinearRHS.scratch(transform), 1)
+        ondevice || inv(FT)
+        ondevice && (Eω = Adapt.adapt(arraytype, Eω))
+    else
+        error("modal_integral must be :adaptive or :fixed, got $modal_integral")
+    end
     Utils.saveFFTwisdom()
     Logging.@info("Setup finished.")
     flush(stderr)
@@ -394,7 +427,7 @@ simtype(g, t, l) = Dict("field" => gridtype(g),
                         "transform" => string(t),
                         "linop" => linoptype(l))
 
-function save_modeinfo_maybe(output, t::NonlinearRHS.TransModal)
+function save_modeinfo_maybe(output, t::NonlinearRHS.AbstractTransModal)
     pol = t.ts.indices == 1:2 ? "xy" : t.ts.indices == 1 ? "x" : "y"
     modeinfos = unnest([Modes.modeinfo(m) for m in t.ts.ms])
     output(modeinfos; group="modes")

@@ -159,18 +159,24 @@ function PlasmaCumtrapz(t, E, ratefunc, ionpot; preionfrac=0.0)
 end
 
 "The plasma response for a scalar electric field"
-function PlasmaScalar!(Plas::PlasmaCumtrapz, E)
-    Plas.ratefunc(Plas.rate, E)
-    Maths.cumtrapz!(Plas.fraction, Plas.rate, Plas.δt)
-    @. Plas.fraction = Plas.preionfrac + 1 - exp(-Plas.fraction)
-    @. Plas.phase = Plas.fraction * e_ratio * E
-    Maths.cumtrapz!(Plas.J, Plas.phase, Plas.δt)
+PlasmaScalar!(Plas::PlasmaCumtrapz, E) = _plasma_scalar!(
+    Plas.P, Plas.J, Plas.phase, Plas.rate, Plas.fraction, E,
+    Plas.ratefunc, Plas.ionpot, Plas.preionfrac, Plas.δt)
+
+# The scalar plasma kernel on explicit column buffers, shared between the columnwise
+# response above and the threaded per-column path of PlasmaCumtrapzBatched.
+function _plasma_scalar!(P, J, phase, rate, fraction, E, ratefunc, ionpot, preionfrac, δt)
+    ratefunc(rate, E)
+    Maths.cumtrapz!(fraction, rate, δt)
+    @. fraction = preionfrac + 1 - exp(-fraction)
+    @. phase = fraction * e_ratio * E
+    Maths.cumtrapz!(J, phase, δt)
     for ii in eachindex(E)
         if abs(E[ii]) > 0
-            Plas.J[ii] += Plas.ionpot * Plas.rate[ii] * (1-Plas.fraction[ii])/E[ii]
+            J[ii] += ionpot * rate[ii] * (1-fraction[ii])/E[ii]
         end
     end
-    Maths.cumtrapz!(Plas.P, Plas.J, Plas.δt)
+    Maths.cumtrapz!(P, J, δt)
 end
 
 """
@@ -180,25 +186,39 @@ We take the magnitude of the electric field to calculate the ionization
 rate and fraction, and then solve the plasma polarisation component-wise
 for the vector field.
 
-A similar approach was used in: C Tailliez et al 2020 New J. Phys. 22 103038.  
+A similar approach was used in: C Tailliez et al 2020 New J. Phys. 22 103038.
 """
 function PlasmaVector!(Plas::PlasmaCumtrapz, E)
     Ex = E[:,1]
     Ey = E[:,2]
     Em = @. hypot.(Ex, Ey)
-    Plas.ratefunc(Plas.rate, Em)
-    Maths.cumtrapz!(Plas.fraction, Plas.rate, Plas.δt)
-    @. Plas.fraction = Plas.preionfrac + 1 - exp(-Plas.fraction)
-    @. Plas.phase = Plas.fraction * e_ratio * E
-    Maths.cumtrapz!(Plas.J, Plas.phase, Plas.δt)
+    _plasma_vector!(Plas.P, Plas.J, Plas.phase, Plas.rate, Plas.fraction, E, Ex, Ey, Em,
+                    Plas.ratefunc, Plas.ionpot, Plas.preionfrac, Plas.δt)
+end
+
+# The vector plasma kernel on explicit column buffers; `E` is `(nt, 2)`, `Ex`/`Ey` its
+# components and `Em` the field magnitude `hypot(Ex, Ey)`.
+function _plasma_vector!(P, J, phase, rate, fraction, E, Ex, Ey, Em,
+                         ratefunc, ionpot, preionfrac, δt)
+    ratefunc(rate, Em)
+    Maths.cumtrapz!(fraction, rate, δt)
+    @. fraction = preionfrac + 1 - exp(-fraction)
+    @. phase = fraction * e_ratio * E
+    # integrate each component with the 1-D routine explicitly: the buffers may be 2-D
+    # views, which would otherwise be mistaken for vectors by the 1-D method
+    for c in 1:2
+        Maths.cumtrapz!(view(J, :, c), view(phase, :, c), δt)
+    end
     for ii in eachindex(Em)
         if abs(Em[ii]) > 0
-            pre = Plas.ionpot * Plas.rate[ii] * (1-Plas.fraction[ii])/Em[ii]^2
-            Plas.J[ii,1] += pre*Ex[ii]
-            Plas.J[ii,2] += pre*Ey[ii]
+            pre = ionpot * rate[ii] * (1-fraction[ii])/Em[ii]^2
+            J[ii,1] += pre*Ex[ii]
+            J[ii,2] += pre*Ey[ii]
         end
     end
-    Maths.cumtrapz!(Plas.P, Plas.J, Plas.δt)
+    for c in 1:2
+        Maths.cumtrapz!(view(P, :, c), view(J, :, c), δt)
+    end
 end
 
 "Handle plasma polarisation routing to `PlasmaVector` or `PlasmaScalar`."
@@ -381,6 +401,200 @@ multi-dimensional field array (`resp(out, Et, ρ)` with `out`/`Et` of shape
 `(nt, ny, nx)`) rather than once per transverse column. Defaults to `false`.
 """
 batched(resp) = false
+
+"""
+    batched(resp, npol)
+
+Trait: `true` if `resp` has an array-level method for a real-space field with `npol`
+polarisation components, i.e. `resp(out, Et, ρ)` with `out`/`Et` of shape
+`(nt, npol, npts)` — the layout used by [`NonlinearRHS.TransModalFixed`](@ref). For a
+scalar field (`npol == 1`) this is [`batched(resp)`](@ref); vector fields default to `false`.
+"""
+batched(resp, npol) = npol == 1 ? batched(resp) : false
+
+# Kerr on a whole (nt, 2, npts) vector field: the same arithmetic as KerrVector!/
+# KerrVectorEnv! per sample (so the results are bit-identical), as broadcasts over the
+# component slices, threaded on the host and a single kernel each on a device.
+batched(::KerrField, npol) = npol == 2
+batched(::KerrEnv, npol) = npol == 2
+
+function (K::KerrField)(out::AbstractArray{T, 3}, E::AbstractArray{T, 3}, ρ) where T
+    size(E, 2) == 2 || error("array-level KerrField call expects a (nt, 2, npts) vector field")
+    fac = ρ*ε_0*K.γ3
+    Ex = view(E, :, 1, :); Ey = view(E, :, 2, :)
+    Px = view(out, :, 1, :); Py = view(out, :, 2, :)
+    Utils.tchunks(Px, Py, Ex, Ey) do Px, Py, Ex, Ey
+        @. Px += fac*(Ex^2 + Ey^2)*Ex
+        @. Py += fac*(Ex^2 + Ey^2)*Ey
+    end
+    out
+end
+
+function (K::KerrEnv)(out::AbstractArray{T, 3}, E::AbstractArray{T, 3}, ρ) where T
+    size(E, 2) == 2 || error("array-level KerrEnv call expects a (nt, 2, npts) vector field")
+    fac = ρ*ε_0*K.γ3
+    Ex = view(E, :, 1, :); Ey = view(E, :, 2, :)
+    Px = view(out, :, 1, :); Py = view(out, :, 2, :)
+    Utils.tchunks(Px, Py, Ex, Ey) do Px, Py, Ex, Ey
+        @. Px += 3/4*fac*((abs2(Ex) + 2/3*abs2(Ey))*Ex + 1/3*conj(Ex)*Ey^2)
+        @. Py += 3/4*fac*((abs2(Ey) + 2/3*abs2(Ex))*Ey + 1/3*conj(Ey)*Ex^2)
+    end
+    out
+end
+
+"""
+    PlasmaCumtrapzBatched(ratefunc, ionpot, δt; preionfrac=0.0, arraytype=Array)
+    PlasmaCumtrapzBatched(P::PlasmaCumtrapz; arraytype=Array)
+
+Array-level (batched) version of [`PlasmaCumtrapz`](@ref) for a real-space field of shape
+`(nt, npol, npts)` (or `(nt, npts)` for scalar fields): the ionisation rate, the
+cumulative integrals and the plasma current/polarisation are computed for all transverse
+points at once, with the same arithmetic as the columnwise response. On the host the
+columns are processed in parallel with per-column kernels (`Utils.tforeach`); on a device
+everything is whole-array broadcasts with [`Maths.cumtrapz_scan!`](@ref) for the
+cumulative integrals. Buffers are allocated lazily on the field's array type at the first
+call. `ratefunc` is kept as given (host callable, e.g. for `Stats.electrondensity`);
+`ratefunc_dev` is its copy adapted to `arraytype` for the device kernels.
+"""
+mutable struct PlasmaCumtrapzBatched{R, RD}
+    ratefunc::R
+    ratefunc_dev::RD
+    ionpot::Float64
+    δt::Float64
+    preionfrac::Float64
+    rate::Any # (nt, npts)
+    fraction::Any # (nt, npts)
+    Em::Any # (nt, npts) field magnitude for vector fields, or nothing
+    phase::Any # (nt, npol, npts)
+    J::Any # (nt, npol, npts)
+    P::Any # (nt, npol, npts)
+    tmp::Any # scan scratch (nt, npts), device only
+    tmp3::Any # scan scratch (nt, npol, npts), device only
+end
+
+batched(::PlasmaCumtrapzBatched) = true
+batched(::PlasmaCumtrapzBatched, npol) = true
+
+function PlasmaCumtrapzBatched(ratefunc, ionpot, δt; preionfrac=0.0, arraytype=Array)
+    !(0.0 <= preionfrac <= 1.0) && throw(DomainError(preionfrac, "preionfrac must be between 0 and 1"))
+    ratefunc_dev = arraytype === Array ? ratefunc : Luna.Ionisation.device_ionrate(ratefunc, arraytype)
+    PlasmaCumtrapzBatched(ratefunc, ratefunc_dev, ionpot, δt, preionfrac,
+                          nothing, nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+end
+
+PlasmaCumtrapzBatched(P::PlasmaCumtrapz; arraytype=Array) =
+    PlasmaCumtrapzBatched(P.ratefunc, P.ionpot, P.δt; preionfrac=P.preionfrac, arraytype)
+
+batched_response(P::PlasmaCumtrapz; arraytype=Array) = PlasmaCumtrapzBatched(P; arraytype)
+
+function _plasma_buffers!(B::PlasmaCumtrapzBatched, E3)
+    nt, npol, npts = size(E3)
+    if B.P === nothing || size(B.P) != size(E3)
+        B.rate = similar(E3, real(eltype(E3)), (nt, npts))
+        B.fraction = similar(B.rate)
+        B.Em = npol == 2 ? similar(B.rate) : nothing
+        B.phase = similar(E3)
+        B.J = similar(E3)
+        B.P = similar(E3)
+        if Utils.isdevice(E3)
+            B.tmp = similar(B.rate)
+            B.tmp3 = similar(E3)
+        end
+    end
+    nothing
+end
+
+function (B::PlasmaCumtrapzBatched)(out, Et, ρ)
+    E3 = ndims(Et) == 3 ? Et : reshape(Et, size(Et, 1), 1, size(Et, 2))
+    out3 = ndims(out) == 3 ? out : reshape(out, size(out, 1), 1, size(out, 2))
+    size(E3, 2) in (1, 2) || error("PlasmaCumtrapzBatched: field must have 1 or 2 "*
+                                   "polarisation components along dimension 2")
+    _plasma_buffers!(B, E3)
+    _plasma_batched!(Utils.backend(E3), out3, E3, ρ, B, B.rate, B.fraction, B.Em,
+                     B.phase, B.J, B.P, B.tmp, B.tmp3)
+    out
+end
+
+# Host: one column per task, the columnwise kernels on views into the full-size buffers
+# (so no per-thread scratch is needed and the arithmetic is that of PlasmaCumtrapz).
+function _plasma_batched!(::Utils.CPUBackend, out3, E3, ρ, B, rate, fraction, Em,
+                          phase, J, P, tmp, tmp3)
+    nt, npol, npts = size(E3)
+    ratefunc = B.ratefunc; ionpot = B.ionpot; preionfrac = B.preionfrac; δt = B.δt
+    # each column costs an ionisation-rate evaluation and three cumulative integrals, far
+    # more than an elementwise kernel, so thread from a handful of columns upwards
+    Utils.tforeach(npts; ntotal=length(E3), minlen=4*nt*npol) do i
+        if npol == 1
+            Ecol = view(E3, :, 1, i)
+            _plasma_scalar!(view(P, :, 1, i), view(J, :, 1, i), view(phase, :, 1, i),
+                            view(rate, :, i), view(fraction, :, i), Ecol,
+                            ratefunc, ionpot, preionfrac, δt)
+            view(out3, :, 1, i) .+= ρ .* view(P, :, 1, i)
+        else
+            Ecol = view(E3, :, :, i)
+            Ex = view(E3, :, 1, i); Ey = view(E3, :, 2, i); Emc = view(Em, :, i)
+            @. Emc = hypot(Ex, Ey)
+            _plasma_vector!(view(P, :, :, i), view(J, :, :, i), view(phase, :, :, i),
+                            view(rate, :, i), view(fraction, :, i), Ecol, Ex, Ey, Emc,
+                            ratefunc, ionpot, preionfrac, δt)
+            view(out3, :, :, i) .+= ρ .* view(P, :, :, i)
+        end
+    end
+    nothing
+end
+
+# Device: whole-array broadcasts and the doubling scan for the cumulative integrals.
+function _plasma_batched!(::Utils.DeviceBackend, out3, E3, ρ, B, rate, fraction, Em,
+                          phase, J, P, tmp, tmp3)
+    nt, npol, npts = size(E3)
+    ionpot = B.ionpot; preionfrac = B.preionfrac; δt = B.δt
+    ir = B.ratefunc_dev
+    if npol == 1
+        Es = reshape(E3, nt, npts)
+        Luna.Ionisation.ionrate_device!(rate, ir, Es)
+    else
+        Ex = view(E3, :, 1, :); Ey = view(E3, :, 2, :)
+        @. Em = hypot(Ex, Ey)
+        Luna.Ionisation.ionrate_device!(rate, ir, Em)
+    end
+    Maths.cumtrapz_scan!(fraction, rate, δt, tmp)
+    @. fraction = preionfrac + 1 - exp(-fraction)
+    frac3 = reshape(fraction, nt, 1, npts)
+    @. phase = frac3 * e_ratio * E3
+    Maths.cumtrapz_scan!(J, phase, δt, tmp3)
+    rate3 = reshape(rate, nt, 1, npts)
+    if npol == 1
+        @. J += ifelse(abs(E3) > 0, ionpot * rate3 * (1 - frac3) / E3, zero(E3))
+    else
+        Em3 = reshape(Em, nt, 1, npts)
+        @. J += ifelse(Em3 > 0, ionpot * rate3 * (1 - frac3) / Em3^2 * E3, zero(E3))
+    end
+    Maths.cumtrapz_scan!(P, J, δt, tmp3)
+    @. out3 += ρ * P
+    nothing
+end
+
+"""
+    batched_response(resp)
+
+Return the array-level (batched) equivalent of `resp` if one exists, otherwise `resp`
+itself. Transforms which evaluate the responses on whole arrays call this on the responses
+they are given (see [`batched_responses`](@ref)); the originals are kept for inspection.
+"""
+batched_response(resp; arraytype=Array) = resp
+
+"""
+    batched_responses(responses; arraytype=Array)
+
+Apply [`batched_response`](@ref) to a tuple of responses, or to each tuple of a tuple of
+tuples (gas mixtures). `arraytype` is the array type the responses will be evaluated on.
+"""
+batched_responses(responses::Tuple; arraytype=Array) =
+    map(r -> batched_response(r; arraytype), responses)
+batched_responses(responses::Tuple{Vararg{Tuple}}; arraytype=Array) =
+    map(r -> batched_responses(r; arraytype), responses)
+batched_responses(responses; arraytype=Array) =
+    Tuple(batched_response(r; arraytype) for r in responses)
 
 """
     RamanPolarEnvBatched(t, r)

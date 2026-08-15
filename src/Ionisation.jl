@@ -9,6 +9,7 @@ import Luna.PhysData: c, ħ, electron, m_e, au_energy, au_time, au_Efield, wlfre
 import Luna.PhysData: ionisation_potential, quantum_numbers
 import Luna: Maths, Utils
 import Printf: @sprintf
+import Adapt
 
 abstract type AbstractIonRate end
 
@@ -427,6 +428,64 @@ end
 
 function (ir::IonRatePPTAccel)(out::AbstractArray, E::AbstractArray)
     out .= ir.(E)
+end
+
+#=================================================#
+#===========  DEVICE (GPU) EVALUATION  ===========#
+#=================================================#
+
+"""
+    device_capable(ir::AbstractIonRate)
+
+Trait: `true` if `ir` can be evaluated inside a device (GPU) kernel: the analytic ADK rate
+and a cached PPT rate on a uniform table. The direct PPT evaluation (series summation with
+arbitrary-precision fallbacks) cannot.
+"""
+device_capable(::AbstractIonRate) = false
+device_capable(::IonRateADK) = true
+device_capable(ir::IonRatePPTAccel) = !(ir.spline.ifun isa Maths.FastFinder)
+
+"""
+    device_ionrate(ir, arraytype)
+
+Copy of the ionisation rate `ir` with its lookup tables on `arraytype`, for use in
+[`ionrate_device!`](@ref). Errors if `ir` is not [`device_capable`](@ref).
+"""
+function device_ionrate(ir, arraytype)
+    device_capable(ir) || error(
+        "ionisation rate $(typeof(ir)) cannot be evaluated on a device; use IonRateADK or "*
+        "a cached PPT rate (IonRatePPTCached/IonRatePPTAccel with a uniform table).")
+    Adapt.adapt(arraytype, ir)
+end
+
+Adapt.adapt_structure(to, ir::IonRatePPTAccel) =
+    IonRatePPTAccel(Adapt.adapt(to, ir.spline), ir.Emin, ir.Emax)
+
+"""
+    ionrate_device(ir, E)
+
+Scalar ionisation rate at field `E`, written so that it compiles for a device kernel: no
+string formatting on the error paths. Same values as `ir(E)` on the host.
+"""
+@inline ionrate_device(ir::IonRateADK, E) = ir(E)
+
+@inline function ionrate_device(ir::IonRatePPTAccel, E)
+    aE = abs(E)
+    aE < ir.Emin && return 0.0
+    aE > ir.Emax && error("Field strength exceeds maximum for cached PPT ionisation rate")
+    exp(Maths.spline_eval(ir.spline, aE))
+end
+
+"""
+    ionrate_device!(out, ir, E)
+
+In-place ionisation rate of the array `E` into `out` on any array type, using
+[`ionrate_device`](@ref) (`ir` must have been prepared with [`device_ionrate`](@ref) for
+device arrays; on the host it is the ordinary rate object).
+"""
+function ionrate_device!(out, ir, E)
+    out .= ionrate_device.(Ref(ir), E)
+    out
 end
 
 function makePPTcache(ionpot::Float64, λ0, Z, l;
