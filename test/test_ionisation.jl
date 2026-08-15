@@ -12,8 +12,12 @@ import Logging: with_logger, NullLogger
 E = collect(range(1e9, 1e11; length=32))
 @test Ionisation.ionrate_ADK(:He, E) == Ionisation.ionrate_ADK(:He, -E)
 
-@test isapprox(Ionisation.ionrate_PPT(:He, 800e-9, 1e10; dipole_corr=false), 2*1.40432138471583e-5, rtol=1e-3)
-@test isapprox(Ionisation.ionrate_PPT(:He, 800e-9, 1.3e10; dipole_corr=false), 2*0.04517809797503506, rtol=1e-3)
+# reference values for the literal channel sum (the default is the smooth integral form)
+@test isapprox(Ionisation.ionrate_PPT(:He, 800e-9, 1e10; dipole_corr=false, sum_integral=false), 2*1.40432138471583e-5, rtol=1e-3)
+@test isapprox(Ionisation.ionrate_PPT(:He, 800e-9, 1.3e10; dipole_corr=false, sum_integral=false), 2*0.04517809797503506, rtol=1e-3)
+# the integral form is close to the sum in the tunnelling regime and lower near γ ≈ 1
+@test isapprox(Ionisation.ionrate_PPT(:He, 800e-9, 1e11), Ionisation.ionrate_PPT(:He, 800e-9, 1e11; sum_integral=false), rtol=2e-3)
+@test 0.7 < Ionisation.ionrate_PPT(:He, 800e-9, 2e10)/Ionisation.ionrate_PPT(:He, 800e-9, 2e10; sum_integral=false) < 1.0
 
 Emin = 1e9
 Emax = 1e11
@@ -73,7 +77,7 @@ end
         :stark_shift => false,
         :dipole_corr => false,
         :sum_tol => 1e-4,
-        :sum_integral => true,
+        :sum_integral => false,
         :msum => false,
         :occupancy => 4,
         :cache => false,
@@ -111,7 +115,7 @@ end
         :stark_shift => true,
         :dipole_corr => true,
         :sum_tol => 1e-6,
-        :sum_integral => false,
+        :sum_integral => true,
         :msum => true,
         :occupancy => 2,
         :cache => false,

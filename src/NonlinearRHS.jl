@@ -544,7 +544,7 @@ Construct a [`TransModalFixed`](@ref).
 # Keyword arguments
 - `full::Bool=false`: `true` for the 2-D (r,θ) rule, `false` for the radial rule with an
   azimuthally symmetric integrand (HE₁ₘ mode sets).
-- `nr::Int=128`, `nθ::Int=16`: nodes along r (or x) and θ (or y).
+- `nr::Int=64`, `nθ::Int=16`: nodes along r (or x) and θ (or y).
 - `kronrod::Bool=false`: use a Gauss–Kronrod rule in r (`nr` rounded up to odd) so that
   [`integral_error!`](@ref) has an embedded coarse rule to compare against.
 - `noise_field=nothing`: optional `(nω, nmodes)` modal noise field for the modified
@@ -554,7 +554,7 @@ Construct a [`TransModalFixed`](@ref).
 - `arraytype=Array`: array type of the buffers; pass a GPU array type to evaluate on a device.
 """
 function TransModalFixed(tT, grid, ts::Modes.ToSpace, resp, densityfun, norm!;
-                         full=false, nr=128, nθ=16, kronrod=false, noise_field=nothing,
+                         full=false, nr=64, nθ=16, kronrod=false, noise_field=nothing,
                          zconstant=nothing, arraytype=Array)
     ms = ts.ms
     nmodes = ts.nmodes

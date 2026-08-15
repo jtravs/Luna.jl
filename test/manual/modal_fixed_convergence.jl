@@ -1,7 +1,7 @@
 # Manual validation: convergence of the fixed-quadrature modal transform with the number of
 # radial nodes, on frozen fields from a short RDW-type propagation, for the Kerr term alone
-# and for the plasma term with the ADK rate, the default cached PPT rate and the smooth
-# (sum_integral) PPT rate; Gauss versus Kronrod rules; and a vector (x+y HE11) mode set.
+# and for the plasma term with the ADK rate, the literal channel-sum PPT rate and the
+# default smooth (sum_integral) PPT rate; Gauss versus Kronrod rules; and a vector (x+y HE11) mode set.
 # The reference is the same rule with 2048 nodes; the adaptive TransModal at its default
 # tolerance is shown for comparison. Not part of the test suite (takes a few minutes).
 #
@@ -42,8 +42,8 @@ plasma(ir) = Nonlinear.PlasmaCumtrapz(grid.to, grid.to, ir, Ip)
 cases = [
     ("Kerr only", (kerr,)),
     ("plasma, ADK", (plasma(Ionisation.IonRateADK(:He)),)),
-    ("plasma, PPT cached (default)", (plasma(Ionisation.IonRatePPTCached(:He, λ0)),)),
-    ("plasma, PPT sum_integral", (plasma(Ionisation.IonRatePPTAccel(:He, λ0; sum_integral=true)),)),
+    ("plasma, PPT channel sum (sum_integral=false)", (plasma(Ionisation.IonRatePPTCached(:He, λ0; sum_integral=false)),)),
+    ("plasma, PPT sum_integral (default)", (plasma(Ionisation.IonRatePPTCached(:He, λ0)),)),
 ]
 nrs = (16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512)
 println("Frozen field at z = $z m; errors are ‖ΔP‖/‖P‖ over all ω and modes, and in 100–140 nm")

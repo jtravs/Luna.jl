@@ -207,7 +207,7 @@ Set up a multimode (modal) propagation, returning `(Eω, transform, FT)`.
 - `full=false`: use the full 2-D transverse integral rather than the radial one.
 - `norm!`: normalisation function, defaults to [`NonlinearRHS.norm_modal`](@ref).
 - `rtol=1e-3, atol=0.0, mfcn=512`: cubature tolerances for `:adaptive`.
-- `nr=128, nθ=16, kronrod=false`: quadrature rule for `:fixed`, see
+- `nr=64, nθ=16, kronrod=false`: quadrature rule for `:fixed`, see
   [`NonlinearRHS.TransModalFixed`](@ref).
 - `noise_field=nothing`: modal noise field for the modified shot-noise model.
 - `arraytype=Array`: array type of the state and transform buffers (`:fixed` only). Passing
@@ -217,7 +217,7 @@ function setup(grid::Grid.RealGrid, densityfun, responses, inputs,
                modes::Modes.ModeCollection, components;
                modal_integral=:fixed, arraytype=Array,
                full=false, norm! = NonlinearRHS.norm_modal(grid; arraytype),
-               rtol=1e-3, atol=0.0, mfcn=512, nr=128, nθ=16, kronrod=false,
+               rtol=1e-3, atol=0.0, mfcn=512, nr=64, nθ=16, kronrod=false,
                noise_field=nothing)
     _setup_modal(Float64, grid, densityfun, responses, inputs, modes, components;
                  modal_integral, arraytype, full, norm!, rtol, atol, mfcn, nr, nθ, kronrod,
@@ -228,7 +228,7 @@ function setup(grid::Grid.EnvGrid, densityfun, responses, inputs,
                modes::Modes.ModeCollection, components;
                modal_integral=:fixed, arraytype=Array,
                full=false, norm! = NonlinearRHS.norm_modal(grid; arraytype),
-               rtol=1e-3, atol=0.0, mfcn=512, nr=128, nθ=16, kronrod=false,
+               rtol=1e-3, atol=0.0, mfcn=512, nr=64, nθ=16, kronrod=false,
                noise_field=nothing)
     _setup_modal(ComplexF64, grid, densityfun, responses, inputs, modes, components;
                  modal_integral, arraytype, full, norm!, rtol, atol, mfcn, nr, nθ, kronrod,
