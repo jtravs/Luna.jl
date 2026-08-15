@@ -26,6 +26,11 @@ import .Utils: Backend, CPUBackend, DeviceBackend, backend, isdevice
 # precompilation ("Method overwriting is not permitted"), which leaves the extension
 # uncompilable and silently recompiled in every process that loads it. Function-valued
 # hooks sidestep the problem entirely.
+#
+# The hooks are called through `Base.invokelatest` because the GPU package may have been
+# loaded *during* the call that is now using them (see `resolve_arraytype`), in which
+# case its methods are "too new" for the calling world. These run once per simulation,
+# never per step, so the dynamic dispatch costs nothing.
 const _DEVICE_RECLAIM = Ref{Any}(nothing)
 const _DEVICE_SYNCHRONIZE = Ref{Any}(nothing)
 const _DEVICE_MEMORY_STATUS = Ref{Any}(nothing)
@@ -38,7 +43,7 @@ Return cached device memory to the driver. A no-op unless a GPU package is loade
 `ext/LunaCUDAExt.jl`). Call between independent simulations in a long-lived process:
 GPU array libraries keep a memory pool that is not released on garbage collection alone.
 """
-device_reclaim() = (f = _DEVICE_RECLAIM[]; isnothing(f) ? nothing : f())
+device_reclaim() = (f = _DEVICE_RECLAIM[]; isnothing(f) ? nothing : Base.invokelatest(f))
 
 """
     device_synchronize()
@@ -47,7 +52,7 @@ Block until all queued device work has completed. A no-op unless a GPU package i
 loaded. Only needed for timing — Luna's own code paths are synchronised implicitly by
 the data dependencies between kernels.
 """
-device_synchronize() = (f = _DEVICE_SYNCHRONIZE[]; isnothing(f) ? nothing : f())
+device_synchronize() = (f = _DEVICE_SYNCHRONIZE[]; isnothing(f) ? nothing : Base.invokelatest(f))
 
 """
     device_memory_status() -> (free, total) in bytes, or `nothing`
@@ -55,7 +60,7 @@ device_synchronize() = (f = _DEVICE_SYNCHRONIZE[]; isnothing(f) ? nothing : f())
 Free and total device memory, or `nothing` when no GPU package is loaded. Useful for
 logging the high-water mark of a propagation.
 """
-device_memory_status() = (f = _DEVICE_MEMORY_STATUS[]; isnothing(f) ? nothing : f())
+device_memory_status() = (f = _DEVICE_MEMORY_STATUS[]; isnothing(f) ? nothing : Base.invokelatest(f))
 
 """
     select_device(i)
@@ -66,7 +71,7 @@ process. A no-op unless a GPU package is loaded.
 Under Slurm it is usually better to let the batch script set `CUDA_VISIBLE_DEVICES` per
 process, so each process sees exactly one device and needs no explicit selection.
 """
-select_device(i::Integer) = (f = _DEVICE_SELECT[]; isnothing(f) ? nothing : f(i))
+select_device(i::Integer) = (f = _DEVICE_SELECT[]; isnothing(f) ? nothing : Base.invokelatest(f, i))
 
 #=================================================#
 #===========  ARRAY TYPE RESOLUTION  =============#
