@@ -20,7 +20,8 @@ Eω, grid, linop, transform, FT, output = Interface.prop_capillary_args(
     trange=400e-15, λlims=(90e-9, 4e-6), shotnoise=false, saveN=3,
     stats_kwargs=Dict(:mode_error => false), modal_integral=:fixed, nr=128)
 Luna.run(Eω, grid, linop, transform, FT, output; status_period=30)
-Ez = output["Eω"][:, :, end]; z = output["z"][end]
+# use the middle of the fibre: the density (and hence the polarisation) vanishes at the exit
+Ez = output["Eω"][:, :, 2]; z = output["z"][2]
 ρ = transform.densityfun(z)
 ts = transform.ts
 Ip = PhysData.ionisation_potential(:He)
