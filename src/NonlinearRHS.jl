@@ -594,6 +594,8 @@ function TransModalFixed(tT, grid, ts::Modes.ToSpace, resp, densityfun, norm!;
     IFT = inv(FT)
     if !isnothing(noise_field)
         # the noise enters linearly, so it can be transformed to the time domain once
+        # (a single-mode noise field may be a plain vector)
+        noise_field = reshape(noise_field, nω, nmodes)
         Emt_noise_h = zeros(tT, (nto, nmodes))
         FTh = arraytype === Array ? FT : _plan_forward(Emt_noise_h, 1)
         to_time!(Emt_noise_h, noise_field, zeros(ComplexF64, (nωo, nmodes)), inv(FTh))

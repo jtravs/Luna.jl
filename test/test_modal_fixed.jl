@@ -9,8 +9,8 @@ import Random: MersenneTwister
 # cubature TransModal at tight tolerance. Kerr is a quartic in the mode fields, so both are
 # exact to rounding; a smooth (ADK) plasma converges to ~1e-9 on a few tens of nodes.
 
-const a = 100e-6
-const λ0 = 800e-9
+a = 100e-6
+λ0 = 800e-9
 
 function modal_setup(grid, modes, components, resp; energies, kwargs...)
     inputs = Tuple((mode=i, fields=(Fields.GaussField(λ0=λ0, τfwhm=15e-15, energy=e),))

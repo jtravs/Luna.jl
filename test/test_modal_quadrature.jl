@@ -14,7 +14,7 @@ function gram(Ems, w)
     G
 end
 # ∫|Exy|² dA for Luna's normalisation
-const Nnorm = 2/(PhysData.ε_0*PhysData.c)
+Nnorm = 2/(PhysData.ε_0*PhysData.c)
 
 @testset "Rules" begin
     a = 100e-6

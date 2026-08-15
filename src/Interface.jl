@@ -318,15 +318,18 @@ In this case, all keyword arguments except for `λ0` are ignored.
 - `loss::Bool`: Whether to include propagation loss. Defaults to `true`.
 - `temperature::Number`: Temperature of the gas in Kelvin. Defaults to room temperature.
 - `modal_integral::Symbol`: how the transverse integral of the nonlinear polarisation is
-    evaluated in multimode simulations. `:adaptive` (default) uses adaptive cubature to
-    the relative tolerance `radial_integral_rtol` ([`NonlinearRHS.TransModal`](@ref));
-    `:fixed` uses a fixed quadrature rule with `nr` radial (`nθ` azimuthal) nodes
-    ([`NonlinearRHS.TransModalFixed`](@ref)), which is threaded on the CPU and can run on a
-    GPU. Kerr is exact on the fixed rule for `nr ≳ 6` per radial mode order; the plasma
-    term converges quickly for smooth ionisation rates (ADK, or PPT with
-    `PPT_options=Dict(:sum_integral=>true)`) but only slowly for the default PPT rate,
-    whose channel-closing kinks limit any quadrature — `nr=128` gives ~3e-3 on the plasma
-    term for four HE₁ₘ modes, `nr=512` ~1e-3.
+    evaluated in multimode simulations. `:fixed` (default) uses a fixed quadrature rule
+    with `nr` radial (`nθ` azimuthal) nodes ([`NonlinearRHS.TransModalFixed`](@ref)),
+    which is threaded on the CPU and can run on a GPU; `:adaptive` uses adaptive cubature
+    to the relative tolerance `radial_integral_rtol` ([`NonlinearRHS.TransModal`](@ref)),
+    which is serial and host-only. Kerr is exact on the fixed rule for `nr ≳ 6` per radial
+    mode order; the plasma term converges quickly for smooth ionisation rates (ADK, or PPT
+    with `PPT_options=Dict(:sum_integral=>true)`, for which `nr=32` is fully converged) but
+    only slowly for the default PPT rate, whose channel-closing kinks limit any quadrature —
+    `nr=128` gives ~3e-3 on the plasma term for four HE₁ₘ modes, `nr=512` ~1e-3, and the
+    end-of-fibre fields of long ionising propagations then differ at the per-cent level
+    between rules (including the adaptive one), which is the model's own quadrature noise
+    rather than a property of either transform.
 - `radial_integral_rtol::Float64`: relative tolerance for `modal_integral=:adaptive`.
 - `nr::Int`, `nθ::Int`: quadrature nodes for `modal_integral=:fixed`. Defaults 128 and 16.
 - `arraytype`: `Array` (default), `:cpu`, `:cuda` or a GPU array type. Anything but the
@@ -398,7 +401,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         rng=GLOBAL_RNG,
                         modes=:HE11, model=:full, loss=true,
                         radial_integral_rtol=1e-3,
-                        modal_integral=:adaptive, nr=128, nθ=16, arraytype=Array,
+                        modal_integral=:fixed, nr=128, nθ=16, arraytype=Array,
                         raman=nothing, kerr=true, plasma=nothing,
                         stats_kwargs=Dict{Symbol, Any}(),
                         PPT_options=Dict{Symbol, Any}(), preionfrac=0.0,
@@ -886,7 +889,7 @@ needfull(modes) = !all(modes) do mode
 end
 
 function setup(grid, modes, density, responses, inputs, pol, rtol, c::Val{true};
-               noise_field=nothing, modal_integral=:adaptive, nr=128, nθ=16, kronrod=false,
+               noise_field=nothing, modal_integral=:fixed, nr=128, nθ=16, kronrod=false,
                arraytype=Array)
     nf = needfull(modes)
     @info(nf ? "Using full 2-D modal integral." : "Using radial modal integral.")
@@ -898,7 +901,7 @@ function setup(grid, modes, density, responses, inputs, pol, rtol, c::Val{true};
 end
 
 function setup(grid, modes, density, responses, inputs, pol, rtol, c::Val{false};
-               noise_field=nothing, modal_integral=:adaptive, nr=128, nθ=16, kronrod=false,
+               noise_field=nothing, modal_integral=:fixed, nr=128, nθ=16, kronrod=false,
                arraytype=Array)
     nf = needfull(modes)
     @info(nf ? "Using full 2-D modal integral." : "Using radial modal integral.")

@@ -200,10 +200,10 @@ end
 Set up a multimode (modal) propagation, returning `(Eω, transform, FT)`.
 
 # Keyword arguments
-- `modal_integral=:adaptive`: how the transverse nonlinear integral is evaluated:
-  `:adaptive` builds a [`NonlinearRHS.TransModal`](@ref) (adaptive cubature, host only) and
-  `:fixed` a [`NonlinearRHS.TransModalFixed`](@ref) (fixed quadrature; threaded on the host,
-  runs on a device with `arraytype`).
+- `modal_integral=:fixed`: how the transverse nonlinear integral is evaluated:
+  `:fixed` builds a [`NonlinearRHS.TransModalFixed`](@ref) (fixed quadrature; threaded on
+  the host, runs on a device with `arraytype`) and `:adaptive` a
+  [`NonlinearRHS.TransModal`](@ref) (adaptive cubature, host only).
 - `full=false`: use the full 2-D transverse integral rather than the radial one.
 - `norm!`: normalisation function, defaults to [`NonlinearRHS.norm_modal`](@ref).
 - `rtol=1e-3, atol=0.0, mfcn=512`: cubature tolerances for `:adaptive`.
@@ -215,7 +215,7 @@ Set up a multimode (modal) propagation, returning `(Eω, transform, FT)`.
 """
 function setup(grid::Grid.RealGrid, densityfun, responses, inputs,
                modes::Modes.ModeCollection, components;
-               modal_integral=:adaptive, arraytype=Array,
+               modal_integral=:fixed, arraytype=Array,
                full=false, norm! = NonlinearRHS.norm_modal(grid; arraytype),
                rtol=1e-3, atol=0.0, mfcn=512, nr=128, nθ=16, kronrod=false,
                noise_field=nothing)
@@ -226,7 +226,7 @@ end
 
 function setup(grid::Grid.EnvGrid, densityfun, responses, inputs,
                modes::Modes.ModeCollection, components;
-               modal_integral=:adaptive, arraytype=Array,
+               modal_integral=:fixed, arraytype=Array,
                full=false, norm! = NonlinearRHS.norm_modal(grid; arraytype),
                rtol=1e-3, atol=0.0, mfcn=512, nr=128, nθ=16, kronrod=false,
                noise_field=nothing)
