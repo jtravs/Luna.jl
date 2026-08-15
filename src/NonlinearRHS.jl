@@ -334,7 +334,7 @@ function pointcalc!(fval, xs, t::TransModal)
             if t.dimlimits[1] == :polar
                 pre = x1
             else
-                if x2 <= t.dimlimits[2][2] || x1 >= t.dimlimits[3][2]
+                if x2 <= t.dimlimits[2][2] || x2 >= t.dimlimits[3][2]
                     fval[:, i] .= 0.0
                     continue
                 end
