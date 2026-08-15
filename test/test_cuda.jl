@@ -183,6 +183,56 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                 # plan assumes <= 1 field of cuFFT workspace; flag if that is wrong.
                 @test run_fields < 14
             end
+
+            @testset "TransModalFixed on CUDA" begin
+                # The modal path on hardware: real-to-complex batched cuFFT plans, CUBLAS
+                # GEMMs, and — the parts JLArrays cannot prove — the cached-PPT spline and
+                # ADK rate compiled into device kernels, and the doubling scan.
+                import Luna: Capillary, Ionisation, Stats, Interface
+                λ0 = 800e-9
+                a = 100e-6
+                grid = Grid.RealGrid(4e-3, λ0, (200e-9, 3000e-9), 200e-15)
+                modes = [Capillary.MarcatiliMode(a, :Ar, 3.0; n=1, m=m) for m in 1:3]
+                densityfun = let d = PhysData.density(:Ar, 3.0); z -> d end
+                Ip = PhysData.ionisation_potential(:Ar)
+                inputs = ((mode=1, fields=(Fields.GaussField(λ0=λ0, τfwhm=15e-15, energy=100e-6),)),
+                          (mode=2, fields=(Fields.GaussField(λ0=λ0, τfwhm=15e-15, energy=10e-6),)))
+                relerr(x, y) = sqrt(sum(abs2, x .- y)/sum(abs2, y))
+                function make(arraytype, ionrate)
+                    resp = (Nonlinear.Kerr_field(PhysData.γ3_gas(:Ar)),
+                            Nonlinear.PlasmaCumtrapz(grid.to, grid.to, ionrate, Ip))
+                    Luna.setup(grid, densityfun, resp, inputs, modes, :y;
+                               modal_integral=:fixed, nr=33, kronrod=true, arraytype)
+                end
+                for ionrate in (Ionisation.IonRateADK(:Ar),
+                                Ionisation.IonRatePPTAccel(:Ar, λ0; N=2^14, cache=false))
+                    Eωh, th, FTh = make(Array, ionrate)
+                    Eωd, td, FTd = make(CuArray, ionrate)
+                    @test Eωd isa CuArray && td.Et isa CuArray
+                    nlh = similar(Eωh); th(nlh, Eωh, 0.0)
+                    nld = similar(Eωd); td(nld, Eωd, 0.0)
+                    rel = relerr(Array(nld), nlh)
+                    @info "CUDA modal transform vs host" ionrate=typeof(ionrate).name.name rel
+                    @test rel < 1e-10
+                    errh = Array(NonlinearRHS.integral_error!(td))
+                    @test all(isfinite, errh)
+                end
+                # end-to-end with the pressure gradient (z-dependent operator evaluated on
+                # the host and uploaded) through the simple interface, versus the host
+                oh = Interface.prop_capillary(a, 5e-3, :Ar, (3.0, 1.0); λ0, τfwhm=15e-15,
+                        energy=100e-6, modes=3, trange=200e-15, λlims=(200e-9, 3000e-9),
+                        shotnoise=false, saveN=3, plasma=:ADK, modal_integral=:fixed, nr=33)
+                od = Interface.prop_capillary(a, 5e-3, :Ar, (3.0, 1.0); λ0, τfwhm=15e-15,
+                        energy=100e-6, modes=3, trange=200e-15, λlims=(200e-9, 3000e-9),
+                        shotnoise=false, saveN=3, plasma=:ADK, modal_integral=:fixed, nr=33,
+                        arraytype=:cuda)
+                rel = relerr(od["Eω"], oh["Eω"])
+                @info "CUDA modal propagation vs host" rel
+                @test rel < 1e-8
+                @test isapprox(od["stats"]["energy"], oh["stats"]["energy"]; rtol=1e-6)
+                @test isapprox(od["stats"]["electrondensity"], oh["stats"]["electrondensity"];
+                               rtol=1e-4)
+            end
         end
     end
 else
