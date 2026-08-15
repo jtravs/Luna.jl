@@ -629,6 +629,11 @@ end
 
 batched(::RamanPolarEnvBatched) = true
 
+# a columnwise envelope Raman response can always be replaced by its batched equivalent
+# (same response function and time grid); the batched form allocates its own buffers
+batched_response(R::RamanPolarEnv; arraytype=Array) =
+    RamanPolarEnvBatched(range(0.0, step=R.dt, length=length(R.ht)), R.r)
+
 function RamanPolarEnvBatched(t, r)
     h = zeros(length(t)*2) # note double grid size, see explanation in (R::RamanPolar)
     ht = view(h, 1:length(t))

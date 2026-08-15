@@ -240,14 +240,18 @@ if have_jlarrays
         pinv::AbstractFFTs.ScaledPlan
         JLPlan{T, N, P}(hp, sz, dims) where {T, N, P} = new{T, N, P}(hp, sz, dims)
     end
-    JLPlan(hp, sz::NTuple{N, Int}, dims) where {N} =
-        JLPlan{ComplexF64, N, typeof(hp)}(hp, sz, dims)
+    JLPlan(hp, sz::NTuple{N, Int}, dims, T=ComplexF64) where {N} =
+        JLPlan{T, N, typeof(hp)}(hp, sz, dims)
     Base.size(p::JLPlan) = p.sz
     Base.eltype(::JLPlan{T}) where {T} = T
     AbstractFFTs.plan_fft(x::JLArrays.JLArray, dims) =
         JLPlan(FFTW.plan_fft(Array(x), dims), size(x), dims)
+    # real-to-complex (the modal transforms on a RealGrid); the inverse is a ScaledPlan
+    # around the unnormalised c2r plan, with the *real* size setting the normalisation
+    AbstractFFTs.plan_rfft(x::JLArrays.JLArray{Float64}, dims) =
+        JLPlan(FFTW.plan_rfft(Array(x), dims), size(x), dims, Float64)
     AbstractFFTs.plan_inv(p::JLPlan) =
-        AbstractFFTs.ScaledPlan(JLPlan(inv(p.hp).p, p.sz, p.dims),
+        AbstractFFTs.ScaledPlan(JLPlan(inv(p.hp).p, p.sz, p.dims, ComplexF64),
                                 AbstractFFTs.normalization(Float64, p.sz, p.dims))
     Base.:*(p::JLPlan, x::JLArrays.JLArray) = JLArrays.JLArray(p.hp * Array(x))
     LinearAlgebra.mul!(y::JLArrays.JLArray, p::JLPlan, x::JLArrays.JLArray) =
@@ -518,6 +522,91 @@ if have_jlarrays
         @test (propagate(JLArray; statsfun=somestats, allow_device_stats=true); true)
         # ...and it is not refused on the host
         @test (propagate(Array; statsfun=somestats); true)
+    end
+
+    @testset "TransModalFixed on device" begin
+        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields, Modes,
+                     Capillary, Ionisation, Stats
+        JLArray = JLArrays.JLArray
+        λ0 = 800e-9
+        a = 100e-6
+        grid = Grid.RealGrid(4e-3, λ0, (200e-9, 3000e-9), 200e-15)
+        modes = [Capillary.MarcatiliMode(a, :Ar, 3.0; n=1, m=m) for m in 1:3]
+        ρ0 = PhysData.density(:Ar, 3.0)
+        densityfun = z -> ρ0
+        Ip = PhysData.ionisation_potential(:Ar)
+        inputs = ((mode=1, fields=(Fields.GaussField(λ0=λ0, τfwhm=15e-15, energy=100e-6),)),
+                  (mode=2, fields=(Fields.GaussField(λ0=λ0, τfwhm=15e-15, energy=10e-6),)))
+        relerr(x, y) = sqrt(sum(abs2, x .- y)/sum(abs2, y))
+
+        function make(arraytype, ionrate; kwargs...)
+            resp = (Nonlinear.Kerr_field(PhysData.γ3_gas(:Ar)),
+                    Nonlinear.PlasmaCumtrapz(grid.to, grid.to, ionrate, Ip))
+            Luna.setup(grid, densityfun, resp, inputs, modes, :y;
+                       modal_integral=:fixed, nr=32, arraytype, kwargs...)
+        end
+
+        for ionrate in (Ionisation.IonRateADK(:Ar),
+                        Ionisation.IonRatePPTAccel(:Ar, λ0; N=2^12, cache=false))
+            Eωh, th, FTh = make(Array, ionrate)
+            Eωd, td, FTd = make(JLArray, ionrate)
+            @test Eωd isa JLArray
+            @test td.Et isa JLArray && td.S isa JLArray && td.Emωo isa JLArray
+            @test NonlinearRHS.scratch(td) isa JLArray
+            @test td.resp_eval[2] isa Nonlinear.PlasmaCumtrapzBatched
+            @test td.resp[2] isa Nonlinear.PlasmaCumtrapz # the originals are kept
+            nlh = similar(Eωh); th(nlh, Eωh, 0.0)
+            nld = similar(Eωd); td(nld, Eωd, 0.0)
+            # ionisation is happening (the plasma term matters at this energy)
+            @test relerr(Array(nld), nlh) < 1e-10
+            @test td.resp_eval[2].P isa JLArray
+            # the embedded error estimate and Stats run with a device transform
+            @test all(isnan, Array(NonlinearRHS.integral_error!(td))) # no Kronrod rule
+            statf = Stats.mode_reconstruction_error(td)
+            d = Dict{String, Any}(); statf(d, Eωh, nothing, 0.0, 0.0)
+            @test d["transverse_points"] == 32
+            @test isfinite(d["mode_reconstruction_error"])
+        end
+
+        # a whole propagation on device arrays versus the host, with a z-dependent linear
+        # operator (evaluated on the host and uploaded by RK45.make_prop!) and with the
+        # default statistics (host copies of the small modal state on every step)
+        function propagate(arraytype; kwargs...)
+            Eω, transform, FT = make(arraytype, Ionisation.IonRateADK(:Ar))
+            linop = LinearOps.make_linop(grid, modes, λ0)
+            statsfun = Stats.default(grid, Eω, modes, linop, transform; gas=:Ar)
+            output = Output.MemoryOutput(0, grid.zmax, 3, statsfun)
+            Luna.run(Eω, grid, linop, transform, FT, output; max_dz=Inf,
+                     init_dz=grid.zmax/50, rtol=1e-8, step_on=collect(range(0, grid.zmax, 3)),
+                     kwargs...)
+            output
+        end
+        oh = propagate(Array)
+        od = propagate(JLArray; allow_device_stats=true)
+        @test od["Eω"] isa Array
+        @test relerr(od["Eω"], oh["Eω"]) < 1e-10
+        @test isapprox(od["stats"]["energy"], oh["stats"]["energy"]; rtol=1e-8)
+        @test isapprox(od["stats"]["electrondensity"], oh["stats"]["electrondensity"];
+                       rtol=1e-6)
+        # constant linear operator built on the host is uploaded by Luna.run
+        Eω, transform, FT = make(JLArray, Ionisation.IonRateADK(:Ar))
+        linop = LinearOps.make_const_linop(grid, modes, λ0)
+        @test linop isa Array
+        output = Output.MemoryOutput(0, grid.zmax, 2)
+        Luna.run(Eω, grid, linop, transform, FT, output; max_dz=Inf, init_dz=grid.zmax/50)
+        @test isapprox(output["Eω"][:, :, end], oh["Eω"][:, :, end]; rtol=1e-3)
+
+        # error paths
+        @test_throws ErrorException Luna.setup(grid, densityfun,
+            (Nonlinear.Kerr_field(PhysData.γ3_gas(:Ar)),), inputs, modes, :y;
+            modal_integral=:adaptive, arraytype=JLArray)
+        # a columnwise-only response cannot run on a device
+        Eω, transform, FT = Luna.setup(grid, densityfun,
+            (Nonlinear.Kerr_field_nothg(PhysData.γ3_gas(:Ar), length(grid.to)),), inputs,
+            modes, :y; modal_integral=:fixed, nr=16, arraytype=JLArray)
+        @test_throws ErrorException transform(similar(Eω), Eω, 0.0)
+        # ...nor can the direct PPT rate
+        @test_throws ErrorException make(JLArray, Ionisation.IonRatePPT(:Ar, λ0))
     end
 
     @testset "device error norms" begin

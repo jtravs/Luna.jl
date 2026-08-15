@@ -32,15 +32,16 @@ import Test: @test, @testset, @test_throws
     )
     energyfun, energyfunω = Fields.energyfuncs(grid)
     inputs = Fields.GaussField(λ0=λ0, τfwhm=τ, energy=1e-6)
-    Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
-                                modes, :y; full=false)
-    outputr = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
-    linop = LinearOps.make_const_linop(grid, modes, λ0)
-    Luna.run(Eω, grid, linop, transform, FT, outputr, status_period=10)
-
     Iω = abs2.(output.data["Eω"])
-    Iωr = abs2.(dropdims(outputr.data["Eω"], dims=2))
-    @test norm(Iω - Iωr)/norm(Iω) < 0.003
+    for modal_integral in (:adaptive, :fixed)
+        Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
+                                       modes, :y; full=false, modal_integral, nr=32)
+        outputr = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
+        linop = LinearOps.make_const_linop(grid, modes, λ0)
+        Luna.run(Eω, grid, linop, transform, FT, outputr, status_period=10)
+        Iωr = abs2.(dropdims(outputr.data["Eω"], dims=2))
+        @test norm(Iω - Iωr)/norm(Iω) < 0.003
+    end
 end
 
 @testset "Full" begin
@@ -77,15 +78,16 @@ end
     )
     energyfun, energyfunω = Fields.energyfuncs(grid)
     inputs = Fields.GaussField(λ0=λ0, τfwhm=τ, energy=1e-6)
-    Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
-                                modes, :y; full=true)
-    outputf = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
-    linop = LinearOps.make_const_linop(grid, modes, λ0)
-    Luna.run(Eω, grid, linop, transform, FT, outputf, status_period=10)
-
     Iω = abs2.(output.data["Eω"])
-    Iωf = abs2.(dropdims(outputf.data["Eω"], dims=2))
-    @test norm(Iω - Iωf)/norm(Iω) < 0.003
+    for modal_integral in (:adaptive, :fixed)
+        Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
+                                       modes, :y; full=true, modal_integral, nr=32, nθ=8)
+        outputf = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
+        linop = LinearOps.make_const_linop(grid, modes, λ0)
+        Luna.run(Eω, grid, linop, transform, FT, outputf, status_period=10)
+        Iωf = abs2.(dropdims(outputf.data["Eω"], dims=2))
+        @test norm(Iω - Iωf)/norm(Iω) < 0.003
+    end
 end
 
 @testset "Full, LP11 vs TM01" begin
@@ -129,15 +131,16 @@ end
     field = Fields.GaussField(λ0=λ0, τfwhm=τ, energy=energy/2)
     inputs = ((mode=1, fields=(field,)), (mode=2, fields=(field,)))
     # inputs = Fields.GaussField(λ0=λ0, τfwhm=τ, energy=energy)
-    Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
-                                   modes, :xy; full=true)
-    outputf = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
-    linop = LinearOps.make_const_linop(grid, modes, λ0)
-    Luna.run(Eω, grid, linop, transform, FT, outputf, status_period=10)
-
     Iω = abs2.(output["Eω"])
-    Iωf = dropdims(sum(abs2.(outputf["Eω"]); dims=2), dims=2)
-    @test norm(Iω - Iωf)/norm(Iω) < 0.0006
+    for modal_integral in (:adaptive, :fixed)
+        Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
+                                       modes, :xy; full=true, modal_integral, nr=32, nθ=12)
+        outputf = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
+        linop = LinearOps.make_const_linop(grid, modes, λ0)
+        Luna.run(Eω, grid, linop, transform, FT, outputf, status_period=10)
+        Iωf = dropdims(sum(abs2.(outputf["Eω"]); dims=2), dims=2)
+        @test norm(Iω - Iωf)/norm(Iω) < 0.0006
+    end
 end
 
 @testset "FieldInputs" begin
@@ -200,15 +203,18 @@ end
     field = Fields.GaussField(;λ0, τfwhm, energy=energy/2)
     inputs = ((mode=1, fields=(field,)), (mode=2, fields=(field,)))
 
-    Eω, transform, FT = Luna.setup(
-        grid, densityfun, responses, inputs, modes, :xy; full=true)
-    nl = similar(Eω)
+    for modal_integral in (:adaptive, :fixed)
+        Eω, transform, FT = Luna.setup(
+            grid, densityfun, responses, inputs, modes, :xy; full=true, modal_integral,
+            nr=32, nθ=12)
+        nl = similar(Eω)
 
-    transform(nl, Eω, 0.0);
-    # nonlinear polarisation in LP11
-    Inl12 = dropdims(sum(abs2.(nl[:, 1:2]); dims=2); dims=2)
-    # nonlinear polarisation in HE11
-    Inl3 = abs2.(nl[:, 3])
-    # LP11 should not couple nonlinearly to HE11
-    @test norm(Inl3)/norm(Inl12) < 1e-32
+        transform(nl, Eω, 0.0);
+        # nonlinear polarisation in LP11
+        Inl12 = dropdims(sum(abs2.(nl[:, 1:2]); dims=2); dims=2)
+        # nonlinear polarisation in HE11
+        Inl3 = abs2.(nl[:, 3])
+        # LP11 should not couple nonlinearly to HE11 (rounding only)
+        @test norm(Inl3)/norm(Inl12) < 1e-30
+    end
 end

@@ -1,7 +1,7 @@
 import Test: @test, @testset, @test_throws
 import Luna: Output
 
-@testset "Linear" begin
+@testset "Linear ($modal_integral)" for modal_integral in (:adaptive, :fixed)
     # compare radial single pol, to radial linear pol at 45 degrees,
     # in capillary (non birefringent) these should be identical
 
@@ -24,7 +24,7 @@ import Luna: Output
     )
     inputs = Fields.GaussField(λ0=λ0, τfwhm=τ, energy=energy)
     Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
-                                modes, :y; full=true)
+                                modes, :y; full=true, modal_integral, nr=32, nθ=12)
     statsfun = Stats.collect_stats(grid, Eω,
                                 Stats.ω0(grid),
                                 Stats.peakintensity(grid, modes, components=:xy),
@@ -42,7 +42,7 @@ import Luna: Output
     # same field in each mode
     inputs = ((mode=1, fields=inf), (mode=2, fields=inf))
     Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
-                                modes, :xy; full=true)
+                                modes, :xy; full=true, modal_integral, nr=32, nθ=12)
     statsfun = Stats.collect_stats(grid, Eω,
                                 Stats.ω0(grid),
                                 Stats.peakintensity(grid, modes, components=:xy),

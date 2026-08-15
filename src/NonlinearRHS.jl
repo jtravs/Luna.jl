@@ -701,10 +701,23 @@ rule is the Gauss subset of the Kronrod rule in r (only if constructed with
 `kronrod=true`) and every other node in θ. Returns `t.err`.
 """
 function integral_error!(t::TransModalFixed)
+    if !has_error_estimate(t)
+        fill!(t.err, NaN)
+        return t.err
+    end
     mul!(t.Pmt, t.Pt, t.Wc)
     mul!(t.Pmt, t.Pt, t.Wp, -1.0, 1.0)
     _finish_modal!(t.err, t, t.Pmt)
 end
+
+"""
+    has_error_estimate(t::TransModalFixed)
+
+Whether the quadrature rule of `t` has an embedded coarse rule (Kronrod in r, or an even
+number of θ nodes) so that [`integral_error!`](@ref) is meaningful.
+"""
+has_error_estimate(t::TransModalFixed) =
+    t.quad.kronrod || (t.full && iseven(t.quad.nθ) && t.quad.nθ >= 4)
 
 """
     apply_responses!(Pt, Et, responses, density, npol)
@@ -718,13 +731,15 @@ call with a contiguous `(nto, npol)` view per node — the legacy responses own 
 buffers and are not thread-safe, and this path cannot run on a device.
 """
 function apply_responses!(Pt, Et, responses, density, npol)
+    nto = size(Et, 1)
+    npts = size(Et, 2) ÷ npol
+    Et3 = reshape(Et, nto, npol, npts)
+    Pt3 = reshape(Pt, nto, npol, npts)
     if npol == 1
-        Et_to_Pt_ordered!(Pt, Et, responses, density, CartesianIndices((size(Et, 2),)))
+        # (nto, 1, npts): a scalar field per column, as the batched free-space responses
+        # expect a 3-D array and the columnwise ones a vector view per node
+        Et_to_Pt_ordered!(Pt3, Et3, responses, density, CartesianIndices((1, npts)))
     else
-        nto = size(Et, 1)
-        npts = size(Et, 2) ÷ npol
-        Et3 = reshape(Et, nto, npol, npts)
-        Pt3 = reshape(Pt, nto, npol, npts)
         fill!(Pt3, 0)
         _apply_vector!(Pt3, Et3, responses, density)
     end

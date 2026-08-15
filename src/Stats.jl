@@ -1,11 +1,13 @@
 module Stats
 import Luna: Maths, Grid, Modes, Utils, settings, PhysData, Fields, Processing
 import Luna.PhysData: wlfreq, c, ε_0
-import Luna.NonlinearRHS: TransModal, TransModeAvg, Erω_to_Prω!
+import Luna.NonlinearRHS: TransModal, TransModalFixed, TransModeAvg, Erω_to_Prω!, Et_to_Pt!,
+                          to_freq!, integral_error!
 import Luna.Nonlinear: PlasmaCumtrapz
 import Luna.Capillary: MarcatiliMode
 import FFTW
-import LinearAlgebra: mul!
+import Adapt
+import LinearAlgebra: mul!, norm
 import Printf: @sprintf
 import Logging: @warn
 
@@ -316,6 +318,79 @@ function mode_reconstruction_error(t::TransModal)
 end
 
 """
+    mode_reconstruction_error(t::TransModalFixed; window=nothing)
+
+Create a stats function for a fixed-quadrature modal transform which collects, at every
+step, the mode reconstruction error of the on-axis nonlinear polarisation (the modal
+expansion of the polarisation projected back to `r=0` against the polarisation evaluated
+directly there), the number of quadrature nodes, and the embedded quadrature error
+estimate of the transform ([`NonlinearRHS.integral_error!`](@ref)) as an RMS value, relative
+to the RMS polarisation, and — if `window=(λmin, λmax)` is given — relative to the
+polarisation within that wavelength window (`"transverse_integral_error_rel_window"`), which
+is the relevant measure for weak spectral features such as dispersive waves.
+
+The transform is evaluated once per step (cheap for the fixed rule); on a device the
+modal field is uploaded for that and the results are copied back.
+"""
+function mode_reconstruction_error(t::TransModalFixed; window=nothing)
+    grid = t.grid
+    nω, nmodes = size(t.err)
+    nto = length(grid.to)
+    npol = t.ts.npol
+    tT = eltype(t.Emt)
+    ondevice = Utils.isdevice(t.err)
+    nl = similar(t.err)
+    Eωd = ondevice ? similar(t.err) : nothing
+    nlh = Array{ComplexF64}(undef, nω, nmodes)
+    errh = Array{ComplexF64}(undef, nω, nmodes)
+    Emth = Array{tT}(undef, nto, nmodes)
+    Er = Array{tT}(undef, nto, npol)
+    Pr = similar(Er)
+    Prω = Array{ComplexF64}(undef, nω, npol)
+    Prωo = Array{ComplexF64}(undef, length(grid.ωo), npol)
+    Prω_recon = similar(Prω)
+    Utils.loadFFTwisdom()
+    FTo = tT <: Real ? FFTW.plan_rfft(Pr, 1, flags=settings["fftw_flag"]) :
+                       FFTW.plan_fft(Pr, 1, flags=settings["fftw_flag"])
+    Utils.saveFFTwisdom()
+    # the normalisation factor of the transform as a host vector (it may live on a device)
+    nfac = similar(t.err, nω, 1); fill!(nfac, 1); t.norm!(nfac)
+    nfach = Adapt.adapt(Array, nfac)
+    windowidcs = isnothing(window) ? nothing :
+                 (window[1] .<= wlfreq.(grid.ω) .<= window[2]) .& grid.sidx
+    function addstat!(d, Eω, Et, z, dz)
+        if ondevice
+            copyto!(Eωd, Eω)
+            t(nl, Eωd, z)
+        else
+            t(nl, Eω, z)
+        end
+        copyto!(nlh, nl)
+        # reconstruct the on-axis polarisation from its modal expansion
+        Modes.to_space!(Prω_recon, nlh, (0.0, 0.0), t.ts, z=z)
+        # in going to modes and back we've picked up two factors of the mode normalisation
+        Prω_recon .*= 1/2*sqrt(PhysData.ε_0/PhysData.μ_0)
+        # and evaluate it directly on axis with the columnwise responses
+        copyto!(Emth, isnothing(t.Emt_noise) ? t.Emt : t.Emt_nl)
+        Ems0 = Modes.mode_matrix(t.ts.ms, t.ts.indices, [(0.0, 0.0)]; z)[:, :, 1]
+        mul!(Er, Emth, Ems0)
+        Et_to_Pt!(Pr, Er, t.resp, t.density)
+        Pr .*= grid.towin
+        to_freq!(Prω, Prωo, Pr, FTo)
+        Prω .*= grid.ωwin
+        Prω .*= nfach
+        d["mode_reconstruction_error"] = norm(Prω_recon .- Prω)/norm(Prω_recon)
+        d["transverse_points"] = float(t.ncalls)
+        copyto!(errh, integral_error!(t))
+        d["transverse_integral_error_abs"] = sqrt(sum(abs2, errh)/length(errh))
+        d["transverse_integral_error_rel"] = d["transverse_integral_error_abs"]/sqrt(sum(abs2, nlh)/length(nlh))
+        if !isnothing(windowidcs)
+            d["transverse_integral_error_rel_window"] = norm(errh[windowidcs, :])/norm(nlh[windowidcs, :])
+        end
+    end
+end
+
+"""
     density(dfun)
 
 Create stats function to capture the gas density as defined by `dfun(z)`
@@ -478,6 +553,9 @@ function collect_stats(grid, Eω, funcs...)
     if !(zdz! in funcs)
         funcs = (funcs..., zdz!)
     end
+    # statistics run on the host; the state may live on a device (Luna.run then hands the
+    # statistics function a host copy at every step)
+    Eω = Adapt.adapt(Array, Eω)
     Et, analytic! = plan_analytic(grid, Eω)
     f = let funcs=funcs
         function collect_stats(Eω, z, dz)
@@ -494,6 +572,7 @@ end
 
 function default(grid, Eω, mode::Modes.AbstractMode, linop, transform;
                  windows=nothing, gas=nothing, onaxis=false, userfuns=Any[])
+    Eω = Adapt.adapt(Array, Eω)
     _, energyfunω = Fields.energyfuncs(grid)
     funs = [ω0(grid), energy(grid, energyfunω), peakpower(grid),
             fwhm_t(grid), zdw_linop(mode, linop),
@@ -531,8 +610,25 @@ function default(grid, Eω, mode::Modes.AbstractMode, linop, transform;
     collect_stats(grid, Eω, funs...)
 end
 
+"""
+    default(grid, Eω, modes, linop, transform; kwargs...)
+
+Default statistics for multimode propagation.
+
+# Keyword arguments
+- `windows`: wavelength windows `(λmin, λmax)` for which to record the energy.
+- `gas`: gas species, to record the pressure.
+- `mode_error=true`: record the mode reconstruction error and transverse integral error
+  (see [`mode_reconstruction_error`](@ref)).
+- `error_window=nothing`: wavelength window `(λmin, λmax)` for which to record the
+  transverse integral error relative to the polarisation inside that window (fixed
+  quadrature transforms only).
+- `userfuns`: additional statistics functions.
+"""
 function default(grid, Eω, modes::Modes.ModeCollection, linop, transform;
-                 windows=nothing, gas=nothing, mode_error=true, userfuns=Any[])
+                 windows=nothing, gas=nothing, mode_error=true, error_window=nothing,
+                 userfuns=Any[])
+    Eω = Adapt.adapt(Array, Eω)
     _, energyfunω = Fields.energyfuncs(grid)
     pol = transform.ts.indices == 1:2 ? :xy : transform.ts.indices == 1 ? :x : :y
     funs = [ω0(grid), energy(grid, energyfunω), peakpower(grid),
@@ -543,7 +639,11 @@ function default(grid, Eω, modes::Modes.ModeCollection, linop, transform;
         push!(funs, pressure(transform.densityfun, gas))
     end
     if mode_error
-        push!(funs, mode_reconstruction_error(transform))
+        if transform isa TransModalFixed
+            push!(funs, mode_reconstruction_error(transform; window=error_window))
+        else
+            push!(funs, mode_reconstruction_error(transform))
+        end
     end
     for resp in transform.resp
         if resp isa PlasmaCumtrapz

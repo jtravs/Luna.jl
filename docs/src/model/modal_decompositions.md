@@ -11,7 +11,7 @@ where ``\hat{\mathbf{e}}_j(\mathbf{r_\perp}, z)`` is the orthonormal transverse 
 ```math
 \tilde{A}_j(\omega, z) = \int_S \mathrm{d}^2\mathbf{r_\perp} \int_{-\infty}^\infty \mathrm{d} t\,\, \hat{\mathbf{e}}_j^*(\mathbf{r_\perp}, z) \cdot \mathbf{E}(t, \mathbf{r_\perp}, z) \mathrm{e}^{i \omega t}\,,
 ```
-where ``S`` is the cross-sectional area of the waveguide. This transform is implemented in [`NonlinearRHS.TransModal`](@ref) for use within simulations and in [`Modes.overlap`](@ref) for decomposition of existing sampled fields. In both cases, the mode overlap integral is solved explicitly with a p-adaptive or h-adaptive cubature method.
+where ``S`` is the cross-sectional area of the waveguide. This transform is implemented in [`NonlinearRHS.TransModal`](@ref) and [`NonlinearRHS.TransModalFixed`](@ref) for use within simulations and in [`Modes.overlap`](@ref) for decomposition of existing sampled fields. In `TransModal` and `Modes.overlap`, the mode overlap integral is solved explicitly with a p-adaptive or h-adaptive cubature method; `TransModalFixed` uses a fixed quadrature rule (see [Fixed transverse quadrature](@ref) below).
 
 The linear operator for a mode ``\mathcal{L}_j(\omega, z)`` is given by (see [`LinearOps.make_const_linop`](@ref))
 ```math
@@ -38,6 +38,15 @@ The transverse coordinate ``\mathbf{r_\perp}`` for circular waveguides (e.g. hol
 !!! note
     While ``\mathbf{r_\perp}`` can be given in either coordinate system, the **components** of the modal fields ``\hat{\mathbf{e}}_j(\mathbf{r_\perp}, z)`` are **always** given in Cartesian coordinates, i.e. the basis vectors for the polarisation of the field are always ``\mathbf{x}`` and ``\mathbf{y}``.
 
+### Fixed transverse quadrature
+[`NonlinearRHS.TransModal`](@ref) evaluates the transverse integral of the nonlinear polarisation with adaptive cubature: at every quadrature point the field is synthesised from the modes, transformed to the time domain, the nonlinear responses are applied, and the result is transformed back and projected onto the modes. This is accurate but inherently serial and cannot run on a GPU. [`NonlinearRHS.TransModalFixed`](@ref) (selected with `modal_integral=:fixed` in [`prop_capillary`](@ref) and [`Luna.setup`](@ref)) instead uses a **fixed** quadrature rule ([`Modes.TransverseQuadrature`](@ref)): Gauss–Legendre (or Gauss–Kronrod, which carries an embedded coarser rule for an error estimate) in ``r`` with the Jacobian ``r`` folded into the weights, a periodic trapezoid rule in ``\theta`` for vector fields whose intensity is not azimuthally symmetric, and Gauss–Legendre in both directions for rectangular waveguides. The whole modal field is then transformed to the time domain with one batched FFT, synthesised on all quadrature nodes with a single matrix product, the responses are applied to the whole ``(t, \text{polarisation}, \text{node})`` array, and the polarisation is projected back onto the modes with a second matrix product and one batched FFT. Everything is a matrix product, a batched FFT or an elementwise operation, so the transform is threaded on the CPU and runs unchanged on a GPU (`arraytype`).
+
+How many nodes are needed depends on the nonlinearity:
+- The Kerr polarisation is a cubic in the mode fields, so the integrand is a quartic in Bessel functions and Gauss quadrature converges to rounding error at roughly six radial nodes per radial mode order (e.g. ``n_r = 24`` for four ``\mathrm{HE}_{1m}`` modes). The periodic trapezoid rule is exact in ``\theta`` once ``n_\theta \ge 4 h_{\max} + 1``, where ``h_{\max}`` is the highest azimuthal order in the Cartesian field components (``n-1`` for ``\mathrm{HE}_{nm}``, 1 for ``\mathrm{TE}_{0m}`` and ``\mathrm{TM}_{0m}`` modes); a warning is issued below this bound.
+- The plasma polarisation converges just as fast **if the ionisation rate is a smooth function of the field**: for ADK, or for PPT with the channel sum replaced by its integral approximation (`PPT_options=Dict(:sum_integral=>true)`), a few tens of radial nodes give ``\sim 10^{-9}`` accuracy. The default cached PPT rate has small kinks at every channel closing (the lower limit of the sum over photon orders jumps as the ponderomotive shift changes), which limit **any** transverse quadrature — adaptive or fixed — to algebraic convergence: with the default rate and four ``\mathrm{HE}_{1m}`` modes, ``n_r = 128`` gives ``\sim 3\times10^{-3}`` and ``n_r = 512`` ``\sim 10^{-3}`` relative error on the plasma term alone (comparable to the adaptive scheme at its default tolerance). Since the plasma term is a fraction of the total polarisation and the ionisation rates themselves are approximate, this is usually acceptable, but convergence studies of the plasma term should use a smooth rate.
+
+The default `Stats` for multimode simulations report the embedded quadrature error estimate of the fixed rule (`transverse_integral_error_rel`, and `transverse_integral_error_rel_window` for a wavelength window given as `error_window` in `stats_kwargs`) alongside the mode reconstruction error.
+
 ### Implementation
 The modules and functions that define and implement this decomposition for different modes are
 - [Modes.jl](@ref)
@@ -45,6 +54,8 @@ The modules and functions that define and implement this decomposition for diffe
 - [RectModes.jl](@ref)
 - [Antiresonant.jl](@ref)
 - [`NonlinearRHS.TransModal`](@ref)
+- [`NonlinearRHS.TransModalFixed`](@ref)
+- [`Modes.TransverseQuadrature`](@ref)
 - [`NonlinearRHS.norm_modal`](@ref)
 - [`LinearOps.make_const_linop`](@ref)
 - [`LinearOps.make_linop`](@ref)

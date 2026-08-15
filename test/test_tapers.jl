@@ -37,7 +37,8 @@ Luna.run(Eω, grid, linop, transform, FT, output, status_period=10)
 abs2.(output["Eω"])
 end
 
-## modal
+## modal (adaptive cubature and fixed quadrature, which follows the taper by rescaling)
+for modal_integral in (:adaptive, :fixed)
 Iωmodal = let
 modes = (
     Capillary.MarcatiliMode(afun, gas, pres, n=1, m=1, kind=:HE, ϕ=0.0, loss=false),
@@ -45,7 +46,10 @@ modes = (
 linop = LinearOps.make_linop(grid, modes, λ0)
 inputs = Fields.GaussField(λ0=λ0, τfwhm=τ, energy=600e-9)
 Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs,
-                               modes, :y, full=false)
+                               modes, :y; full=false, modal_integral, nr=32)
+if modal_integral == :fixed
+    @test !transform.zconstant && transform.scale_invariant
+end
 statsfun = Stats.collect_stats(grid, Eω, Stats.ω0(grid))
 output = Output.MemoryOutput(0, grid.zmax, 201, statsfun)
 Luna.run(Eω, grid, linop, transform, FT, output, status_period=10)
@@ -53,6 +57,7 @@ abs2.(dropdims(output["Eω"], dims=2))
 end
 
 @test norm(Iωavg - Iωmodal)/(sqrt(norm(Iωavg))*sqrt(norm(Iωmodal))) < 0.004
+end
 end
 
 @testset "const vs afun" begin

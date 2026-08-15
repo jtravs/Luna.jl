@@ -1,6 +1,6 @@
 import Test: @test, @testset, @test_throws
 
-@testset "Vector plasma" begin
+@testset "Vector plasma ($modal_integral)" for modal_integral in (:adaptive, :fixed)
     # scalar modal model, vector modal at 0 degrees and vector modal at 45 degrees should be identical
     using Luna
     import LinearAlgebra: norm
@@ -28,7 +28,7 @@ import Test: @test, @testset, @test_throws
                 plasma)
     inputs = Fields.GaussField(λ0=λ0, τfwhm=τfwhm, energy=energy)
     Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs, modes,
-                                :y; full=false)
+                                :y; full=false, modal_integral, nr=32)
     linop = LinearOps.make_const_linop(grid, modes, λ0)
     statsfun = Stats.default(grid, Eω, modes, linop, transform; gas=gas)
     outscalar = Output.MemoryOutput(0, grid.zmax, 2, statsfun)
@@ -39,7 +39,7 @@ import Test: @test, @testset, @test_throws
     responses = (Nonlinear.Kerr_field(PhysData.γ3_gas(gas)),
              plasma)
     Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs, modes,
-                                   :xy; full=false)
+                                   :xy; full=false, modal_integral, nr=32)
     outvector = Output.MemoryOutput(0, grid.zmax, 2, statsfun)
     Luna.run(Eω, grid, linop, transform, FT, outvector)
 
@@ -55,7 +55,7 @@ import Test: @test, @testset, @test_throws
     inputs = ((mode=1, fields=(Fields.GaussField(λ0=λ0, τfwhm=τfwhm, energy=energy/2),)),
               (mode=2, fields=(Fields.GaussField(λ0=λ0, τfwhm=τfwhm, energy=energy/2),)))
     Eω, transform, FT = Luna.setup(grid, densityfun, responses, inputs, modes,
-                                   :xy; full=false)
+                                   :xy; full=false, modal_integral, nr=32)
     linop = LinearOps.make_const_linop(grid, modes, λ0)
     statsfun = Stats.default(grid, Eω, modes, linop, transform; gas=gas)
     outvector45 = Output.MemoryOutput(0, grid.zmax, 2, statsfun)

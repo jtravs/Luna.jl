@@ -380,14 +380,34 @@ function make_prop!(linop::AbstractArray, y0)
     end
 end
 
+"""
+    device_capable(linop!)
+
+Trait for `z`-dependent linear operators `linop!(out, z)`: `true` if `linop!` can write
+directly into a device array. The default `false` makes [`make_prop!`](@ref) evaluate the
+operator into a host buffer and upload it when the state lives on a device — the modal and
+mode-averaged operators of `LinearOps` are host scalar loops.
+"""
+device_capable(linop!) = false
+
 "Make propagator for the case of non-constant linear operator"
 function make_prop!(linop!, y0)
     linop_int = similar(y0)
+    # a host-only linop! is evaluated on the host and uploaded (small for modal states)
+    hostbuf = (Utils.isdevice(y0) && !device_capable(linop!)) ?
+              Array{eltype(y0)}(undef, size(y0)) : nothing
     lastt2 = [typemin(Float64)]
     function prop!(y, t1, t2, bwd=false)
         #= linop is always evaluated at later time, even for backward propagation
             therefore, linop is often evaluated at the same t2 twice in a row=#
-        (lastt2[1] != t2) && linop!(linop_int, t2)
+        if lastt2[1] != t2
+            if isnothing(hostbuf)
+                linop!(linop_int, t2)
+            else
+                linop!(hostbuf, t2)
+                copyto!(linop_int, hostbuf)
+            end
+        end
         lastt2[1] = t2
         dt = bwd ? (t1-t2) : (t2-t1)
         tchunks(y, linop_int) do y, linop_int

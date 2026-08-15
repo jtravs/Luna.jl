@@ -185,7 +185,8 @@ that do must be given a host copy when propagating on a device — which costs a
 device-to-host transfer per step, so this defaults to `false`.
 """
 needs_host_y(o) = false
-needs_host_y(o::Output.HDF5Output) = o.cache
+needs_host_y(o::Output.MemoryOutput) = o.statsfun !== Output.nostats
+needs_host_y(o::Output.HDF5Output) = o.cache || o.statsfun !== Output.nostats
 
 """
     nostats_only(output) -> Bool
@@ -241,3 +242,4 @@ end
 Base.getindex(h::HostOutput, args...) = getindex(h.o, args...)
 Base.haskey(h::HostOutput, key) = haskey(h.o, key)
 Output.check_cache(h::HostOutput, y, t, dt) = Output.check_cache(h.o, y, t, dt)
+Output.willsave(h::HostOutput, args...) = Output.willsave(h.o, args...)

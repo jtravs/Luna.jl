@@ -317,6 +317,21 @@ In this case, all keyword arguments except for `λ0` are ignored.
     Defaults to `:full`.
 - `loss::Bool`: Whether to include propagation loss. Defaults to `true`.
 - `temperature::Number`: Temperature of the gas in Kelvin. Defaults to room temperature.
+- `modal_integral::Symbol`: how the transverse integral of the nonlinear polarisation is
+    evaluated in multimode simulations. `:adaptive` (default) uses adaptive cubature to
+    the relative tolerance `radial_integral_rtol` ([`NonlinearRHS.TransModal`](@ref));
+    `:fixed` uses a fixed quadrature rule with `nr` radial (`nθ` azimuthal) nodes
+    ([`NonlinearRHS.TransModalFixed`](@ref)), which is threaded on the CPU and can run on a
+    GPU. Kerr is exact on the fixed rule for `nr ≳ 6` per radial mode order; the plasma
+    term converges quickly for smooth ionisation rates (ADK, or PPT with
+    `PPT_options=Dict(:sum_integral=>true)`) but only slowly for the default PPT rate,
+    whose channel-closing kinks limit any quadrature — `nr=128` gives ~3e-3 on the plasma
+    term for four HE₁ₘ modes, `nr=512` ~1e-3.
+- `radial_integral_rtol::Float64`: relative tolerance for `modal_integral=:adaptive`.
+- `nr::Int`, `nθ::Int`: quadrature nodes for `modal_integral=:fixed`. Defaults 128 and 16.
+- `arraytype`: `Array` (default), `:cpu`, `:cuda` or a GPU array type. Anything but the
+    host requires `modal_integral=:fixed` and a multimode simulation; the whole
+    propagation then runs on the device (see [`Luna.setup`](@ref) and [`Luna.run`](@ref)).
 
 # Nonlinear interaction options
 - `kerr`: Whether to include the Kerr effect. Defaults to `true`.
@@ -357,7 +372,10 @@ If `raman` is `true`, then the following options apply:
 """
 function prop_capillary(args...; status_period=5, kwargs...)
     Eω, grid, linop, transform, FT, output = prop_capillary_args(args...; kwargs...)
-    Luna.run(Eω, grid, linop, transform, FT, output; status_period)
+    # the modal state is small, so per-step statistics on the host are cheap even when the
+    # propagation itself runs on a device
+    Luna.run(Eω, grid, linop, transform, FT, output; status_period,
+             allow_device_stats=Utils.isdevice(Eω))
     output
 end
 
@@ -380,6 +398,7 @@ function prop_capillary_args(radius, flength, gas, pressure;
                         rng=GLOBAL_RNG,
                         modes=:HE11, model=:full, loss=true,
                         radial_integral_rtol=1e-3,
+                        modal_integral=:adaptive, nr=128, nθ=16, arraytype=Array,
                         raman=nothing, kerr=true, plasma=nothing,
                         stats_kwargs=Dict{Symbol, Any}(),
                         PPT_options=Dict{Symbol, Any}(), preionfrac=0.0,
@@ -411,16 +430,19 @@ function prop_capillary_args(radius, flength, gas, pressure;
     inputs = makeinputs(mode_s, λ0, pulses, τfwhm, τw, ϕ,
                         power, energy, pulseshape, polarisation, propagator)
     inputs, noise_field = makenoise(grid, mode_s, inputs, shotnoise, rng)
+    arraytype = Luna.resolve_arraytype(arraytype)
+    # the embedded (Kronrod) error estimate is only needed if the mode-error statistics are on
+    kronrod = get(stats_kwargs, :mode_error, true)
     linop, Eω, transform, FT = setup(grid, mode_s, density, resp, inputs, pol,
                                      radial_integral_rtol, const_linop(radius, pressure);
-                                     noise_field)
+                                     noise_field, modal_integral, nr, nθ, kronrod, arraytype)
     stats = Stats.default(grid, Eω, mode_s, linop, transform; gas=gas, stats_kwargs...)
     output = makeoutput(grid, saveN, stats, filepath, scan, scanidx, filename)
 
     saveargs(output; radius, flength, gas, pressure, λlims, trange, envelope, thg, δt,
         λ0, τfwhm, τw, ϕ, power, energy, pulseshape, polarisation, propagator, pulses,
         shotnoise, modes, model, loss, raman, kerr, plasma, PPT_options,
-        temperature, saveN, filepath, filename)
+        temperature, saveN, filepath, filename, modal_integral, nr, nθ, arraytype)
 
     return Eω, grid, linop, transform, FT, output
 end
@@ -833,8 +855,9 @@ function _add_input_shotnoise(inputs, modes, rng)
 end
 
 function setup(grid, mode::Modes.AbstractMode, density, responses, inputs, pol, rtol,
-               c::Val{true}; noise_field=nothing)
+               c::Val{true}; noise_field=nothing, arraytype=Array, kwargs...)
     @info("Using mode-averaged propagation.")
+    _check_modeavg_arraytype(arraytype)
     linop, βfun!, _, _ = LinearOps.make_const_linop(grid, mode, grid.referenceλ)
 
     Eω, transform, FT = Luna.setup(grid, density, responses, inputs,
@@ -843,8 +866,9 @@ function setup(grid, mode::Modes.AbstractMode, density, responses, inputs, pol, 
 end
 
 function setup(grid, mode::Modes.AbstractMode, density, responses, inputs, pol, rtol,
-               c::Val{false}; noise_field=nothing)
+               c::Val{false}; noise_field=nothing, arraytype=Array, kwargs...)
     @info("Using mode-averaged propagation.")
+    _check_modeavg_arraytype(arraytype)
     linop, βfun! = LinearOps.make_linop(grid, mode, grid.referenceλ)
 
     Eω, transform, FT = Luna.setup(grid, density, responses, inputs,
@@ -852,27 +876,36 @@ function setup(grid, mode::Modes.AbstractMode, density, responses, inputs, pol, 
     linop, Eω, transform, FT
 end
 
+_check_modeavg_arraytype(::Type{Array}) = nothing
+_check_modeavg_arraytype(arraytype) = error(
+    "mode-averaged propagation has no device path; arraytype=$arraytype requires a "*
+    "multimode simulation (e.g. modes=1 or a tuple of modes) with modal_integral=:fixed.")
+
 needfull(modes) = !all(modes) do mode
     (mode.kind == :HE) && (mode.n == 1)
 end
 
 function setup(grid, modes, density, responses, inputs, pol, rtol, c::Val{true};
-               noise_field=nothing)
+               noise_field=nothing, modal_integral=:adaptive, nr=128, nθ=16, kronrod=false,
+               arraytype=Array)
     nf = needfull(modes)
     @info(nf ? "Using full 2-D modal integral." : "Using radial modal integral.")
     linop = LinearOps.make_const_linop(grid, modes, grid.referenceλ)
     Eω, transform, FT = Luna.setup(grid, density, responses, inputs, modes,
-                                   pol ? :xy : :y; full=nf, rtol, noise_field)
+                                   pol ? :xy : :y; full=nf, rtol, noise_field,
+                                   modal_integral, nr, nθ, kronrod, arraytype)
     linop, Eω, transform, FT
 end
 
 function setup(grid, modes, density, responses, inputs, pol, rtol, c::Val{false};
-               noise_field=nothing)
+               noise_field=nothing, modal_integral=:adaptive, nr=128, nθ=16, kronrod=false,
+               arraytype=Array)
     nf = needfull(modes)
     @info(nf ? "Using full 2-D modal integral." : "Using radial modal integral.")
     linop = LinearOps.make_linop(grid, modes, grid.referenceλ)
     Eω, transform, FT = Luna.setup(grid, density, responses, inputs, modes,
-                                   pol ? :xy : :y; full=nf, rtol, noise_field)
+                                   pol ? :xy : :y; full=nf, rtol, noise_field,
+                                   modal_integral, nr, nθ, kronrod, arraytype)
     linop, Eω, transform, FT
 end
 

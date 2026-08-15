@@ -488,6 +488,11 @@ function run(Eω, grid,
             "from the device on every step. Use `Output.nostats` (the default), or "*
             "pass `allow_device_stats=true` to accept the transfer cost.")
         output = HostOutput(output, Eω)
+        # a constant linear operator built on the host (e.g. the modal operators of
+        # LinearOps) is uploaded once; z-dependent operators are handled by RK45.make_prop!
+        if linop isa Array
+            linop = copyto!(similar(Eω, eltype(linop), size(linop)), linop)
+        end
     end
 
     # twin_period > 1 applies the spectral/temporal windows only on every twin_period-th
