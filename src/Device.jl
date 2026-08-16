@@ -206,8 +206,22 @@ that do must be given a host copy when propagating on a device — which costs a
 device-to-host transfer per step, so this defaults to `false`.
 """
 needs_host_y(o) = false
-needs_host_y(o::Output.MemoryOutput) = o.statsfun !== Output.nostats
-needs_host_y(o::Output.HDF5Output) = o.cache || o.statsfun !== Output.nostats
+needs_host_y(o::Output.MemoryOutput) = o.statsfun !== Output.nostats && !device_stats(o.statsfun)
+needs_host_y(o::Output.HDF5Output) = o.cache || (o.statsfun !== Output.nostats &&
+                                                 !device_stats(o.statsfun))
+
+"""
+    device_stats(statsfun) -> Bool
+
+`true` if the statistics function accepts the propagating array *on the device*: it copies
+what it needs to the host itself and can hand the device array to statistics which run on
+it (e.g. the mode-error statistic, which evaluates the transform). `HostOutput` then
+passes the device array straight through instead of copying it every step. `false` (the
+default) means the function needs a host array. [`Stats.collect_stats`](@ref) returns a
+device-capable function; a `PeriodicStats` wrapper defers to what it wraps.
+"""
+device_stats(f) = false
+device_stats(p::Output.PeriodicStats) = device_stats(p.f)
 
 """
     nostats_only(output) -> Bool

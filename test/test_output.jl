@@ -97,6 +97,39 @@ end
     @test "src" == o.data["meta"]["meta2"]
 end
 
+@testset "PeriodicStats" begin
+    import Luna: Utils
+    @test_throws ArgumentError Output.PeriodicStats((y, t, dt) -> Dict(), 0)
+    ncalls = Ref(0)
+    statsfun(y, t, dt) = (ncalls[] += 1; Dict("t" => t, "stat" => [1.0, 2.0]))
+    p = Output.PeriodicStats(statsfun, 3)
+    # the first call and then every third one; nothing in between
+    @test p(1, 0.0, 0.1) isa Dict
+    @test p(1, 1.0, 0.1) === nothing
+    @test p(1, 2.0, 0.1) === nothing
+    @test p(1, 3.0, 0.1) isa Dict
+    @test ncalls[] == 2
+    # both output handlers skip the steps without statistics and record the others
+    y0 = randn(ComplexF64, (64, 2))
+    ts = collect(range(0, 10, length=23))
+    mem = Output.MemoryOutput(0, 10, 5, Output.PeriodicStats(statsfun, 4))
+    dpath = tempname(); mkpath(dpath)
+    h5 = Output.HDF5Output(joinpath(dpath, "periodic.h5"), 0, 10, 5,
+                           Output.PeriodicStats(statsfun, 4))
+    for ti in ts
+        mem(y0, ti, 0.1, t -> y0)
+        h5(y0, ti, 0.1, t -> y0)
+    end
+    expected = ts[1:4:end] # calls 1, 5, 9, ...
+    @test mem["stats"]["t"] == expected
+    @test size(mem["stats"]["stat"]) == (2, length(expected))
+    @test length(mem["z"]) == 5 # saves are unaffected
+    @test h5["stats"]["t"] == expected
+    @test size(h5["stats"]["stat"]) == (2, length(expected))
+    @test length(h5["z"]) == 5
+    rm(dpath; recursive=true)
+end
+
 dirpath = tempname()
 fpath = joinpath(dirpath, "test.h5")
 fpath_comp = joinpath(dirpath, "test_comp.h5")

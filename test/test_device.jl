@@ -589,19 +589,33 @@ if have_jlarrays
             # the embedded error estimate and Stats run with a device transform
             @test all(isnan, Array(NonlinearRHS.integral_error!(td))) # no Kronrod rule
             statf = Stats.mode_reconstruction_error(td)
+            @test Stats.wants_state(statf)
+            # handed a host array only: uploads it (HDF5Output with cache=true does this)
             d = Dict{String, Any}(); statf(d, Eωh, nothing, 0.0, 0.0)
             @test d["transverse_points"] == 32
             @test isfinite(d["mode_reconstruction_error"])
+            # handed the device state as well: no upload, same numbers (to rounding: the
+            # host and JLArray inputs come from separately planned FFTs)
+            d2 = Dict{String, Any}(); statf(d2, Eωh, nothing, 0.0, 0.0, Eωd)
+            @test isapprox(d2["mode_reconstruction_error"], d["mode_reconstruction_error"];
+                           rtol=1e-8)
+            @test isequal(d2["transverse_integral_error_rel"],
+                          d["transverse_integral_error_rel"]) # both NaN: no Kronrod rule
         end
 
         # a whole propagation on device arrays versus the host, with a z-dependent linear
         # operator (evaluated on the host and uploaded by RK45.make_prop!) and with the
         # default statistics (host copies of the small modal state on every step)
-        function propagate(arraytype; kwargs...)
+        function propagate(arraytype; stats_period=1, kwargs...)
             Eω, transform, FT = make(arraytype, Ionisation.IonRateADK(:Ar))
             linop = LinearOps.make_linop(grid, modes, λ0)
             statsfun = Stats.default(grid, Eω, modes, linop, transform; gas=:Ar)
+            # the default collector takes the device array itself (and copies what it needs
+            # to the host), so HostOutput does not need to copy the state on every step
+            @test Luna.device_stats(statsfun)
+            stats_period > 1 && (statsfun = Output.PeriodicStats(statsfun, stats_period))
             output = Output.MemoryOutput(0, grid.zmax, 3, statsfun)
+            @test !Luna.needs_host_y(output)
             Luna.run(Eω, grid, linop, transform, FT, output; max_dz=Inf,
                      init_dz=grid.zmax/50, rtol=1e-8, step_on=collect(range(0, grid.zmax, 3)),
                      kwargs...)
@@ -614,6 +628,15 @@ if have_jlarrays
         @test isapprox(od["stats"]["energy"], oh["stats"]["energy"]; rtol=1e-8)
         @test isapprox(od["stats"]["electrondensity"], oh["stats"]["electrondensity"];
                        rtol=1e-6)
+        @test isapprox(od["stats"]["mode_reconstruction_error"],
+                       oh["stats"]["mode_reconstruction_error"]; rtol=1e-6)
+        # statistics every third step: same propagation, a subset of the recorded points
+        op = propagate(JLArray; stats_period=3, allow_device_stats=true)
+        @test relerr(op["Eω"], oh["Eω"]) < 1e-10
+        nz = length(oh["stats"]["z"])
+        @test length(op["stats"]["z"]) == cld(nz, 3)
+        @test op["stats"]["z"] ≈ oh["stats"]["z"][1:3:end]
+        @test isapprox(op["stats"]["energy"], od["stats"]["energy"][:, 1:3:end]; rtol=1e-10)
         # constant linear operator built on the host is uploaded by Luna.run
         Eω, transform, FT = make(JLArray, Ionisation.IonRateADK(:Ar))
         linop = LinearOps.make_const_linop(grid, modes, λ0)

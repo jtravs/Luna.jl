@@ -30,13 +30,14 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
   `prop_capillary_args` + `Luna.run` inside one function must `invokelatest(Luna.run, …)`
   themselves (documented in `resolve_arraytype`).
 
-- [ ] **P1 — `mode_error` statistic round-trips the state through the host on a device.**
-  `Stats.mode_reconstruction_error(::TransModalFixed)` receives the *host* copy `HostOutput`
-  makes for the statistics and copies it back to the device (`copyto!(Eωd, Eω)`,
-  `src/Stats.jl:361`) to call the transform, then copies `nl` down again — three transfers
-  and an extra full RHS evaluation per accepted step. **Fix (S):** hand the statistics the
-  device array too (`HostOutput` keeps a reference), and/or default `mode_error=false` for
-  device runs in `prop_capillary` (it is a diagnostic; the plan intended it off on device).
+- [x] **P1 — `mode_error` statistic round-trips the state through the host on a device.**
+  (Fixed.) `Stats.collect_stats` now returns a `StatsCollector` which accepts the device
+  array itself (`Luna.device_stats`), copies it into its own host buffer for the host
+  statistics, and hands the device array to statistics flagged `Stats.wants_state`
+  (`StateStat`); `mode_reconstruction_error(::TransModalFixed)` evaluates the transform on
+  the device state directly and only copies the small results back. `HostOutput` no
+  longer copies `y` per step for such collectors (`needs_host_y`). An `HDF5Output` with
+  `cache=true` still needs the host copy, and the statistic uploads it in that case.
 
 ---
 
@@ -69,10 +70,9 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
   `Maths.scan!`/`scan_scratch` with a `CuArray` method in `ext/LunaCUDAExt.jl`; ~80 →
   ~6 launches per plasma evaluation at nt=8192; two field-sized device buffers fewer.
 
-- [ ] **P1 — `stats_period=k` in `Luna.run`.** Run the statistics closure only every k-th
-  accepted step (and before every save). Effort S (~10 lines next to `twin_period`).
-  Payoff: removes most of the per-step host↔device stats cost for small problems without
-  touching `Stats.jl`; z-resolution of the stats stays far finer than the saves.
+- [x] **P1 — `stats_period=k`.** (Done.) `Output.PeriodicStats(statsfun, k)` evaluates
+  the statistics on the first and then every k-th accepted step and returns `nothing` in
+  between; both output handlers skip those steps. `prop_capillary(...; stats_period=k)`.
 
 - [ ] **P2 — Modal statistics on device.** Today `HostOutput` copies `Eω` (nω×nmodes:
   0.26 MB at nt=8192, ~6 MB at 2^17) to the host every step and *all* stats run there:
@@ -87,7 +87,7 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
   it is a second method per stat; `collect_stats`/`HostOutput` hand the device array to
   the stats; JLArray + CUDA tests. Payoff: ≤ 15 % of a step at nt=8192 (half of which is
   the mode-error transform call, already on device), 25–50 % at nt=2^17. **Decide after
-  the §1 measurement**; do §0/`stats_period` first.
+  the §1 measurement** (the round trip and `stats_period` are done).
 
 - [ ] **P2 — CUDA graph capture of the RHS.** The fixed rule has static control flow and
   no allocation after warm-up, so one RHS (IFFT, GEMM, responses, GEMM, FFT, scaling) can
@@ -238,7 +238,7 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
 - [ ] **P1 — A user-facing GPU page** (`docs/src/gpu.md` or a section in `interface.md`):
   `arraytype=:cuda`, what runs on device (modal fixed: yes; `TransFree` fast path: yes;
   plasma in 3-D: not yet; adaptive/mode-averaged: no), the statistics caveat and
-  `allow_device_stats`, `stats_period` once added, `step_on` vs dense output, memory
+  `allow_device_stats`, `stats_period`, `step_on` vs dense output, memory
   footprint per field, `SlurmExec(gres, instances)` recipe with a scan-script skeleton
   (after the §0 fix), and how to run the hardware-gated tests. Effort S–M.
 

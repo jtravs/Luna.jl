@@ -362,6 +362,11 @@ If `raman` is `true`, then the following options apply:
 
 # Output options
 - `stats_kwargs::Dict{Symbol, Any}`: a dictionary of keyword arguments to `Stats.default`
+- `stats_period::Int`: record the statistics only on the first and then every
+    `stats_period`-th accepted step (default 1: every step). The statistics carry their own
+    `z`. Useful when they are a noticeable share of a step, e.g. on a device (the modal
+    state is copied to the host and the mode-error statistic costs an extra transform
+    call on every recorded step). See [`Output.PeriodicStats`](@ref).
 - `saveN::Integer`: Number of points along z at which to save the field.
 - `filepath`: If `nothing` (default), create a `MemoryOutput` to store the simulation results
     only in the working memory. If not `nothing`, should be a file path as a `String`,
@@ -423,7 +428,7 @@ function _prop_capillary_args(radius, flength, gas, pressure;
                         radial_integral_rtol=1e-3,
                         modal_integral=:fixed, nr=64, nθ=16, arraytype=Array,
                         raman=nothing, kerr=true, plasma=nothing,
-                        stats_kwargs=Dict{Symbol, Any}(),
+                        stats_kwargs=Dict{Symbol, Any}(), stats_period=1,
                         PPT_options=Dict{Symbol, Any}(), preionfrac=0.0,
                         rotation=true, vibration=true, temperature=roomtemp,
                         saveN=201, filepath=nothing,
@@ -460,12 +465,14 @@ function _prop_capillary_args(radius, flength, gas, pressure;
                                      radial_integral_rtol, const_linop(radius, pressure);
                                      noise_field, modal_integral, nr, nθ, kronrod, arraytype)
     stats = Stats.default(grid, Eω, mode_s, linop, transform; gas=gas, stats_kwargs...)
+    stats_period > 1 && (stats = Output.PeriodicStats(stats, stats_period))
     output = makeoutput(grid, saveN, stats, filepath, scan, scanidx, filename)
 
     saveargs(output; radius, flength, gas, pressure, λlims, trange, envelope, thg, δt,
         λ0, τfwhm, τw, ϕ, power, energy, pulseshape, polarisation, propagator, pulses,
         shotnoise, modes, model, loss, raman, kerr, plasma, PPT_options,
-        temperature, saveN, filepath, filename, modal_integral, nr, nθ, arraytype)
+        temperature, saveN, filepath, filename, modal_integral, nr, nθ, arraytype,
+        stats_period)
 
     return Eω, grid, linop, transform, FT, output
 end

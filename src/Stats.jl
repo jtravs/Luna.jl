@@ -1,4 +1,5 @@
 module Stats
+import Luna
 import Luna: Maths, Grid, Modes, Utils, settings, PhysData, Fields, Processing
 import Luna.PhysData: wlfreq, c, ε_0
 import Luna.NonlinearRHS: TransModal, TransModalFixed, TransModeAvg, Erω_to_Prω!, Et_to_Pt!,
@@ -329,8 +330,11 @@ to the RMS polarisation, and — if `window=(λmin, λmax)` is given — relativ
 polarisation within that wavelength window (`"transverse_integral_error_rel_window"`), which
 is the relevant measure for weak spectral features such as dispersive waves.
 
-The transform is evaluated once per step (cheap for the fixed rule); on a device the
-modal field is uploaded for that and the results are copied back.
+The transform is evaluated once per step (cheap for the fixed rule). On a device the
+statistic asks for the propagating array itself (see [`wants_state`](@ref)), so the
+transform runs on the device state directly and only the small results are copied back;
+if it is nevertheless handed a host array (e.g. an `HDF5Output` with `cache=true`, which
+needs the host copy anyway), the modal field is uploaded for the evaluation.
 """
 function mode_reconstruction_error(t::TransModalFixed; window=nothing)
     grid = t.grid
@@ -340,7 +344,7 @@ function mode_reconstruction_error(t::TransModalFixed; window=nothing)
     tT = eltype(t.Emt)
     ondevice = Utils.isdevice(t.err)
     nl = similar(t.err)
-    Eωd = ondevice ? similar(t.err) : nothing
+    Eωd = ondevice ? similar(t.err) : nothing # upload buffer, only used for a host state
     nlh = Array{ComplexF64}(undef, nω, nmodes)
     errh = Array{ComplexF64}(undef, nω, nmodes)
     Emth = Array{tT}(undef, nto, nmodes)
@@ -358,12 +362,12 @@ function mode_reconstruction_error(t::TransModalFixed; window=nothing)
     nfach = Adapt.adapt(Array, nfac)
     windowidcs = isnothing(window) ? nothing :
                  (window[1] .<= wlfreq.(grid.ω) .<= window[2]) .& grid.sidx
-    function addstat!(d, Eω, Et, z, dz)
-        if ondevice
-            copyto!(Eωd, Eω)
+    function addstat!(d, Eω, Et, z, dz, state)
+        if ondevice && !Utils.isdevice(state)
+            copyto!(Eωd, state) # a host copy was handed over: upload it
             t(nl, Eωd, z)
         else
-            t(nl, Eω, z)
+            t(nl, state, z) # the propagating array itself (device or host)
         end
         copyto!(nlh, nl)
         # reconstruct the on-axis polarisation from its modal expansion
@@ -388,7 +392,33 @@ function mode_reconstruction_error(t::TransModalFixed; window=nothing)
             d["transverse_integral_error_rel_window"] = norm(errh[windowidcs, :])/norm(nlh[windowidcs, :])
         end
     end
+    StateStat(addstat!)
 end
+
+"""
+    StateStat(f)
+
+A statistics function which, besides the usual `(d, Eω, Et, z, dz)` (host arrays), also
+receives the propagating array itself as a sixth argument — on a device run the device
+array, otherwise the same host array — so it can run computations on the device state
+without a host round trip. `f` is called as `f(d, Eω, Et, z, dz, state)`.
+See [`wants_state`](@ref).
+"""
+struct StateStat{F} <: Function
+    f::F
+end
+(s::StateStat)(d, Eω, Et, z, dz, state) = s.f(d, Eω, Et, z, dz, state)
+(s::StateStat)(d, Eω, Et, z, dz) = s.f(d, Eω, Et, z, dz, Eω) # standalone use: host state
+
+"""
+    wants_state(f) -> Bool
+
+Trait: `true` if the statistics function `f` takes the propagating array as a sixth
+argument (see [`StateStat`](@ref)); `collect_stats` then calls it as
+`f(d, Eω, Et, z, dz, state)`.
+"""
+wants_state(f) = false
+wants_state(::StateStat) = true
 
 """
     density(dfun)
@@ -553,22 +583,52 @@ function collect_stats(grid, Eω, funcs...)
     if !(zdz! in funcs)
         funcs = (funcs..., zdz!)
     end
-    # statistics run on the host; the state may live on a device (Luna.run then hands the
-    # statistics function a host copy at every step)
-    Eω = Adapt.adapt(Array, Eω)
-    Et, analytic! = plan_analytic(grid, Eω)
-    f = let funcs=funcs
-        function collect_stats(Eω, z, dz)
-            d = Dict{String, Any}()
-            analytic!(Et, Eω)
-            for func in funcs
-                func(d, Eω, Et, z, dz)
-            end
-            return d
+    # statistics run on the host; the state may live on a device, in which case the
+    # collector receives the device array and copies it into its own host buffer here
+    # (statistics which can use the device state directly get it as well, see wants_state)
+    Eωh = Adapt.adapt(Array, Eω)
+    Et, analytic! = plan_analytic(grid, Eωh)
+    # keep the host copy as the buffer only if it is one (never alias a host state)
+    StatsCollector(funcs, Eωh === Eω ? nothing : Eωh, Et, analytic!)
+end
+
+"""
+    StatsCollector
+
+The callable returned by [`collect_stats`](@ref): `(c::StatsCollector)(Eω, z, dz)` returns
+the statistics `Dict`. Accepts the propagating array on the host or on a device; a device
+array is copied into the collector's host buffer, and statistics with
+[`wants_state`](@ref) additionally receive the array itself.
+"""
+mutable struct StatsCollector{F, E, P} <: Function
+    funcs::F
+    Eωh::Any # host buffer for a device state (allocated on first use), else nothing
+    Et::E
+    analytic!::P
+end
+
+function (c::StatsCollector)(Eω, z, dz)
+    d = Dict{String, Any}()
+    if Utils.isdevice(Eω)
+        (c.Eωh isa Array && size(c.Eωh) == size(Eω)) ||
+            (c.Eωh = Array{eltype(Eω)}(undef, size(Eω)))
+        Eωh = copyto!(c.Eωh, Eω)
+    else
+        Eωh = Eω
+    end
+    c.analytic!(c.Et, Eωh)
+    for func in c.funcs
+        if wants_state(func)
+            func(d, Eωh, c.Et, z, dz, Eω)
+        else
+            func(d, Eωh, c.Et, z, dz)
         end
     end
-    return f
+    return d
 end
+
+# the collector handles device arrays itself (see Luna.device_stats / HostOutput)
+Luna.device_stats(::StatsCollector) = true
 
 function default(grid, Eω, mode::Modes.AbstractMode, linop, transform;
                  windows=nothing, gas=nothing, onaxis=false, userfuns=Any[])

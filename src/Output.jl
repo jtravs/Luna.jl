@@ -64,7 +64,8 @@ haskey(o::MemoryOutput, key) = haskey(o.data, key)
 """
 function (o::MemoryOutput)(y, t, dt, yfun)
     save, ts = o.save_cond(y, t, dt, o.saved)
-    append_stats!(o, o.statsfun(y, t, dt))
+    st = o.statsfun(y, t, dt)
+    isnothing(st) || append_stats!(o, st) # `nothing`: no statistics this step (PeriodicStats)
     !haskey(o.data, o.yname) && initialise(o, y)
     while save
         s = size(o.data[o.yname])
@@ -244,7 +245,9 @@ function initialise(o::HDF5Output, y)
         end
         HDF5.create_dataset(file, o.tname, HDF5.datatype(Float64), ((dims[end],), (-1,)),
                       chunk=(1,))
-        statsnames = sort(collect(keys(o.stats_tmp[end])))
+        # the first call always records statistics (see PeriodicStats), so stats_tmp is
+        # non-empty here unless the statistics function is a custom one returning nothing
+        statsnames = isempty(o.stats_tmp) ? String[] : sort(collect(keys(o.stats_tmp[end])))
         o.cachehash = hash((statsnames, size(y)))
         file["meta"]["cachehash"] = o.cachehash
         if o.cache
@@ -334,14 +337,17 @@ end
 function (o::HDF5Output)(y, t, dt, yfun)
     o.readonly && error("Cannot add data to read-only output!")
     save, ts = o.save_cond(y, t, dt, o.saved)
-    push!(o.stats_tmp, o.statsfun(y, t, dt))
+    st = o.statsfun(y, t, dt)
+    isnothing(st) || push!(o.stats_tmp, st) # `nothing`: no statistics this step (PeriodicStats)
     if save
         HDF5.h5open(o.fpath, "r+") do file
             !HDF5.haskey(file, o.yname) && initialise(o, y)
-            statsnames = sort(collect(keys(o.stats_tmp[end])))
-            cachehash = hash((statsnames, size(y)))
-            cachehash == o.cachehash || error(
-                "the hash for this propagation does not agree with cache in file")
+            if !isempty(o.stats_tmp)
+                statsnames = sort(collect(keys(o.stats_tmp[end])))
+                cachehash = hash((statsnames, size(y)))
+                cachehash == o.cachehash || error(
+                    "the hash for this propagation does not agree with cache in file")
+            end
             while save
                 s = collect(size(file[o.yname]))
                 idcs = fill(:, length(s)-1)
@@ -359,7 +365,7 @@ function (o::HDF5Output)(y, t, dt, yfun)
                 o.saved += 1
                 save, ts = o.save_cond(y, t, dt, o.saved)
             end
-            append_stats!(file["stats"], o.stats_tmp)
+            isempty(o.stats_tmp) || append_stats!(file["stats"], o.stats_tmp)
             o.stats_tmp = Vector{Dict{String, Any}}()
             if o.cache
                 write(file["meta"]["cache"]["t"], t)
@@ -546,6 +552,35 @@ end
 
 function nostats(args...)
     return Dict{String, Any}()
+end
+
+"""
+    PeriodicStats(statsfun, period)
+
+Wrap a statistics function so that it is evaluated only on the first and then every
+`period`-th call (i.e. every `period`-th accepted step of the propagation), returning
+`nothing` in between; the output handlers record nothing on those steps. The statistics
+carry their own `z`, so the recorded arrays are simply shorter. Use this when the
+per-step statistics are a noticeable fraction of the step — in particular for device (GPU)
+propagations, where the whole (small) modal state is copied to the host and the
+mode-error statistic costs an extra transform call on every step — or with an expensive
+custom statistic. `prop_capillary` exposes this as `stats_period`.
+"""
+mutable struct PeriodicStats{S}
+    f::S
+    period::Int
+    n::Int
+end
+
+function PeriodicStats(f, period::Integer)
+    period >= 1 || throw(ArgumentError("PeriodicStats period must be >= 1, got $period"))
+    PeriodicStats(f, Int(period), 0)
+end
+
+function (p::PeriodicStats)(y, t, dt)
+    p.n += 1
+    (p.n - 1) % p.period == 0 || return nothing
+    p.f(y, t, dt)
 end
 
 """
