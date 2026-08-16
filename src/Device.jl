@@ -95,9 +95,30 @@ closure, which runs on the compute node.
 
 `Base.require` loads the package by UUID without any lexical reference to it, and still
 triggers Luna's package extension for that backend.
+
+!!! warning "World age"
+    If this call actually loads the GPU package, the methods it defines are invisible to
+    the *calling* frame until it returns to top level (Julia's world-age rule): a
+    `CuArray` constructor, broadcast or cuFFT plan in the same function afterwards throws
+    a `MethodError`. Call it as its own top-level statement, or re-enter through
+    `Base.invokelatest` — which is what [`prop_capillary`](@ref Luna.Interface.prop_capillary)
+    does when given a `Symbol` (see [`lazy_arraytype`](@ref)). Passing the resolved type
+    into a *later* top-level call (`Luna.setup(...; arraytype=CuArray)`) is always safe.
 """
 resolve_arraytype(A::Type) = A
 resolve_arraytype(::Nothing) = Array
+
+"""
+    lazy_arraytype(x) -> Bool
+
+`true` if `x` is an array-type specification which [`resolve_arraytype`](@ref) may satisfy
+by loading a package *now* (`:cuda`), i.e. one whose methods might be invisible to the
+current frame afterwards. Callers which go on to use the array type in the same frame must
+then re-enter through `Base.invokelatest` with the resolved type (see `prop_capillary`).
+`Array`, other types, `nothing` and `:cpu` are never lazy.
+"""
+lazy_arraytype(x) = false
+lazy_arraytype(s::Symbol) = s !== :cpu
 
 function resolve_arraytype(s::Symbol)
     s === :cpu && return Array

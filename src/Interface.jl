@@ -375,8 +375,18 @@ If `raman` is `true`, then the following options apply:
     The running `scanidx` will be appended to this filename. Ignored if no `scan` is given.
 - `status_period::Number`: Interval (in seconds) between printed status updates.
 """
-function prop_capillary(args...; status_period=5, kwargs...)
-    Eω, grid, linop, transform, FT, output = prop_capillary_args(args...; kwargs...)
+function prop_capillary(args...; status_period=5, arraytype=Array, kwargs...)
+    if Luna.lazy_arraytype(arraytype)
+        # `:cuda` may load the GPU package right now, inside this call. Its methods are
+        # then "too new" for this frame (world age) — every CuArray constructor, broadcast
+        # and cuFFT plan below would throw a MethodError. Resolve the type and re-enter
+        # through `invokelatest`, so the whole propagation runs in the world that has it.
+        A = Luna.resolve_arraytype(arraytype)
+        return Base.invokelatest(prop_capillary, args...; status_period, arraytype=A,
+                                 kwargs...)
+    end
+    Eω, grid, linop, transform, FT, output = prop_capillary_args(args...; arraytype,
+                                                                 kwargs...)
     # the modal state is small, so per-step statistics on the host are cheap even when the
     # propagation itself runs on a device
     Luna.run(Eω, grid, linop, transform, FT, output; status_period,
@@ -393,7 +403,15 @@ simulation and returning the output, it returns the required arguments for `Luna
 which is useful for repeated simulations in an indentical fibre with different initial
 conditions.
 """
-function prop_capillary_args(radius, flength, gas, pressure;
+function prop_capillary_args(args...; arraytype=Array, kwargs...)
+    if Luna.lazy_arraytype(arraytype) # see prop_capillary
+        A = Luna.resolve_arraytype(arraytype)
+        return Base.invokelatest(_prop_capillary_args, args...; arraytype=A, kwargs...)
+    end
+    _prop_capillary_args(args...; arraytype, kwargs...)
+end
+
+function _prop_capillary_args(radius, flength, gas, pressure;
                         λlims, trange, envelope=false, thg=nothing, δt=1,
                         λ0, τfwhm=nothing, τw=nothing, ϕ=Float64[],
                         power=nothing, energy=nothing,

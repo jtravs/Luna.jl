@@ -8,6 +8,21 @@ import Adapt
 import Random
 import LinearAlgebra
 
+# World-age probe for the "array type resolution" testset below (top level, so the
+# definitions have well-defined ages). `_worldage_probe` defines `_worldage_stub` at
+# runtime, then calls it (a) through an already-existing caller in its own frame — not
+# callable there — and (b) through invokelatest — callable.
+_worldage_stub_caller() = _worldage_stub()
+function _worldage_probe()
+    Core.eval(@__MODULE__, :(_worldage_stub() = :new))
+    direct = try
+        _worldage_stub_caller()
+    catch e
+        (e isa MethodError || e isa UndefVarError) ? :not_callable : rethrow()
+    end
+    (direct, Base.invokelatest(_worldage_stub_caller))
+end
+
 # =============================================================================
 # Tests for Luna's device (GPU) support.
 #
@@ -125,6 +140,17 @@ end
     if !haskey(ENV, "LUNA_TEST_CUDA")
         @test_throws Exception Luna.resolve_arraytype(:cuda)
     end
+    # Symbols which may load a package on resolution are "lazy": prop_capillary must
+    # resolve them and re-enter through invokelatest (world age). Everything else is not.
+    @test Luna.lazy_arraytype(:cuda)
+    @test !Luna.lazy_arraytype(:cpu)
+    @test !Luna.lazy_arraytype(Array)
+    @test !Luna.lazy_arraytype(nothing)
+    # The world-age mechanism itself, with a stand-in for the GPU package: a method
+    # defined *during* a call is invisible to that frame (MethodError / UndefVarError,
+    # depending on the Julia version's binding semantics) but callable after re-entering
+    # through invokelatest — which is what prop_capillary relies on for `:cuda`.
+    @test _worldage_probe() == (:not_callable, :new)
 end
 
 @testset "device_zeros" begin

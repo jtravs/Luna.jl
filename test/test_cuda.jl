@@ -257,6 +257,45 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                 @test isapprox(od["stats"]["electrondensity"], oh["stats"]["electrondensity"];
                                rtol=1e-4)
             end
+
+            @testset "lazy :cuda inside one top-level call (world age)" begin
+                # The scan-script use case: a login node submits without loading CUDA, and
+                # on the compute node the whole propagation happens inside ONE call of the
+                # scan closure. `prop_capillary(...; arraytype=:cuda)` then loads CUDA
+                # *during* the call, whose methods would be too new for that frame; the
+                # interface re-enters through invokelatest. This must run in a fresh
+                # process where CUDA is not yet loaded (this test file imports it), so
+                # spawn one with the same project and no `import CUDA`.
+                script = """
+                    import Luna
+                    import Luna: Interface
+                    function run_inside_one_call()
+                        o = Interface.prop_capillary(100e-6, 2e-3, :Ar, 1.0; λ0=800e-9,
+                                τfwhm=15e-15, energy=50e-6, modes=2, trange=200e-15,
+                                λlims=(200e-9, 3000e-9), shotnoise=false, saveN=3,
+                                plasma=:ADK, nr=17, arraytype=:cuda)
+                        # ...and the same through the args form + Luna.run: the tuple comes
+                        # back into this (old-world) frame, so `run` must be re-entered too
+                        args = Interface.prop_capillary_args(100e-6, 2e-3, :Ar, 1.0; λ0=800e-9,
+                                τfwhm=15e-15, energy=50e-6, modes=2, trange=200e-15,
+                                λlims=(200e-9, 3000e-9), shotnoise=false, saveN=3,
+                                plasma=:ADK, nr=17, arraytype=:cuda)
+                        Base.invokelatest(Luna.run, args...; status_period=30,
+                                          allow_device_stats=true)
+                        o["Eω"] isa Array && all(isfinite, o["Eω"])
+                    end
+                    ok = run_inside_one_call()
+                    println("LAZY_CUDA_OK=", ok)
+                    exit(ok ? 0 : 1)
+                    """
+                cmd = `$(Base.julia_cmd()) --project=$(dirname(Base.active_project())) -e $script`
+                out = IOBuffer()
+                proc = run(pipeline(ignorestatus(cmd); stdout=out, stderr=out))
+                txt = String(take!(out))
+                success(proc) || @info "lazy :cuda subprocess output" txt
+                @test success(proc)
+                @test occursin("LAZY_CUDA_OK=true", txt)
+            end
         end
     end
 else
