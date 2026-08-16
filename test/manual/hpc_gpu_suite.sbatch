@@ -53,7 +53,7 @@
 # NB: no `set -e` — a failing step must not stop the later ones.
 set -uo pipefail
 
-GPUROOT="${GPUROOT:-$HOME/shared/scratch/gpu}"
+GPUROOT="${GPUROOT:-$HOME/sharedscratch/gpu}"
 LUNA="$GPUROOT/Luna"
 ENVDIR="$GPUROOT/env"
 SCALE="${SCALE:-0.2}"
@@ -116,10 +116,10 @@ echo "=== done ==="
 # On the login node (installs only — the precompile failure there is expected and
 # harmless, the job above redoes it on a GPU node):
 #
-#   mkdir -p ~/shared/scratch/gpu && cd ~/shared/scratch/gpu
+#   mkdir -p ~/sharedscratch/gpu && cd ~/sharedscratch/gpu
 #   git clone -b modal-fixed <luna-remote> Luna      # or copy the checkout
-#   julia -e 'using Pkg; Pkg.activate(ENV["HOME"]*"/shared/scratch/gpu/env");
-#             Pkg.develop(path=ENV["HOME"]*"/shared/scratch/gpu/Luna");
+#   julia -e 'using Pkg; Pkg.activate(ENV["HOME"]*"/sharedscratch/gpu/env");
+#             Pkg.develop(path=ENV["HOME"]*"/sharedscratch/gpu/Luna");
 #             Pkg.add(["CUDA", "JLArrays", "GPUArraysCore", "AbstractFFTs", "Adapt",
 #                      "FFTW", "HDF5", "LinearAlgebra", "Random", "Statistics", "Dates",
 #                      "Printf", "Test", "Logging"])'
