@@ -341,16 +341,32 @@ _dx(δx::Number, i) = δx
     cumtrapz_scan!(out, y, δx, tmp)
 
 Trapezoidal cumulative integral of `y` along its first dimension with uniform spacing `δx`,
-into `out`, using only whole-array broadcasts on views: an inclusive prefix sum by
-Hillis–Steele doubling (`ceil(log2(n))` ping-pong passes between `out` and the scratch
-`tmp`, all three the same size as `y`), followed by the trapezoid correction
+into `out`, using only whole-array operations: an inclusive prefix sum ([`scan!`](@ref),
+with `tmp` as its scratch, see [`scan_scratch`](@ref)) followed by the trapezoid correction
 `out = δx*(cumsum(y) - (y + y[1])/2)`. This runs on any array type which supports
 broadcasting over views (host or GPU); it is the device implementation of
-[`cumtrapz!`](@ref), which needs neither scalar indexing nor a native scan.
+[`cumtrapz!`](@ref), which needs no scalar indexing.
 
 The result agrees with the sequential `cumtrapz!` to rounding (the summation order differs).
 """
 function cumtrapz_scan!(out, y, δx, tmp)
+    scan!(out, y, tmp)
+    y1 = selectdim(y, 1, 1:1)
+    @. out = δx*(out - (y + y1)/2)
+    out
+end
+
+"""
+    scan!(out, y, tmp)
+
+Inclusive prefix sum of `y` along its first dimension into `out` (`out[i, ...] =
+sum(y[1:i, ...])`) using only whole-array broadcasts on views: Hillis–Steele doubling,
+`ceil(log2(n))` ping-pong passes between `out` and the scratch `tmp` (from
+[`scan_scratch`](@ref)). This is the portable fallback which runs on any array type; a
+backend with a native scan adds a method for its array type which ignores `tmp` (the
+CUDA extension uses `CUDA.cumsum!`, one kernel launch instead of `2*ceil(log2(n))`).
+"""
+function scan!(out, y, tmp)
     n = size(y, 1)
     copyto!(out, y)
     a, b = out, tmp
@@ -362,10 +378,17 @@ function cumtrapz_scan!(out, y, δx, tmp)
         k *= 2
     end
     a === out || copyto!(out, a)
-    y1 = selectdim(y, 1, 1:1)
-    @. out = δx*(out - (y + y1)/2)
     out
 end
+
+"""
+    scan_scratch(y)
+
+Scratch buffer for [`scan!`](@ref) over `y`: `similar(y)` for the doubling fallback, or
+`nothing` for array types with a native scan (added by the backend's extension), so that
+no field-sized buffer is allocated where it is not needed.
+"""
+scan_scratch(y) = similar(y)
 
 
 """

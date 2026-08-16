@@ -184,10 +184,34 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                 @test run_fields < 14
             end
 
+            @testset "native scan" begin
+                # The extension replaces the portable doubling scan by CUDA's cumsum! and
+                # drops the scratch buffers. Same result as the sequential trapezoid rule
+                # to rounding, for real and complex, 2-D and 3-D, and for reshaped views.
+                import Luna: Maths
+                @test Maths.scan_scratch(CUDA.zeros(4, 3)) === nothing
+                relerr(x, y) = sqrt(sum(abs2, x .- y)/sum(abs2, y))
+                δt = 1e-17
+                for T in (Float64, ComplexF64), sz in ((1000, 3), (1000, 2, 3))
+                    y = randn(T, sz...)
+                    ref = similar(y); Maths.cumtrapz!(ref, y, δt)
+                    yd = CuArray(y); outd = similar(yd)
+                    Maths.cumtrapz_scan!(outd, yd, δt, Maths.scan_scratch(yd))
+                    @test relerr(Array(outd), ref) < 1e-13
+                    @test all(iszero, Array(selectdim(outd, 1, 1)))
+                    # the plasma response scans (nt, npts) buffers reshaped from (nt, 1, npts)
+                    if length(sz) == 2
+                        y3 = reshape(yd, sz[1], 1, sz[2]); out3 = reshape(similar(yd), sz[1], 1, sz[2])
+                        Maths.cumtrapz_scan!(out3, y3, δt, nothing)
+                        @test relerr(Array(reshape(out3, sz)), ref) < 1e-13
+                    end
+                end
+            end
+
             @testset "TransModalFixed on CUDA" begin
                 # The modal path on hardware: real-to-complex batched cuFFT plans, CUBLAS
                 # GEMMs, and — the parts JLArrays cannot prove — the cached-PPT spline and
-                # ADK rate compiled into device kernels, and the doubling scan.
+                # ADK rate compiled into device kernels, and the native prefix sum.
                 import Luna: Capillary, Ionisation, Stats, Interface
                 λ0 = 800e-9
                 a = 100e-6

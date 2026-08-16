@@ -452,7 +452,8 @@ cumulative integrals and the plasma current/polarisation are computed for all tr
 points at once, with the same arithmetic as the columnwise response. On the host the
 columns are processed in parallel with per-column kernels (`Utils.tforeach`); on a device
 everything is whole-array broadcasts with [`Maths.cumtrapz_scan!`](@ref) for the
-cumulative integrals. Buffers are allocated lazily on the field's array type at the first
+cumulative integrals (a native scan where the backend provides one, e.g. `CUDA.cumsum!`,
+otherwise the portable doubling scan). Buffers are allocated lazily on the field's array type at the first
 call. `ratefunc` is kept as given (host callable, e.g. for `Stats.electrondensity`);
 `ratefunc_dev` is its copy adapted to `arraytype` for the device kernels.
 """
@@ -468,8 +469,8 @@ mutable struct PlasmaCumtrapzBatched{R, RD}
     phase::Any # (nt, npol, npts)
     J::Any # (nt, npol, npts)
     P::Any # (nt, npol, npts)
-    tmp::Any # scan scratch (nt, npts), device only
-    tmp3::Any # scan scratch (nt, npol, npts), device only
+    tmp::Any # scan scratch (nt, npts), device only (`nothing` with a native scan)
+    tmp3::Any # scan scratch (nt, npol, npts), device only (`nothing` with a native scan)
 end
 
 batched(::PlasmaCumtrapzBatched) = true
@@ -497,8 +498,10 @@ function _plasma_buffers!(B::PlasmaCumtrapzBatched, E3)
         B.J = similar(E3)
         B.P = similar(E3)
         if Utils.isdevice(E3)
-            B.tmp = similar(B.rate)
-            B.tmp3 = similar(E3)
+            # scratch for the prefix-sum fallback; `nothing` where the backend has a
+            # native scan (see `Maths.scan_scratch`)
+            B.tmp = Maths.scan_scratch(B.rate)
+            B.tmp3 = Maths.scan_scratch(E3)
         end
     end
     nothing
@@ -543,7 +546,8 @@ function _plasma_batched!(::Utils.CPUBackend, out3, E3, ρ, B, rate, fraction, E
     nothing
 end
 
-# Device: whole-array broadcasts and the doubling scan for the cumulative integrals.
+# Device: whole-array broadcasts and a prefix sum (native where the backend has one,
+# otherwise the doubling scan) for the cumulative integrals.
 function _plasma_batched!(::Utils.DeviceBackend, out3, E3, ρ, B, rate, fraction, Em,
                           phase, J, P, tmp, tmp3)
     nt, npol, npts = size(E3)

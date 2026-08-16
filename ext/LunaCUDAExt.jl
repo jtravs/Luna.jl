@@ -11,13 +11,32 @@
 # signatured stub in Device.jl, which Julia rejects during precompilation, leaving this
 # extension uncompilable and recompiled in every process that loads it.
 #
+# Methods specialised on `CuArray` are a different matter — they *add* to a generic
+# function rather than overwrite a stub, which is exactly what extensions are for — and
+# are used below for the one hot-loop operation where a native CUDA implementation beats
+# Luna's portable fallback: the prefix sum inside the plasma response.
+#
 # Loaded automatically when CUDA is available, including when CUDA is loaded indirectly
 # by `Luna.resolve_arraytype(:cuda)`.
 # =============================================================================
 module LunaCUDAExt
 
 import Luna
+import Luna: Maths
 import CUDA
+
+# ---------------------------------------------------------------------------
+# Native prefix sum. Luna's portable `Maths.scan!` is a Hillis–Steele doubling scan:
+# 2*ceil(log2(nt)) broadcast kernels per cumulative integral, i.e. ~26 launches at
+# nt = 8192, three times per plasma evaluation. CUDA's `cumsum!` is a single
+# work-efficient scan (a handful of launches) with the same accuracy (rounding-level,
+# different summation order), and it needs no scratch buffer — so `scan_scratch` returns
+# `nothing` and PlasmaCumtrapzBatched allocates two field-sized buffers fewer.
+# `AnyCuArray` covers reshapes and views of `CuArray`s (the plasma buffers are
+# `reshape`d between (nt, npts) and (nt, 1, npts)).
+# ---------------------------------------------------------------------------
+Maths.scan!(out::CUDA.AnyCuArray, y::CUDA.AnyCuArray, tmp) = Base.cumsum!(out, y; dims=1)
+Maths.scan_scratch(::CUDA.AnyCuArray) = nothing
 
 # A GPU array library keeps a memory pool that is not returned by garbage collection
 # alone; the incremental collection first makes freshly dead arrays eligible.
