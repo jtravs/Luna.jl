@@ -42,9 +42,13 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
 
 ## 1. Measure first (user actions on the DMOG A40 — no code)
 
-- [ ] `LUNA_TEST_CUDA=1 julia --project test/runtests.jl test_cuda` — validates cuFFT r2c
-  plans, CUBLAS GEMMs, the PPT spline and ADK kernels, and the new native `cumsum!` scan
-  (`test/test_cuda.jl` "native scan").
+- [ ] **Submit `test/manual/hpc_gpu_suite.sbatch`** (one-time env setup in its header):
+  precompile on the node → CPU tests → `test_cuda.jl` (cuFFT semantics, PPT/ADK/plasma/
+  Raman kernels, native scan, RK45 norm host-vs-device with cancellation — ported from
+  `ModelPNPS/examples/check_device_norm.jl` —, transform/end-to-end agreement, lazy
+  `:cuda` in a fresh subprocess) → `test/manual/hpc_gpu_bench.jl` (cases vuv/ctc/vector/
+  bignt on cpu and cuda: isolated RHS, ms/step, transform share, agreement, device memory,
+  primitives; Markdown summary to paste here). ~1–1.5 h with the defaults.
 - [ ] `julia --project -t 8 test/manual/modal_fixed_rdw.jl vuv quick 1.5 cuda` and the same
   with `cpu` on a full CPU node (`-t 32`). The script prints ms/step, the isolated RHS time
   and 7×RHS for every run, so the transform share vs "everything else" (linear op, RK45,
@@ -134,13 +138,18 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
   high if 3-D + ionisation runs are on the roadmap (filamentation, free-space RDW) — the
   3-D case is where the GPU already showed the largest speedups (Kerr only).
 
-- [ ] **P2 — `RamanPolarField` batched (real-field Raman on device / threaded).** Only the
-  envelope Raman has a batched form (`RamanPolarEnvBatched`). Real-field Raman gases
-  (N₂, H₂, SF₆, air) in multimode runs therefore fall to the serial columnwise fallback
-  (host) or error on device. Effort M (~150 lines): the real-field convolution via a
-  batched FFT along dim 1 on the (nto, Np) array, mirroring `RamanPolarEnvBatched`'s
-  function-barrier/lazy-buffer pattern; tests vs columnwise ≤1e-12. Payoff: Raman
-  multimode on GPU and, on the CPU, threading (today serial per column).
+- [x] **P1 — `RamanPolarField` batched (real-field Raman on device / threaded).** (Done:
+  `Nonlinear.RamanPolarFieldBatched`, thg true/false, host threaded + device broadcasts,
+  picked up automatically by `batched_response`.) This was more urgent than first
+  thought: with the fixed transform now the default, Raman gases (H₂, N₂, SF₆, air —
+  the CtC-type runs) were falling to the *serial* columnwise fallback over 65 nodes,
+  slower than the old adaptive path, and refused on device. Measured on the CtC-type case
+  (H₂, 515 nm, 6 modes, nt=32768/nto=65536): 19 ms per RHS fixed nr=64 vs 72 ms adaptive
+  on 8 laptop threads. **Caveat found on the way (P2, S):** FFTW `PATIENT` planning of a
+  fresh doubled-grid batched shape (2·nto × npts, e.g. 131072 × 65) takes tens of minutes
+  on first use (once per machine/thread count — wisdom is cached); the benchmark script
+  uses `MEASURE`. Consider `MEASURE` for batched plans above some size, or document
+  `Luna.set_fftw_mode(:measure)` for large-nt Raman runs.
 
 - [ ] **P2 — `Kerr_field_nothg` and `Kerr_env_thg` as batched responses.** Both are
   closures over a Hilbert plan / time vector and are neither pointwise nor batched, so

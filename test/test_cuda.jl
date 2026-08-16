@@ -3,6 +3,7 @@ import Luna
 import Luna: Utils, Output, Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields,
              Raman, RK45
 import LinearAlgebra
+import Random
 
 # =============================================================================
 # Hardware-gated CUDA tests.
@@ -208,6 +209,61 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                 end
             end
 
+            @testset "RK45 error norm host vs device (cancellation)" begin
+                # Ported from ModelPNPS/examples/check_device_norm.jl. The step-size
+                # controller sets dz from this norm, so a device norm that is
+                # systematically smaller than the host one would run at an effectively
+                # looser rtol (step count ∝ ratio^(1/5)). test_device.jl checks
+                # `weaknorm_fused` host vs device only under JLArrays; here it is the real
+                # CUDA tree reduction with FMA contraction versus the sequential host loop.
+                # The test must reproduce the cancellation in the error estimate:
+                # Dormand–Prince's `errest` weights sum to zero, so with identical stages
+                # yerr vanishes and the estimate is built from the differences BETWEEN
+                # stages. Stages are therefore a common base field (with the ~10-decade
+                # dynamic range a real state has) plus a relative perturbation `delta`,
+                # swept towards zero: a backend disagreement driven by cancellation grows
+                # as delta shrinks; rounding-level agreement stays at ~eps/delta.
+                mutable struct FakeStepperCUDA{T, N}
+                    y::T
+                    yn::T
+                    ks::NTuple{7, T}
+                    yerr::Union{Nothing, T}
+                    dt::Float64
+                    rtol::Float64
+                    atol::Float64
+                    norm::N
+                end
+                rng = Random.Xoshiro(20260815)
+                DT, RTOL, ATOL = 1.7e-4, 1e-7, 1e-10
+                for sz in ((64, 64, 64), (4097, 6)) # 3-D free-space and modal (nω × nmodes) shapes
+                    dyn = length(sz) == 3 ? reshape(10.0 .^ range(0, -10; length=sz[2]), 1, :, 1) :
+                                            reshape(10.0 .^ range(0, -10; length=sz[2]), 1, :)
+                    base = randn(rng, ComplexF64, sz) .* dyn
+                    for delta in (1e-2, 1e-4, 1e-6, 1e-8)
+                        ks = ntuple(_ -> base .* (1 .+ delta .* randn(rng, ComplexF64, sz)), 7)
+                        yn = base .* (1 .+ delta .* randn(rng, ComplexF64, sz))
+                        host = FakeStepperCUDA(base, yn, ks, nothing, DT, RTOL, ATOL, RK45.weaknorm)
+                        dev = FakeStepperCUDA(CuArray(base), CuArray(yn), map(CuArray, ks),
+                                              nothing, DT, RTOL, ATOL, RK45.weaknorm)
+                        eh = RK45.weaknorm_fused(host)
+                        ed = RK45.weaknorm_fused(dev)
+                        # materialised reference (what a custom, non-fused norm receives)
+                        yerr = @. DT*(ks[1]*RK45.errest[1] + ks[3]*RK45.errest[3] +
+                                      ks[4]*RK45.errest[4] + ks[5]*RK45.errest[5] +
+                                      ks[6]*RK45.errest[6] + ks[7]*RK45.errest[7])
+                        em = RK45.weaknorm(yerr, base, yn, RTOL, ATOL)
+                        reldiff = abs(ed - eh)/abs(eh)
+                        @info "device norm" sz delta ratio=ed/eh reldiff hostmaterialised=em/eh
+                        # rounding: eps per operation, amplified by the cancellation ~1/delta
+                        rtol = max(1e-12, 1e3*eps(Float64)/delta)
+                        @test isapprox(ed, eh; rtol)
+                        @test isapprox(em, eh; rtol)
+                        @test dev.yerr === nothing # the fused device path never materialises yerr
+                    end
+                end
+                GC.gc(); Luna.device_reclaim()
+            end
+
             @testset "TransModalFixed on CUDA" begin
                 # The modal path on hardware: real-to-complex batched cuFFT plans, CUBLAS
                 # GEMMs, and — the parts JLArrays cannot prove — the cached-PPT spline and
@@ -240,6 +296,29 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                     @test rel < 1e-10
                     errh = Array(NonlinearRHS.integral_error!(td))
                     @test all(isfinite, errh)
+                end
+                # real-field Raman (H2), batched on the device: r2c/c2r batched cuFFT plans
+                # on the doubled convolution grid, and the analytic-signal path (thg=false)
+                import Luna: Raman
+                for thg in (true, false)
+                    function make_raman(arraytype)
+                        rr = Raman.raman_response(grid.to, :H2)
+                        resp = (Nonlinear.Kerr_field(PhysData.γ3_gas(:H2)),
+                                Nonlinear.RamanPolarField(grid.to, rr; thg),
+                                Nonlinear.PlasmaCumtrapz(grid.to, grid.to,
+                                                         Ionisation.IonRateADK(:H2),
+                                                         PhysData.ionisation_potential(:H2)))
+                        Luna.setup(grid, densityfun, resp, inputs, modes, :y;
+                                   modal_integral=:fixed, nr=17, arraytype)
+                    end
+                    Eωh, th, _ = make_raman(Array)
+                    Eωd, td, _ = make_raman(CuArray)
+                    @test td.resp_eval[2] isa Nonlinear.RamanPolarFieldBatched
+                    nlh = similar(Eωh); th(nlh, Eωh, 0.0)
+                    nld = similar(Eωd); td(nld, Eωd, 0.0)
+                    rel = relerr(Array(nld), nlh)
+                    @info "CUDA modal transform with Raman vs host" thg rel
+                    @test rel < 1e-10
                 end
                 # end-to-end with the pressure gradient (z-dependent operator evaluated on
                 # the host and uploaded) through the simple interface, versus the host

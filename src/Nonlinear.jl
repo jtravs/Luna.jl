@@ -732,4 +732,196 @@ function _raman_batched!(::Utils.DeviceBackend, out, Et, ρ, B, FT, IFT, hω, dt
     return nothing
 end
 
+"""
+    RamanPolarFieldBatched(t, r; thg=true)
+
+Batched (array-level) version of [`RamanPolarField`](@ref) — the Raman polarisation of a
+carrier-resolved (real) field for all transverse points at once, on a field of shape
+`(nt, npts)` or `(nt, 1, npts)`. The convolution is the same as in `RamanPolarField`
+(squared field in the first half of a doubled real work array `B`, zero padding in the
+second, one real-to-complex FFT along the time dimension, multiplication by the frequency
+domain response `hω`, one complex-to-real inverse FFT), but the FFTs are batched over the
+columns and the density-dependent response function is updated once per call instead of
+once per column (exact: the density is a scalar). With `thg=false` the squared field is
+`|E_a|²/2` from the analytic signal, computed for all columns with one batched complex FFT
+pair (the batched form of `Maths.plan_hilbert`).
+
+Results agree with `RamanPolarField` column-for-column to rounding accuracy (~1e-15
+relative; batched and single-column FFT algorithms differ, so not bit-exact). On the host
+the elementwise stages are threaded over columns and the FFTs are FFTW's batched plans; on
+a device they are broadcasts and the device FFT library. Buffers and plans are allocated
+lazily on the field's array type at the first call.
+"""
+mutable struct RamanPolarFieldBatched{TR, hvT, fT}
+    r::TR # Raman response function
+    h::Vector{Float64} # doubled buffer to hold response + padding
+    ht::hvT # view into first half of h
+    hω::Vector{ComplexF64} # the frequency domain Raman response function (host)
+    hωd::Any # `hω` on the field's array type; `hω` itself on the host (no copy)
+    hFT::fT # 1D real-to-complex Fourier transform plan for h
+    thg::Bool # include third-harmonic generation (E² rather than |E_a|²/2)
+    dt::Float64 # time step for scaling
+    nt::Int # length of the (undoubled) time grid
+    B::Any # (2nt, npts) real doubled work array, allocated lazily on the field's array type
+    Bω::Any # (nt+1, npts) complex spectrum of B
+    FT::Any # batched real-to-complex plan B → Bω along dim 1
+    IFT::Any # its inverse (stored explicitly: an ldiv! through a device plan rebuilds it per call)
+    C::Any # (nt, npts) complex work array for the analytic signal (thg=false only)
+    cFT::Any # in-place complex plan along dim 1 of C
+    cIFT::Any # its inverse
+end
+
+batched(::RamanPolarFieldBatched) = true
+
+# a columnwise real-field Raman response can always be replaced by its batched equivalent
+# (same response function, time grid and thg setting); the batched form allocates its own
+# buffers
+batched_response(R::RamanPolarField; arraytype=Array) =
+    RamanPolarFieldBatched(range(0.0, step=R.dt, length=length(R.ht)), R.r; thg=R.thg)
+
+function RamanPolarFieldBatched(t, r; thg=true)
+    h = zeros(length(t)*2) # note double grid size, see explanation in (R::RamanPolar)
+    ht = view(h, 1:length(t))
+    Utils.loadFFTwisdom()
+    hFT = FFTW.plan_rfft(h, 1, flags=Luna.settings["fftw_flag"])
+    inv(hFT)
+    Utils.saveFFTwisdom()
+    hω = hFT * h
+    RamanPolarFieldBatched(r, h, ht, hω, hω, hFT, thg, t[2] - t[1], length(t),
+                           nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+end
+
+function (R::RamanPolarFieldBatched)(out, Et, ρ)
+    nt = R.nt
+    size(Et, 1) == nt || error("RamanPolarFieldBatched: field time grid size $(size(Et, 1))"*
+                               " does not match response grid size $nt")
+    ncol = length(Et) ÷ nt
+    Etr = reshape(Et, nt, ncol)
+    outr = reshape(out, nt, ncol)
+    if R.B === nothing || size(R.B, 2) != ncol
+        # The work buffers follow the field: `similar` puts them on the same device, and
+        # the plans are made by the matching planner.
+        R.B = similar(Et, Float64, (2nt, ncol))
+        R.Bω = similar(Et, ComplexF64, (nt+1, ncol))
+        Utils.loadFFTwisdom(Utils.backend(Et))
+        R.FT = Utils.plan_rfft_backend(R.B, 1)
+        R.IFT = inv(R.FT)
+        if !R.thg
+            R.C = similar(Et, ComplexF64, (nt, ncol))
+            R.cFT = Utils.plan_fft!_backend(R.C, 1)
+            R.cIFT = Utils.plan_ifft!_backend(R.C, 1)
+        end
+        Utils.saveFFTwisdom(Utils.backend(Et))
+        # The response kernel is computed on the host (it is only 2nt long); on a device
+        # it needs a staging copy, which is refreshed per call below.
+        Utils.isdevice(Et) && (R.hωd = similar(Et, ComplexF64, length(R.hω)))
+    end
+    # update the response function and its transform once per call — it depends only on
+    # the scalar density, so this is exact (RamanPolarField recomputes it per column)
+    R.r(R.ht, ρ)
+    R.hω .= R.hFT * R.h
+    R.hωd === R.hω || copyto!(R.hωd, R.hω)
+    _raman_field_batched!(outr, Etr, ρ, R.B, R.Bω, R.FT, R.IFT, R.hωd, R.dt, nt,
+                          R.thg, R.C, R.cFT, R.cIFT)
+    out
+end
+
+# function barrier: the buffer/plan fields are loosely typed on the struct
+_raman_field_batched!(out, Et, ρ, B, Bω, FT, IFT, hω, dt, nt, thg, C, cFT, cIFT) =
+    _raman_field_batched!(Utils.backend(out), out, Et, ρ, B, Bω, FT, IFT, hω, dt, nt,
+                          thg, C, cFT, cIFT)
+
+# The analytic signal of every column of Et into C (cf. Maths.plan_hilbert!): FFT along
+# time, double the positive frequencies, zero the negative ones (and Nyquist), inverse FFT.
+function _analytic_batched!(::Utils.CPUBackend, C, Et, cFT, cIFT)
+    nt, ncol = size(C)
+    n1 = nt ÷ 2
+    Utils.tforeach(ncol; ntotal=length(C)) do i
+        @inbounds begin
+            Ccol = view(C, :, i)
+            Ccol .= view(Et, :, i)
+        end
+    end
+    cFT * C
+    Utils.tforeach(ncol; ntotal=length(C)) do i
+        @inbounds begin
+            Ccol = view(C, :, i)
+            @views Ccol[2:n1] .*= 2
+            @views fill!(Ccol[n1+1:nt], 0)
+        end
+    end
+    cIFT * C
+    C
+end
+
+function _analytic_batched!(::Utils.DeviceBackend, C, Et, cFT, cIFT)
+    nt = size(C, 1)
+    n1 = nt ÷ 2
+    C .= Et
+    cFT * C
+    view(C, 2:n1, :) .*= 2
+    fill!(view(C, n1+1:nt, :), 0)
+    cIFT * C
+    C
+end
+
+function _raman_field_batched!(::Utils.CPUBackend, out, Et, ρ, B, Bω, FT, IFT, hω, dt,
+                               nt, thg, C, cFT, cIFT)
+    ncol = size(Et, 2)
+    thg || _analytic_batched!(Utils.CPUBackend(), C, Et, cFT, cIFT)
+    Utils.tforeach(ncol; ntotal=length(B)) do i
+        @inbounds begin
+            Bcol = view(B, :, i)
+            # squared field in the first half (cf. sqr!), zero padding in the second
+            # (the padding is rebuilt every call for uniformity with the envelope version)
+            if thg
+                Ecol = view(Et, :, i)
+                @views @. Bcol[1:nt] = Ecol^2
+            else
+                Ccol = view(C, :, i)
+                @views @. Bcol[1:nt] = 1/2 * abs2(Ccol)
+            end
+            @views fill!(Bcol[nt+1:2nt], 0)
+        end
+    end
+    mul!(Bω, FT, B) # batched (t → ω)
+    Utils.tforeach(ncol; ntotal=length(Bω)) do i
+        @inbounds begin
+            Bωcol = view(Bω, :, i)
+            # convolution by multiplication; dt scaling as in RamanPolar
+            @. Bωcol = hω * Bωcol * dt
+        end
+    end
+    mul!(B, IFT, Bω) # batched (ω → t); c2r may destroy Bω, which is scratch
+    Utils.tforeach(ncol; ntotal=length(out)) do i
+        @inbounds begin
+            ocol = view(out, :, i)
+            Ecol = view(Et, :, i)
+            Pcol = view(B, 1:nt, i)
+            @. ocol += ρ*Ecol*Pcol
+        end
+    end
+    nothing
+end
+
+# Device: the same stages as whole-array broadcasts. Views of the leading dimension are
+# contiguous, so they stay device-friendly strided arrays.
+function _raman_field_batched!(::Utils.DeviceBackend, out, Et, ρ, B, Bω, FT, IFT, hω, dt,
+                               nt, thg, C, cFT, cIFT)
+    Bfirst = view(B, 1:nt, :)
+    Bsecond = view(B, nt+1:2nt, :)
+    if thg
+        @. Bfirst = Et^2
+    else
+        _analytic_batched!(Utils.DeviceBackend(), C, Et, cFT, cIFT)
+        @. Bfirst = 1/2 * abs2(C)
+    end
+    fill!(Bsecond, 0)
+    mul!(Bω, FT, B) # batched (t → ω)
+    @. Bω = hω * Bω * dt # hω expands along the (doubled-grid) frequency dimension
+    mul!(B, IFT, Bω) # batched (ω → t)
+    @. out += ρ*Et*Bfirst
+    return nothing
+end
+
 end

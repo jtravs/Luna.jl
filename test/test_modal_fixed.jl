@@ -239,6 +239,66 @@ end
     @test out[1, :, :] == zeros(2, 3)
 end
 
+@testset "Batched real-field Raman equals columnwise" begin
+    import Luna: Raman, Utils
+    nt = 2048; npts = 6
+    t = collect(range(-200e-15, 200e-15, length=nt))
+    ω0 = 2π*PhysData.c/λ0
+    rng = MersenneTwister(13)
+    ρ = PhysData.density(:H2, 5.0)
+    rr = Raman.raman_response(t, :H2)
+    E3 = zeros(nt, 1, npts)
+    for i in 1:npts
+        A = 3e9*rand(rng)*exp.(-t.^2 ./ (2*(30e-15)^2))
+        E3[:, 1, i] .= A .* cos.(ω0 .* t .+ 2π*rand(rng))
+    end
+    for thg in (true, false)
+        colwise = Nonlinear.RamanPolarField(t, rr; thg)
+        outc = zeros(nt, 1, npts)
+        for i in 1:npts
+            colwise(view(outc, :, 1, i), view(E3, :, 1, i), ρ)
+        end
+        @test maximum(abs.(outc)) > 0
+        batched = Nonlinear.batched_response(colwise)
+        @test batched isa Nonlinear.RamanPolarFieldBatched
+        @test batched.thg == thg
+        @test Nonlinear.batched(batched) && Nonlinear.batched(batched, 1)
+        outb = zeros(nt, 1, npts)
+        batched(outb, E3, ρ)
+        @test relerr(outb, outc) < 1e-12 # batched vs single-column FFTs: rounding only
+        # 2-D (nt, npts) call and a second call (buffers reused, padding rebuilt)
+        outb2 = zeros(nt, npts)
+        batched(outb2, E3[:, 1, :], ρ)
+        @test relerr(outb2, outc[:, 1, :]) < 1e-12
+        # the device path (whole-array broadcasts) on host arrays, with the same buffers
+        outd = zeros(nt, npts)
+        Nonlinear._raman_field_batched!(Utils.DeviceBackend(), outd, E3[:, 1, :], ρ,
+                                        batched.B, batched.Bω, batched.FT, batched.IFT,
+                                        batched.hω, batched.dt, nt, thg,
+                                        batched.C, batched.cFT, batched.cIFT)
+        @test relerr(outd, outc[:, 1, :]) < 1e-12
+    end
+    # the transform picks the batched form up automatically for a Raman gas
+    grid = Grid.RealGrid(1e-3, λ0, (200e-9, 3000e-9), 400e-15)
+    modes = [Capillary.MarcatiliMode(a, :H2, 5.0; n=1, m=m) for m in 1:2]
+    resp = (Nonlinear.Kerr_field(PhysData.γ3_gas(:H2)),
+            Nonlinear.RamanPolarField(grid.to, Raman.raman_response(grid.to, :H2)))
+    Eω, tf, FT = modal_setup(grid, modes, :y, resp; energies=(5e-6, 1e-6),
+                             modal_integral=:fixed, nr=17)
+    @test tf.resp_eval[2] isa Nonlinear.RamanPolarFieldBatched
+    @test tf.resp[2] isa Nonlinear.RamanPolarField # the original is kept
+    # Raman is cubic in the mode fields like Kerr, so the fixed rule is exact and the
+    # adaptive cubature (nested Clenshaw–Curtis, exact for the cubic too) agrees to
+    # rounding even at a loose tolerance. NB every new (2nto × npts) shape costs a
+    # one-time PATIENT FFTW planning of the doubled-grid batched transform.
+    _, ta, _ = modal_setup(grid, modes, :y, resp; energies=(5e-6, 1e-6),
+                           modal_integral=:adaptive, rtol=1e-6, mfcn=10^4)
+    nontrivial!(Eω, grid)
+    nlf = similar(Eω); tf(nlf, Eω, 0.0)
+    nla = similar(Eω); ta(nla, Eω, 0.0)
+    @test relerr(nlf, nla) < 1e-12
+end
+
 @testset "Vector Kerr array-level equals columnwise" begin
     nt = 512; npts = 5
     rng = MersenneTwister(12)
