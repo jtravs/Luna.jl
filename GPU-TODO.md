@@ -13,6 +13,11 @@ Legend — **Effort**: S ≲ ½ day / < 50 lines, M ≈ 1–2 days / 50–300 li
 sweeps of ~200 runs; occasional 2-D vector sets and large time grids).
 Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when needed.
 
+§§0–6 concern the **modal** (`TransModalFixed`) path. **§7 covers the separate 3-D
+free-space (`TransFree`) path** — the ModelPNPS TG-FROG campaigns — which *has* now been
+measured on an A40 and whose bottlenecks are different. The downstream half of that work
+lives in `ModelPNPS/GPU-TODO.md`.
+
 ---
 
 ## 0. Bugs / blockers found while planning (fix before the first GPU scan)
@@ -279,3 +284,93 @@ Priority: P0 = blocks intended use, P1 = do next, P2 = worthwhile, P3 = when nee
   path.
 - Re-tuning `nt` / RK45 tolerance as part of this work: do it after the spatial error is
   fixed — now possible (§4).
+
+---
+
+## 7. Three-dimensional free space (`TransFree`) — the ModelPNPS TG-FROG path
+
+Unlike §§0–6 this path **has** been measured on an A40, against the 04 Kerr production
+campaign (`Nω=256`, `N=768`, `rtol=1e-7`, 16 z-saves, field = 2.25 GiB):
+
+| | GPU (1×A40) | CPU (8 threads) |
+|---|---|---|
+| wall / delay point | 265–281 s | 2873–3150 s |
+| of which propagation | 227–230 s | 2779–3048 s |
+| **non-propagation overhead** | **38–50 s (14–18 %)** | 94–102 s (3.2 %) |
+| RK45 steps | 73–77 | 86–88 |
+| device resident | 22.5 GiB (**exactly 10.0 fields**) | — |
+| host peak RSS | 14.2 GiB | 32.8–33.3 GiB |
+
+Speedup 11.4×; accuracy ≤7.4e-4 of the trace maximum against a bit-identical CPU
+reference; the RK45 error norm was verified host-vs-device on hardware (ratio
+1.000000000, reldiff ~1e-13, flat up to a cancellation factor of 2.3e8), so the lower GPU
+step count is trajectory divergence seeded by cuFFT-vs-FFTW, not an accuracy difference.
+
+The cuFFT plan workspace — the one quantity the original plan could not predict — is
+**negligible**: 10.0 fields is exactly 9 RK45 registers + 1 transform buffer.
+
+The bottlenecks here are therefore **not** the modal ones. Two thirds of the remaining
+headroom is host-side and I/O, not kernel time. Items below are ordered by expected value
+for that campaign; see `ModelPNPS/GPU-TODO.md` for the downstream half of each.
+
+- [ ] **P0 — Measure the device RHS breakdown** (Effort S, script under `test/manual/`).
+  Everything below is a traffic-model estimate. Time, in isolation on the device: the two
+  3-D FFTs, `_prop_factored!` (8×/step), the response broadcast, `_apply_towin!`,
+  `_scale_nl!`, the RK45 stage combines, `weaknorm_fused`. The single decision this
+  informs is **whether the step is FFT/FP64-bound or bandwidth-bound**, because that
+  determines whether renting an A100 is worth 2× or 4×: the A40 (GA102) has 1/64-rate
+  FP64 (~0.58 TFLOPS) against the A100's 1/2 rate (~9.7 TFLOPS, **16.7×**), while
+  bandwidth differs by only 2.2× (0.70 vs 1.55 TB/s). If the FFTs dominate, an A100 is
+  worth far more than its bandwidth ratio suggests — and that is a procurement decision,
+  not a code one, so it is worth knowing before any of the kernel work below.
+
+- [ ] **P1 — Skip the host FFT prototype and host plan on the device path** (Effort S).
+  `setup(::EnvGrid, ::FreeGrid)` (`src/Luna.jl:377-407`) unconditionally allocates
+  `xr = Array{ComplexF64}(undef, nt, ny, nx)` purely as an FFTW planning prototype, plans
+  `FTh` against it, allocates `Eωk` as a host array, and only then adapts to the device.
+  At production that is **two full host fields (4.5 GiB) and a 3-D FFTW plan that the
+  device path never uses** — ModelPNPS passes `inputs = ()`, so `doinputs_fs!` is a no-op
+  and `FTh` is discarded. Fix: when `ondevice && isempty(inputs)`, allocate `Eωk` with
+  `device_zeros(arraytype, ComplexF64, …)` and build neither `xr` nor `FTh`. Keep the host
+  build when there are inputs (the field builders are host code). Payoff: 4.5 GiB off the
+  host peak and the host planning time, for a few lines. This is the largest single item
+  in the 14.2 GiB host figure after the beamlets.
+
+- [ ] **P1 — Let an output handler consume the *device* state** (Effort S–M).
+  `HostOutput` copies each saved slice to a host buffer so `Output` handlers see a host
+  array. For 3-D free space that slice is 2.25 GiB, and ModelPNPS immediately reduces it
+  to three `(Nω,)` vectors — 2 KB — so the copy (and, when streaming, a 36 GiB round trip
+  through a temp file) is pure waste. The machinery already exists on the statistics side:
+  `Stats.StateStat`/`wants_state` hands the device array through, and `needs_host_y`
+  already suppresses the per-step copy. Extend the same opt-in to output handlers, so a
+  handler can declare it reduces on device and receive the untouched device array.
+  Payoff: enables `ModelPNPS` §1 (below), which is worth 14–18 % of wall clock plus
+  72 GiB/point of temp I/O. **Do this before any kernel micro-optimisation.**
+
+- [ ] **P2 — Drop the `ScaledPlan` normalisation pass in the fast-path RHS** (Effort S for
+  the pointwise case, M in general). On device `IFT = inv(FT)` (`src/NonlinearRHS.jl:1162`)
+  is an `AbstractFFTs.ScaledPlan`, so `mul!(t.Eto, IFT, Eωk)` runs cuFFT and then a
+  *separate* full-array `Eto .*= 1/N`. At production that is a 4.5 GiB read+write per RHS,
+  7× per step — an estimated **~7 % of step traffic**, entirely avoidable:
+  - *(S, exact, no assumptions)* for the pointwise path (`t.Pto === nothing`, which is the
+    Kerr-only campaign), pass the `1/N` into `pointwise_Pt!` as a prescale applied on read.
+    It fuses into a pass that already exists.
+  - *(M)* for the general/batched path (Kerr+Raman), give responses a homogeneity-degree
+    trait: both Kerr and the Raman envelope polarisation are degree 3 in `Et`, so an
+    unnormalised inverse plus a `(1/N)^d` factor folded into `_scale_nl!` is exact. Guard
+    on all responses sharing a degree and fall back otherwise.
+
+- [ ] **P2 — Fuse `_apply_towin!` into the response evaluation** (Effort S–M). A second
+  standalone full-array pass per RHS (`Pto .*= towin`, `src/NonlinearRHS.jl:1273`), same
+  4.5 GiB × 7 per step, another estimated **~7 %**. The pointwise path can apply `towin` in
+  the same broadcast that writes `Pto`; the batched path needs it after the accumulation,
+  so it is only foldable into the last response's write.
+
+- [ ] **P2 — Plasma in `TransFree` on device** — already listed at §3 P1; noted here
+  because the TG-FROG campaigns are the use case that would need it (they are Kerr+Raman
+  today). Nothing to add beyond what §3 says.
+
+**Not worth doing** (analysed, rejected): reducing the resident field count to fit two
+delay points on one A40 — two points need 45 GiB against the A40's 44.4, and on a
+bandwidth- or FFT-bound kernel concurrency buys nothing anyway; FP32 anywhere in the
+propagation — it would invalidate the `rtol=1e-7` accuracy campaign.
