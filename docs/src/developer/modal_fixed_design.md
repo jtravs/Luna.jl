@@ -54,9 +54,12 @@ The headline findings, all detailed below:
   the fixed rule reproduces the adaptive one to ``10^{-8}`` in the final field of a 1.5 m
   RDW propagation, and the embedded Gauss–Kronrod error estimate becomes trustworthy.
 - **Speed (CPU, laptop, 8 threads).** RDW VUV example, 1.5 m: 18.6 min (adaptive, old
-  rate) → 138 s (adaptive, smooth rate) → 96 s (fixed, default ``n_r=64``) → 56 s (fixed,
-  ``n_r=32``). CtC-type H₂ supercontinuum (nt = 32768, 6 modes, Raman + plasma): 72 ms →
-  19 ms per RHS. The transform scales with cores; the adaptive one did not.
+  rate) → 138 s (adaptive, smooth rate) → 67 s (fixed, default ``n_r=64``) → 48 s (fixed,
+  ``n_r=32``), with the fused two-pass plasma kernel. CtC-type H₂ supercontinuum
+  (nt = 32768, 6 modes, Raman + plasma): 72 ms → 14.5 ms per RHS. The transform scales
+  with cores; the adaptive one did not. In the RDW gradient case the transform is now
+  only ~25 % of a step; the ``z``-dependent linear operator (~45 %) and the statistics
+  (~15 %) are the next targets (§5.2).
 - **GPU.** The same code runs on CUDA arrays (validated with JLArrays on the host and by
   hardware-gated tests; the first A40 measurements are pending — see the roadmap). The
   plasma path is bandwidth-bound (≈0.5 FLOP/B), so HBM bandwidth, not FP64 rate, is what a
@@ -394,12 +397,21 @@ at ``n_\theta=16`` (tested: orthonormality ``\sum_i w_i e_{mi}e_{ni} = \delta_{m
 ``10^{-12}``, full 2-D Kerr transform vs a high-``n_r`` reference and `hcubature` at
 ``10^{-10}``).
 
-A consequence beyond accuracy: a symmetric fixed rule yields an effective overlap tensor
+A symmetric fixed rule yields an effective overlap tensor
 ``\Gamma^{\rm eff}_{mnpq}=\sum_i w_i e_{mi}e_{ni}e_{pi}e_{qi}`` that is symmetric under
-index permutation, so the Kerr term derives from a quartic Hamiltonian and conserves
-energy/photon number exactly (independent of ``n_r``); an adaptive mesh that changes
-between evaluations breaks that at the tolerance level. (A demonstration script is on the
-roadmap.)
+index permutation, so the spatial part of the Kerr term's energy conservation is exact
+independent of ``n_r``. **Measured** (`test/manual/modal_fixed_conservation.jl`, RDW-type
+Kerr-only loss-free case): the frozen-field energy derivative of the Kerr term
+``|D|/E_{\rm tot}`` is ``10^{-7}``–``10^{-9}`` per metre and *identical* to three digits
+for the fixed rule at ``n_r=17/33/65`` **and** for the adaptive cubature at
+`rtol=1e-3`/`1e-6`, and the energy drift over 20 cm is the same ``9.6\times10^{-8}`` for
+both. So for Kerr the spatial quadrature is not the limiting factor for either method
+(the adaptive nested Clenshaw–Curtis rule is exact for the quartic too, as noted above);
+the residual is the time-domain part — apodisation windows and the aliasing of the
+``\partial_tE\cdot E^3`` product on the oversampled grid — common to both. The
+"adaptive mesh breaks conservation" concern of the pre-implementation analysis therefore
+does not apply to Kerr; it would apply to the plasma term, where the adaptive rule is not
+exact.
 
 ### 4.2 Plasma: spectral convergence for a smooth rate
 
@@ -414,6 +426,21 @@ radial mode order — not by the intensity: at the peak the field is still a sup
 of the same four modes and the plasma a stronger but still smooth function of it. Given a
 smooth rate, the *adaptive* code also converged with 31 points everywhere, peak included
 (that is the 138 s run in §5.1).
+
+**Azimuthal convergence with plasma** (`test/manual/modal_fixed_ntheta.jl`; frozen field
+after 5 mm of a strongly θ-dependent case — HE₁₁ 90 µJ + HE₂₁ 50 µJ + TM₀₁ 40 µJ, 10 fs
+at 800 nm, 1 bar Ar, peak field ``2.8\times10^{10}`` V/m, peak electron density
+``3.9\times10^{21}\,{\rm m^{-3}}``; errors relative to ``n_\theta=128``, on the
+θ-dependent mode columns): Kerr ``1.6\times10^{-1}`` at ``n_\theta=4`` (aliased: degree 4
+= ``n_\theta``) and ``10^{-15}`` from ``n_\theta=6`` on (bound ``4h_{\max}+1 = 5``);
+plasma spectral — ``8\times10^{-1}`` @4, ``1.3\times10^{-1}`` @6, ``3\times10^{-2}``
+@8, ``2.4\times10^{-4}`` @12, ``\mathbf{8.4\times10^{-7}}`` @16 (the default),
+``4\times10^{-10}`` @24, ``10^{-13}`` @32, rounding at 48. Radially (``n_\theta=32``,
+vs ``n_r=256``): plasma ``1.3\times10^{-8}`` @16, ``5\times10^{-13}`` @24,
+``10^{-14}`` @32. So the default ``n_\theta=16`` gives ~``10^{-6}`` on the plasma term
+of a strongly vectorial field; ``n_\theta=24`` gives ``10^{-9}``. (A circularly polarised
+HE₁₁ input alone has a θ-independent intensity and is exact at any ``n_\theta`` — a
+useless test, tried first.)
 
 ### 4.3 The PPT channel-closing kinks
 
@@ -491,6 +518,20 @@ channel-sum PPT: peak electron density 12 % lower; final fields within 0.2 % (0.
 the 220–270 nm dispersive-wave band); channel-sum 256 vs 512 nodes agree to
 ``2\times10^{-6}`` there.
 
+**Mode convergence** (`test/manual/modal_fixed_modeconv.jl`, RDW VUV example, 1.5 m,
+default rule, smooth PPT; quadrature error in the 100–140 nm band ``10^{-10}``–``10^{-11}``,
+so the differences below are mode truncation): without plasma 4 vs 8 modes differ by
+``5.7\times10^{-4}`` in band energy and ``3\times10^{-3}`` in the band spectrum, 6 vs 8
+by ``2.7\times10^{-5}`` / ``2.4\times10^{-4}`` — converged at 6; with plasma 4 vs 8
+differ by ``2\times10^{-2}`` in the band spectrum and ``0.9\,\%`` in total energy
+(loss), 6 vs 8 by ``5\times10^{-3}`` / ``0.14\,\%``; peak electron density
+``1.89/1.85/1.86\times10^{22}\,{\rm m^{-3}}``; steps 4391/5038/5208; wall 62/92/114 s.
+The ~10× worse mode convergence with ionisation (the plasma index is sharply peaked on
+axis and couples to higher radial orders) was predicted in the analysis and is now
+measurable because the quadrature noise that used to mask it is gone. Practical
+consequence: for per-cent-level VUV band spectra in ionising RDW runs use 6 modes; 4 modes
+is a 2 % answer.
+
 ### 4.5 Error monitoring
 
 `Stats.mode_reconstruction_error(::TransModalFixed; window)` records every step:
@@ -524,25 +565,53 @@ stated. GPU numbers are **not yet measured** (§5.4).
 ### 5.1 End to end
 
 RDW VUV example, 1.5 m: 18.6 min (adaptive, channel-sum PPT) → 138 s (adaptive, smooth
-PPT) → 96 s (fixed ``n_r=64``, the default) → 56 s (fixed ``n_r=32``). The fair like-for-like
-comparison is therefore 138 s vs 96/56 s: once the rate is smooth the adaptive scheme needs
+PPT) → 96 s (fixed ``n_r=64``, the default, first version) → 56 s (fixed ``n_r=32``);
+with the fused two-pass plasma kernel (below) 67 s and 48 s. The fair like-for-like
+comparison is therefore 138 s vs 67/48 s: once the rate is smooth the adaptive scheme needs
 only ~31 points, so at ``n_r=32`` the fixed rule does the same amount of per-node work and
 gains only from batching and threading, and at ``n_r=64`` it does twice the work and still
 wins because it is parallel. The gain grows with core count (the adaptive integrand is
 serial), with per-node work (Raman: CtC-type H₂ case, nt=32768/nto=65536, 6 modes,
-Kerr+ADK+Raman: **19 ms per RHS fixed ``n_r=64`` vs 72 ms adaptive**), and for 2-D vector
+Kerr+ADK+Raman: **14.5 ms per RHS fixed ``n_r=64`` vs 72 ms adaptive**), and for 2-D vector
 sets.
 
-### 5.2 Where the time goes (one RHS)
+### 5.2 Where the time goes
+
+One RHS, before and after fusing the CPU plasma column (see below):
 
 | | VUV (nto 8192, M 4, 65 nodes) | CtC-type (nto 65536, M 6, 65 nodes) |
 |---|---|---|
-| **RHS total** | **1.26 ms** | **18.6 ms** |
-| plasma (rate + 3 cumulative integrals + elementwise) | 0.85 (68 %) | 8.1 (44 %) |
-| Raman (batched doubled-grid FFT pairs) | – | 7.0 (38 %) |
+| **RHS total** | **1.26 → 0.69 ms** | **18.6 → 14.5 ms** |
+| plasma | 0.85 → 0.28 | 8.1 → 3.8 |
+| Raman (batched doubled-grid FFT pairs) | – | 7.0–8.4 |
 | Kerr | 0.14 | 0.4 |
 | synthesis + projection GEMM | 0.10 | 1.2 |
 | modal IFFT + FFT + windows | 0.10 | 1.0 |
+
+**The fused plasma column.** The scalar/vector plasma kernels shared by `PlasmaCumtrapz`
+and the host path of `PlasmaCumtrapzBatched` used to make ~7 passes over the column through
+five intermediate arrays; they are now two passes — the rate (the rate function's array
+method), then one serial sweep carrying the three running trapezoid sums in registers,
+reading E once and writing P once — with exactly the arithmetic and operation order of the
+multi-pass form (kept as `_plasma_*_multipass!` and tested `==`), plus two exact
+shortcuts: ``e^{-\int W}`` is only re-evaluated when the integral changed (it does not over
+the pulse wings, where the rate is zero — 93 % of the samples in the RDW example, and the
+`exp` was the dominant cost of the sweep at ~3.5 ns per sample), and the loss term's
+division is skipped where the rate vanishes (it adds exactly ±0.0). Sweep cost 6.1 → 2.3 ns
+per sample per thread. The host path allocates only the rate and P.
+
+**One RK45 step** (RDW VUV gradient case, ``n_r=32``, 11.0 ms measured): 6 × (linear
+operator 0.78 ms + RHS 0.46 ms) + statistics 2.9 ms + windows 0.07 ms. So after the
+transform work the step is dominated by (a) the **``z``-dependent linear operator** for
+the pressure gradient — `LinearOps.make_linop` evaluates `Modes.neff(mode, ω; z)` for every
+(mode, ω) at every stage, ~48 ns each: the gas index (`coren`, a density spline × Sellmeier)
+and the cladding index (`cladn`, a `CmplxBSpline`) are re-evaluated per mode although the
+gas index is common to all modes and the cladding index is ``z``-independent (~45 % of the
+step; roadmap §8.3), and (b) the **statistics** — of which `fwhm_t` alone was 1.3 ms
+because `Maths.level_xings` returned "no crossing" (empty higher modes) by throwing and
+catching an exception, ~100 µs each; fixed to return the same NaNs without throwing
+(statistics 2.4 → 1.4 ms per step, of which the mode-error statistic's transform call is
+0.65 ms).
 
 Rate evaluation per sample: cached PPT spline ≈ 1–2 ns per thread, ADK ≈ 2.5 ns, direct
 `IonRatePPT` ≈ 120 ns — recomputing the rate instead of the spline is ruled out on any
@@ -667,15 +736,19 @@ the record.
   GPU. Consider lowering the default once the mode-count study (§8.5) is done.
 - [x] **`stats_period` / `mode_error=false`** for sweeps: −14 % (one of 7 transform calls
   per step).
-- [ ] **P1 — CPU: fuse the plasma column into two passes** (`_plasma_scalar!`/
-  `_plasma_vector!`): today ~7 passes over the column through 5 intermediate arrays;
-  instead one SIMD pass for the rate and one serial pass carrying the three running
-  trapezoid sums in registers, reading E once and writing P once, with the *same*
-  arithmetic order as `Maths.cumtrapz!` (bit-identical, testable exactly). Expect the
-  plasma to halve (VUV RHS −35 %, CtC −25 %) and the five nto×Np buffers to disappear on
-  the CPU (also fixes the CtC column working set falling out of L2). **CPU only** — one
-  thread walking a column is what a GPU must not do; its GPU counterparts are the fusion /
-  time-tiled scan below. Worth doing regardless of the A40 results. Effort S–M.
+- [x] **P1 — CPU: fuse the plasma column into two passes.** Done (§5.2): plasma 3×
+  faster on the RDW case (0.85 → 0.28 ms), 2× on CtC; RHS −45 % / −22 %; bit-identical.
+- [ ] **P1 — CPU: the ``z``-dependent modal linear operator** (pressure gradients — the
+  RDW standard case): 0.78 ms per call, 6 calls per step = ~45 % of a step at ``n_r=32``.
+  `LinearOps.neff_grid` for a vector of `MarcatiliMode`s should evaluate the gas index once
+  per ``z`` for all modes that share it (today `Interface.makemode_s` builds a separate
+  `Capillary.gradient` — and density spline — per mode, so even identity-based sharing
+  fails; build it once) and the cladding index once per run where it is
+  ``z``-independent (the standard constructors' `cladn` closures are; give them a shared,
+  registered closure so `neff_grid` can know it exactly), then the closed-form `neff` per
+  mode. Same numbers (same functions on the same inputs), ~3× faster operator, ~−30 % per
+  step. Effort M (Interface + Capillary + LinearOps).
+- [x] **`fwhm_t` statistic exception path** — fixed (§5.2).
 - [ ] **P2 — Raman by mode pairs.** ``h*E^2 = \sum_{mn}(h*A_mA_n)\,e_me_n``: ``M(M+1)/2``
   pair convolutions instead of one per node, then a small GEMM. Gain on the Raman term
   ``= n_p/[M(M+1)/2]``: 65/21 ≈ 3× at ``n_r=64``, ``M=6`` (CtC RHS −25 %), 65/10 ≈ 6.5× at
@@ -729,13 +802,14 @@ the record.
 
 ### 8.5 Validation and physics still outstanding
 
-- [ ] **P1 — Kerr energy / photon-number conservation** over long propagation, fixed vs
-  adaptive (should be exact to rounding for the fixed rule, §4.1). Effort S.
-- [ ] **P1 — Mode-convergence rerun (4 vs 6 vs 8 modes) with and without plasma**, now
-  that quadrature noise is gone; expect worse convergence in the ionising regime. Effort S.
-- [ ] **P2 — 2-D vector-set convergence in ``n_\theta`` with plasma** (the plasma is not
-  polynomial, so ``\theta`` exactness does not apply to it); a justified ``n_\theta``
-  default. The A40 `vector` case gives first data. Effort S.
+- [x] **Kerr energy conservation, fixed vs adaptive** — done (§4.1): identical for
+  both, limited by the time-domain discretisation, not the spatial quadrature.
+- [x] **Mode convergence 4/6/8 with and without plasma** — done (§4.4): converged at 6
+  without plasma; 4 modes is a 2 % answer with plasma, 6 modes 0.5 %.
+- [x] **``n_\theta`` convergence of the 2-D rule with plasma** — done (§4.2): the
+  default 16 gives ``10^{-6}``, 24 gives ``10^{-9}`` on a strongly vectorial field; Kerr
+  exact from 6. Consider ``n_\theta=24`` as the default for plasma-heavy vector runs
+  (1.5× cost) — or leave 16 and rely on the (very conservative) embedded θ estimate.
 - [ ] **P2 — Third-gas check of smooth vs channel-sum PPT** (Kr/Xe at 800 nm or Ar at
   1.8 µm, ``\gamma\approx1``–2). If a case ever disagrees, the right fix is a *soft*
   channel-closing regularisation in `IonRatePPT`, not resolving the hard step. Effort S.
