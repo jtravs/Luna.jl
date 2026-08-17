@@ -221,14 +221,36 @@ end
             batched(outb2, E3[:, 1, :], ρ)
             @test outb2 == outc[:, 1, :]
         end
-        # the device path (whole-array broadcasts + doubling scan) on host arrays
+        # the host path stores only the rate and P (two-pass column kernel)
+        @test batched.fraction === nothing && batched.J === nothing && batched.phase === nothing
+        # the device path (whole-array broadcasts + doubling scan) on host arrays, which
+        # needs the intermediate-stage buffers the host path no longer allocates
         outd = zeros(nt, npol, npts)
         Nonlinear._plasma_buffers!(batched, E3)
-        batched.tmp = similar(batched.rate); batched.tmp3 = similar(E3)
+        fraction = similar(batched.rate); phase = similar(E3); J = similar(E3)
+        tmp = similar(batched.rate); tmp3 = similar(E3)
         Nonlinear._plasma_batched!(Utils.DeviceBackend(), outd, E3, ρ, batched,
-                                   batched.rate, batched.fraction, batched.Em,
-                                   batched.phase, batched.J, batched.P, batched.tmp, batched.tmp3)
+                                   batched.rate, fraction, batched.Em,
+                                   phase, J, batched.P, tmp, tmp3)
         @test relerr(outd, outc) < 1e-12
+        # the fused two-pass column kernels are bit-identical to the multi-pass reference
+        Pf = zeros(nt, npol); Pm = zeros(nt, npol)
+        ratef = zeros(nt); ratem = zeros(nt); frac = zeros(nt); ph = zeros(nt, npol); Jm = zeros(nt, npol)
+        for i in 1:npts
+            if npol == 1
+                Ecol = view(E3, :, 1, i)
+                Nonlinear._plasma_scalar!(view(Pf, :, 1), ratef, Ecol, ir, Ip, 0.0, δt)
+                Nonlinear._plasma_scalar_multipass!(view(Pm, :, 1), view(Jm, :, 1), view(ph, :, 1),
+                                                    ratem, frac, Ecol, ir, Ip, 0.0, δt)
+            else
+                Ex = view(E3, :, 1, i); Ey = view(E3, :, 2, i); Em = hypot.(Ex, Ey)
+                Nonlinear._plasma_vector!(Pf, ratef, Ex, Ey, Em, ir, Ip, 0.0, δt)
+                Nonlinear._plasma_vector_multipass!(Pm, Jm, ph, ratem, frac, view(E3, :, :, i),
+                                                    Ex, Ey, Em, ir, Ip, 0.0, δt)
+            end
+            @test Pf == Pm
+            @test maximum(abs.(Pf)) > 0
+        end
     end
     # the doubling scan against the sequential trapezoid rule
     y = randn(rng, 1000, 2, 3)

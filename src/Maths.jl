@@ -174,26 +174,28 @@ function level_xings(x::AbstractVector, y::AbstractVector;
     maxidx = argmax(y)
     xmax = x[maxidx]
     if method in (:nearest, :linear)
-        try
-            if minmax == :min
-                lefti = findlast((x .< xmax) .& (y .< val))
-                righti = findfirst((x .> xmax) .& (y .< val))
-                (method == :nearest) && return (x[lefti], x[righti])
-
-                left = linterpx(x[lefti], x[lefti+1], y[lefti], y[lefti+1], val)
-                right = linterpx(x[righti-1], x[righti], y[righti-1], y[righti], val)
-            else
-                lefti = findfirst((x .< xmax) .& (y .> val))
-                righti = findlast((x .> xmax) .& (y .> val))
-                (method == :nearest) && return (x[lefti], x[righti])
-
-                left = linterpx(x[lefti-1], x[lefti], y[lefti-1], y[lefti], val)
-                right = linterpx(x[righti], x[righti+1], y[righti], y[righti+1], val)
-            end
-            return left, right
-        catch
-            return NaN, NaN
+        # No crossing (e.g. an empty mode: y ≡ 0) returns (NaN, NaN). This used to be done
+        # by letting the `nothing` index throw inside a try/catch, which costs ~100 µs per
+        # call and made this the most expensive default statistic for multimode runs.
+        n = length(x)
+        if minmax == :min
+            lefti = findlast((x .< xmax) .& (y .< val))
+            righti = findfirst((x .> xmax) .& (y .< val))
+            (isnothing(lefti) || isnothing(righti)) && return (NaN, NaN)
+            (method == :nearest) && return (x[lefti], x[righti])
+            (lefti + 1 > n || righti - 1 < 1) && return (NaN, NaN)
+            left = linterpx(x[lefti], x[lefti+1], y[lefti], y[lefti+1], val)
+            right = linterpx(x[righti-1], x[righti], y[righti-1], y[righti], val)
+        else
+            lefti = findfirst((x .< xmax) .& (y .> val))
+            righti = findlast((x .> xmax) .& (y .> val))
+            (isnothing(lefti) || isnothing(righti)) && return (NaN, NaN)
+            (method == :nearest) && return (x[lefti], x[righti])
+            (lefti - 1 < 1 || righti + 1 > n) && return (NaN, NaN)
+            left = linterpx(x[lefti-1], x[lefti], y[lefti-1], y[lefti], val)
+            right = linterpx(x[righti], x[righti+1], y[righti], y[righti+1], val)
         end
+        return left, right
     elseif method == :spline
         #spline method
         try

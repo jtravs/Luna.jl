@@ -160,12 +160,66 @@ end
 
 "The plasma response for a scalar electric field"
 PlasmaScalar!(Plas::PlasmaCumtrapz, E) = _plasma_scalar!(
-    Plas.P, Plas.J, Plas.phase, Plas.rate, Plas.fraction, E,
-    Plas.ratefunc, Plas.ionpot, Plas.preionfrac, Plas.δt)
+    Plas.P, Plas.rate, E, Plas.ratefunc, Plas.ionpot, Plas.preionfrac, Plas.δt)
 
 # The scalar plasma kernel on explicit column buffers, shared between the columnwise
-# response above and the threaded per-column path of PlasmaCumtrapzBatched.
-function _plasma_scalar!(P, J, phase, rate, fraction, E, ratefunc, ionpot, preionfrac, δt)
+# response above and the threaded per-column path of PlasmaCumtrapzBatched: two passes over
+# the column. Pass 1 evaluates the ionisation rate (the rate function's array method,
+# vectorisable); pass 2 is one serial sweep carrying the three running trapezoid sums
+# (∫W dt, the current ∫(ρE) dt and the polarisation ∫J dt) in registers, reading E once and
+# writing P once. The arithmetic and its order are exactly those of the multi-pass
+# reference below (`_plasma_scalar_multipass!`: cumtrapz!, broadcasts, loss loop,
+# cumtrapz!, cumtrapz!), so the results are bit-identical.
+function _plasma_scalar!(P, rate, E, ratefunc, ionpot, preionfrac, δt)
+    ratefunc(rate, E)
+    n = length(E)
+    n == 0 && return P
+    @inbounds begin
+        # i = 1: all cumulative integrals start at zero
+        F = 0.0 # ∫W dt
+        f = preionfrac + 1 - exp(-F) # ionised fraction
+        Ei = E[1]
+        ri = rate[1]
+        ph_prev = f * e_ratio * Ei # plasma "phase" (∝ ρE), the integrand of the current
+        Jint = zero(ph_prev) # ∫phase dt (before the loss term)
+        Jl_prev = Jint
+        if abs(Ei) > 0
+            Jl_prev += ionpot * ri * (1-f)/Ei
+        end
+        Pacc = zero(ph_prev)
+        P[1] = Pacc
+        r_prev = ri
+        for i in 2:n
+            Ei = E[i]
+            ri = rate[i]
+            Fnew = F + 1//2*(r_prev + ri)*δt
+            # the ionised fraction only needs recomputing when the integral changed (it
+            # does not over the pulse wings, where the rate is zero — most of the samples);
+            # reusing exp(-F) for the same F is exact
+            if Fnew != F
+                F = Fnew
+                f = preionfrac + 1 - exp(-F)
+            end
+            ph = f * e_ratio * Ei
+            Jint = Jint + 1//2*(ph_prev + ph)*δt
+            Jl = Jint
+            # a zero rate gives a loss term of exactly ±0.0, which leaves Jl unchanged
+            # (Jl is never -0.0), so the division is skipped where the rate vanishes
+            if ri != 0 && abs(Ei) > 0
+                Jl += ionpot * ri * (1-f)/Ei
+            end
+            Pacc = Pacc + 1//2*(Jl_prev + Jl)*δt
+            P[i] = Pacc
+            r_prev = ri; ph_prev = ph; Jl_prev = Jl
+        end
+    end
+    P
+end
+
+# The original multi-pass form of the scalar kernel, kept as the reference the fused kernel
+# is tested against (and for readers: this is the algorithm).
+function _plasma_scalar_multipass!(P, J, phase, rate, fraction, E, ratefunc, ionpot,
+                                   preionfrac, δt)
     ratefunc(rate, E)
     Maths.cumtrapz!(fraction, rate, δt)
     @. fraction = preionfrac + 1 - exp(-fraction)
@@ -192,14 +246,63 @@ function PlasmaVector!(Plas::PlasmaCumtrapz, E)
     Ex = E[:,1]
     Ey = E[:,2]
     Em = @. hypot.(Ex, Ey)
-    _plasma_vector!(Plas.P, Plas.J, Plas.phase, Plas.rate, Plas.fraction, E, Ex, Ey, Em,
+    _plasma_vector!(Plas.P, Plas.rate, Ex, Ey, Em,
                     Plas.ratefunc, Plas.ionpot, Plas.preionfrac, Plas.δt)
 end
 
-# The vector plasma kernel on explicit column buffers; `E` is `(nt, 2)`, `Ex`/`Ey` its
-# components and `Em` the field magnitude `hypot(Ex, Ey)`.
-function _plasma_vector!(P, J, phase, rate, fraction, E, Ex, Ey, Em,
-                         ratefunc, ionpot, preionfrac, δt)
+# The vector plasma kernel on explicit column buffers; `P` is `(nt, 2)`, `Ex`/`Ey` the
+# field components and `Em` the field magnitude `hypot(Ex, Ey)`. Two passes as in the
+# scalar kernel (rate, then one serial sweep with the running sums for both components);
+# bit-identical to `_plasma_vector_multipass!`.
+function _plasma_vector!(P, rate, Ex, Ey, Em, ratefunc, ionpot, preionfrac, δt)
+    ratefunc(rate, Em)
+    n = length(Em)
+    n == 0 && return P
+    @inbounds begin
+        F = 0.0
+        f = preionfrac + 1 - exp(-F)
+        Exi = Ex[1]; Eyi = Ey[1]; Emi = Em[1]; ri = rate[1]
+        phx_prev = f * e_ratio * Exi
+        phy_prev = f * e_ratio * Eyi
+        Jx = zero(phx_prev); Jy = zero(phy_prev)
+        Jlx_prev = Jx; Jly_prev = Jy
+        if abs(Emi) > 0
+            pre = ionpot * ri * (1-f)/Emi^2
+            Jlx_prev += pre*Exi
+            Jly_prev += pre*Eyi
+        end
+        Px = zero(phx_prev); Py = zero(phy_prev)
+        P[1, 1] = Px; P[1, 2] = Py
+        r_prev = ri
+        for i in 2:n
+            Exi = Ex[i]; Eyi = Ey[i]; Emi = Em[i]; ri = rate[i]
+            Fnew = F + 1//2*(r_prev + ri)*δt
+            if Fnew != F # see the scalar kernel
+                F = Fnew
+                f = preionfrac + 1 - exp(-F)
+            end
+            phx = f * e_ratio * Exi
+            phy = f * e_ratio * Eyi
+            Jx = Jx + 1//2*(phx_prev + phx)*δt
+            Jy = Jy + 1//2*(phy_prev + phy)*δt
+            Jlx = Jx; Jly = Jy
+            if ri != 0 && abs(Emi) > 0 # see the scalar kernel
+                pre = ionpot * ri * (1-f)/Emi^2
+                Jlx += pre*Exi
+                Jly += pre*Eyi
+            end
+            Px = Px + 1//2*(Jlx_prev + Jlx)*δt
+            Py = Py + 1//2*(Jly_prev + Jly)*δt
+            P[i, 1] = Px; P[i, 2] = Py
+            r_prev = ri; phx_prev = phx; phy_prev = phy; Jlx_prev = Jlx; Jly_prev = Jly
+        end
+    end
+    P
+end
+
+# The original multi-pass form of the vector kernel (reference for the fused one).
+function _plasma_vector_multipass!(P, J, phase, rate, fraction, E, Ex, Ey, Em,
+                                   ratefunc, ionpot, preionfrac, δt)
     ratefunc(rate, Em)
     Maths.cumtrapz!(fraction, rate, δt)
     @. fraction = preionfrac + 1 - exp(-fraction)
@@ -450,7 +553,8 @@ Array-level (batched) version of [`PlasmaCumtrapz`](@ref) for a real-space field
 `(nt, npol, npts)` (or `(nt, npts)` for scalar fields): the ionisation rate, the
 cumulative integrals and the plasma current/polarisation are computed for all transverse
 points at once, with the same arithmetic as the columnwise response. On the host the
-columns are processed in parallel with per-column kernels (`Utils.tforeach`); on a device
+columns are processed in parallel with the two-pass per-column kernels
+(`Utils.tforeach`; only the rate and the polarisation are stored); on a device
 everything is whole-array broadcasts with [`Luna.Maths.cumtrapz_scan!`](@ref) for the
 cumulative integrals (a native scan where the backend provides one, e.g. `CUDA.cumsum!`,
 otherwise the portable doubling scan). Buffers are allocated lazily on the field's array type at the first
@@ -492,16 +596,21 @@ function _plasma_buffers!(B::PlasmaCumtrapzBatched, E3)
     nt, npol, npts = size(E3)
     if B.P === nothing || size(B.P) != size(E3)
         B.rate = similar(E3, real(eltype(E3)), (nt, npts))
-        B.fraction = similar(B.rate)
         B.Em = npol == 2 ? similar(B.rate) : nothing
-        B.phase = similar(E3)
-        B.J = similar(E3)
         B.P = similar(E3)
         if Utils.isdevice(E3)
+            # the device path materialises the intermediate stages as whole arrays
+            B.fraction = similar(B.rate)
+            B.phase = similar(E3)
+            B.J = similar(E3)
             # scratch for the prefix-sum fallback; `nothing` where the backend has a
             # native scan (see `Maths.scan_scratch`)
             B.tmp = Maths.scan_scratch(B.rate)
             B.tmp3 = Maths.scan_scratch(E3)
+        else
+            # the host path is the two-pass column kernel: only the rate and P are stored
+            B.fraction = nothing; B.phase = nothing; B.J = nothing
+            B.tmp = nothing; B.tmp3 = nothing
         end
     end
     nothing
@@ -529,16 +638,13 @@ function _plasma_batched!(::Utils.CPUBackend, out3, E3, ρ, B, rate, fraction, E
     Utils.tforeach(npts; ntotal=length(E3), minlen=4*nt*npol) do i
         if npol == 1
             Ecol = view(E3, :, 1, i)
-            _plasma_scalar!(view(P, :, 1, i), view(J, :, 1, i), view(phase, :, 1, i),
-                            view(rate, :, i), view(fraction, :, i), Ecol,
+            _plasma_scalar!(view(P, :, 1, i), view(rate, :, i), Ecol,
                             ratefunc, ionpot, preionfrac, δt)
             view(out3, :, 1, i) .+= ρ .* view(P, :, 1, i)
         else
-            Ecol = view(E3, :, :, i)
             Ex = view(E3, :, 1, i); Ey = view(E3, :, 2, i); Emc = view(Em, :, i)
             @. Emc = hypot(Ex, Ey)
-            _plasma_vector!(view(P, :, :, i), view(J, :, :, i), view(phase, :, :, i),
-                            view(rate, :, i), view(fraction, :, i), Ecol, Ex, Ey, Emc,
+            _plasma_vector!(view(P, :, :, i), view(rate, :, i), Ex, Ey, Emc,
                             ratefunc, ionpot, preionfrac, δt)
             view(out3, :, :, i) .+= ρ .* view(P, :, :, i)
         end
