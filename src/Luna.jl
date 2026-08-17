@@ -281,6 +281,17 @@ function _setup_modal(TT, grid, densityfun, responses, inputs, modes, components
     Eω, transform, FT
 end
 
+"""
+    _no_inputs(inputs) -> Bool
+
+Whether `inputs` contains no input fields at all — i.e. the caller supplies the initial
+state itself. Dispatches on the type rather than calling `isempty`, because `inputs` may
+be a single `Fields.SpatioTemporalField` (see the `doinputs_fs!` method below), which is
+not iterable.
+"""
+_no_inputs(x) = false
+_no_inputs(::Tuple{}) = true
+
 function doinputs_fs!(Eωk, grid, spacegrid::Union{Hankel.QDHT,Grid.FreeGrid}, FT,
                    inputs::Tuple{Vararg{T} where T <: Fields.SpatioTemporalField})
     for field in inputs
@@ -380,13 +391,25 @@ function setup(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
     Logging.@info("Setting up and planning FFTs...")
     flush(stderr)
     ondevice = arraytype !== Array
-    Utils.loadFFTwisdom() # host wisdom: the input field is always built on the host
     x = xygrid.x
     y = xygrid.y
-    xr = Array{ComplexF64}(undef, length(grid.t), length(y), length(x))
-    FTh = FFTW.plan_fft(xr, (1, 2, 3), flags=settings["fftw_flag"])
-    Eωk = zeros(ComplexF64, length(grid.ω), length(y), length(x))
-    doinputs_fs!(Eωk, grid, xygrid, FTh, inputs)
+    # The host prototype and host plan exist only to BUILD the input field, which is host
+    # code. A device run with no input fields (the caller supplies the state itself, as
+    # the 3-D free-space scan drivers do) needs neither, and at production shapes they are
+    # two full host arrays — 4.5 GiB at (256, 768, 768) — plus a 3-D FFTW planning pass
+    # that is then discarded. Allocate the state directly on the device instead.
+    hostbuild = !(ondevice && _no_inputs(inputs))
+    if hostbuild
+        Utils.loadFFTwisdom() # host wisdom: the input field is built on the host
+        xr = Array{ComplexF64}(undef, length(grid.t), length(y), length(x))
+        FTh = FFTW.plan_fft(xr, (1, 2, 3), flags=settings["fftw_flag"])
+        Eωk = zeros(ComplexF64, length(grid.ω), length(y), length(x))
+        doinputs_fs!(Eωk, grid, xygrid, FTh, inputs)
+    else
+        FTh = nothing
+        Eωk = device_zeros(arraytype, ComplexF64,
+                           (length(grid.ω), length(y), length(x)))
+    end
     if ondevice
         # Upload the input, then plan against it: at production sizes the device plan's
         # prototype is the state array itself, so no host prototype is allocated.
@@ -408,9 +431,13 @@ function setup(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
     transform = NonlinearRHS.TransFree(grid, xygrid, FTo,
                                        responses, densityfun, normfun;
                                        noise_field, fastpath, arraytype)
-    inv(FTh) # create inverse FT plans now, so wisdom is saved
-    ondevice || inv(FTo)
-    Utils.saveFFTwisdom()
+    # Create inverse FT plans now, so wisdom is saved. Both are skipped when no host plan
+    # was built at all (device run with no input fields): there is no host wisdom to save.
+    if hostbuild
+        inv(FTh)
+        ondevice || inv(FTo)
+        Utils.saveFFTwisdom()
+    end
     Logging.@info("Setup finished.")
     flush(stderr)
     Eωk, transform, FT

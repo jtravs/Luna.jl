@@ -444,6 +444,71 @@ if have_jlarrays
             1.0, td.idcs)
     end
 
+    @testset "unscaled inverse plan and the fused pointwise RHS" begin
+        JLArray = JLArrays.JLArray
+        # `_ift_unscaled` must split a plan so that applying the raw transform and
+        # multiplying by the scale reproduces the plan exactly. Everything downstream
+        # depends on this identity, and getting the scale wrong is a factor of N per
+        # transform — the fused path would be silently, enormously wrong.
+        x = JLArray(randn(Random.Xoshiro(11), ComplexF64, 8, 4, 4))
+        p = Utils.plan_fft_backend(x, (1, 2, 3))
+        ip = inv(p)
+        raw, sc = NonlinearRHS._ift_unscaled(ip)
+        @test sc ≈ 1/length(x)
+        a = similar(x); LinearAlgebra.mul!(a, ip, x)
+        b = similar(x); LinearAlgebra.mul!(b, raw, x)
+        @test isapprox(Array(a), sc .* Array(b); rtol=1e-12)
+        # a host plan has no scale to split off
+        @test NonlinearRHS._ift_unscaled(FFTW.plan_fft(randn(ComplexF64, 8)))[2] == 1
+
+        # The fused device pointwise transform (unnormalised inverse + prescale + window
+        # in one broadcast) must agree with the host, which takes neither shortcut.
+        grid = Grid.EnvGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+        xygrid = Grid.FreeGrid(400e-6, 8)
+        nfun = PhysData.ref_index_fun(:Ar, 4)
+        densityfun = let d = PhysData.density(:Ar, 4); z -> d end
+        responses = (Nonlinear.Kerr_env(PhysData.γ3_gas(:Ar)),)
+        mk(A) = NonlinearRHS.TransFree(
+            grid, xygrid, Utils.plan_fft_backend(
+                A(zeros(ComplexF64, length(grid.t), 8, 8)), (1, 2, 3)),
+            responses, densityfun,
+            NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true,
+                                         arraytype=A); arraytype=A)
+        th, td = mk(Array), mk(JLArray)
+        # all-pointwise, so the fused path is the one under test
+        @test th.Pto === nothing && td.Pto === nothing
+        Eωk = randn(Random.Xoshiro(12), ComplexF64, length(grid.ω), 8, 8)
+        nlh = similar(Eωk); nld = JLArray(similar(Eωk))
+        th(nlh, Eωk, 1e-3)
+        td(nld, JLArray(Eωk), 1e-3)
+        @test isapprox(Array(nld), nlh; rtol=1e-10)
+        # ...and the input must be preserved, which the solver relies on
+        @test isequal(Array(JLArray(Eωk)), Eωk)
+    end
+
+    @testset "needs_host_save" begin
+        JLArray = JLArrays.JLArray
+        # Handlers that store the field need the host copy; that is the default and must
+        # stay true for the built-ins, or every existing output silently breaks.
+        mo = Output.MemoryOutput(0, 1e-3, 3)
+        @test Luna.needs_host_save(mo)
+        y = JLArray(zeros(ComplexF64, 4, 2, 2))
+        h = Luna.HostOutput(mo, y)
+        @test h.ibuf isa Array                     # buffer allocated, as before
+
+        # A handler that reduces on the device declines it: no buffer at all, and the
+        # interpolant is handed over unwrapped so it yields the solver's own array.
+        struct DevReducer end
+        Luna.needs_host_save(::DevReducer) = false
+        hd = Luna.HostOutput(DevReducer(), y)
+        @test isnothing(hd.ibuf)
+        @test isnothing(hd.ybuf)
+        got = Ref{Any}(nothing)
+        (o::DevReducer)(yy, t, dt, yfun) = (got[] = yfun(t); nothing)
+        hd(y, 0.0, 1e-5, _ -> y)
+        @test got[] === y                          # the device array itself, not a copy
+    end
+
     @testset "batched Raman on device" begin
         import Luna: Grid, Nonlinear, Raman
         JLArray = JLArrays.JLArray

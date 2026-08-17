@@ -1,5 +1,6 @@
 module NonlinearRHS
 import FFTW
+import AbstractFFTs
 import Hankel
 import Cubature
 import Base: show
@@ -1239,11 +1240,23 @@ end
 # buffers would be exact copies, so transform directly between Eωk, Eto and nl.
 # Bit-identical to trans_free_general! (see TransFree docstring).
 function trans_free_fast!(nl, t::TransFree, Eωk, z)
-    # ω -> t. On the host `ldiv!` through the forward plan is FFTW's fused normalisation;
-    # on a device the inverse plan is stored explicitly (`ldiv!` would build a ScaledPlan
-    # per call). Both preserve Eωk, which the caller relies on.
-    _to_time!(t.Eto, t, Eωk)
     ρ = t.densityfun(z)
+    Pto = _to_time_and_respond!(Utils.backend(Eωk), t, Eωk, ρ)
+    mul!(nl, t.FT, Pto) # transform (t, y, x) -> (ω, ky, kx)
+    _scale_nl!(Utils.backend(nl), nl, t, t.normfun(z))
+end
+
+"""
+    _to_time_and_respond!(backend, t::TransFree, Eωk, ρ) -> Pto
+
+`(ω, k_y, k_x)` → `(t, y, x)`, the nonlinear responses, and the temporal apodisation
+window; returns the buffer holding the polarisation. Split by backend so the device can
+fuse passes that the host gets for free from FFTW (see the device method).
+"""
+function _to_time_and_respond!(::Utils.CPUBackend, t::TransFree, Eωk, ρ)
+    # `ldiv!` through the forward plan is FFTW's fused normalisation — no separate pass.
+    # It preserves Eωk, which the caller relies on.
+    _to_time!(t.Eto, t, Eωk)
     if t.Pto === nothing # all responses pointwise: polarisation overwrites Eto
         Pto = t.Eto
         pointwise_Pt!(Pto, t.Eto, t.resp, ρ)
@@ -1251,10 +1264,50 @@ function trans_free_fast!(nl, t::TransFree, Eωk, z)
         Pto = t.Pto
         Et_to_Pt_ordered!(t.Pto, t.Eto, t.resp, ρ, t.idcs)
     end
-    _apply_towin!(Utils.backend(Pto), Pto, t.gv.towin, t.idcs)
-    mul!(nl, t.FT, Pto) # transform (t, y, x) -> (ω, ky, kx)
-    _scale_nl!(Utils.backend(nl), nl, t, t.normfun(z))
+    _apply_towin!(Utils.CPUBackend(), Pto, t.gv.towin, t.idcs)
+    return Pto
 end
+
+"""
+Device version. A device inverse plan is an `AbstractFFTs.ScaledPlan`, so applying it runs
+the transform and then a **separate** full-array multiply by `1/N` — 4.5 GiB of traffic
+per RHS at 3-D free-space production shapes, seven times per step.
+
+When every response is pointwise, the next operation is itself an elementwise broadcast,
+so the transform is applied unnormalised and the `1/N` is folded into that broadcast as a
+prescale on read, together with the temporal window. Two whole-array passes disappear and
+nothing is assumed about the responses: `f(s·E)` is what the normalised field would have
+produced, for any `f`.
+
+With a non-pointwise (batched or columnwise) response the polarisation is accumulated
+across responses into a separate buffer, so there is no single broadcast to fold into and
+the normalised plan is used as before.
+"""
+function _to_time_and_respond!(::Utils.DeviceBackend, t::TransFree, Eωk, ρ)
+    if t.Pto === nothing
+        raw, s = _ift_unscaled(t.IFT)
+        mul!(t.Eto, raw, Eωk)
+        Eto = t.Eto
+        resp = t.resp
+        towin = reshape(t.gv.towin, :, 1, 1)
+        Eto .= towin .* _pointwise_P_total.(Ref(resp), s .* Eto, ρ)
+        return Eto
+    end
+    _to_time!(t.Eto, t, Eωk)
+    Et_to_Pt_ordered!(t.Pto, t.Eto, t.resp, ρ, t.idcs)
+    _apply_towin!(Utils.DeviceBackend(), t.Pto, t.gv.towin, t.idcs)
+    return t.Pto
+end
+
+"""
+    _ift_unscaled(plan) -> (raw_plan, scale)
+
+Split a stored inverse FFT plan into the raw transform and the normalisation factor it
+would apply, so a caller that is about to broadcast anyway can fold the factor in rather
+than pay a separate pass for it. `plan * x == scale * (raw_plan * x)`.
+"""
+_ift_unscaled(p::AbstractFFTs.ScaledPlan) = (p.p, p.scale)
+_ift_unscaled(p) = (p, 1)
 
 _to_time!(Eto, t::TransFree, Eωk) = _to_time!(Eto, t, Eωk, t.IFT)
 _to_time!(Eto, t::TransFree, Eωk, ::Nothing) = ldiv!(Eto, t.FT, Eωk)

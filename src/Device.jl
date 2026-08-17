@@ -211,6 +211,21 @@ needs_host_y(o::Output.HDF5Output) = o.cache || (o.statsfun !== Output.nostats &
                                                  !device_stats(o.statsfun))
 
 """
+    needs_host_save(output) -> Bool
+
+Whether `output` needs the **saved** field on the host.
+
+True for every handler that stores the field (`MemoryOutput`, `HDF5Output`), which is why
+it is the default. A handler that reduces each save on the device — keeping only small
+results, as a trace extractor does — should define this as `false` on its own type:
+[`HostOutput`](@ref) then allocates no host buffer (a field-sized array, several GB at
+3-D free-space production shapes) and hands over the device array untouched.
+
+The save-side counterpart of [`needs_host_y`](@ref), which governs the *per-step* copy.
+"""
+needs_host_save(o) = true
+
+"""
     device_stats(statsfun) -> Bool
 
 `true` if the statistics function accepts the propagating array *on the device*: it copies
@@ -249,26 +264,32 @@ actually store. The per-step solution `y` is passed through untouched unless
 which writes `y` itself), because copying it on every step — rather than on every save —
 would dominate the runtime.
 
+A handler that reduces saved fields on the device itself declines the save-side copy with
+[`needs_host_save`](@ref); it then receives the device array, and no host buffer is
+allocated at all.
+
 Constructed automatically by [`Luna.run`](@ref) when the propagating field is a device
 array; `Output.jl` itself is unaware of devices.
 """
 mutable struct HostOutput{O, A<:AbstractArray}
     o::O
-    ibuf::A                    # buffer for the interpolated (saved) field
+    ibuf::Union{Nothing, A}    # buffer for the interpolated (saved) field
     ybuf::Union{Nothing, A}    # buffer for `y`, only when the handler needs it
 end
 
 function HostOutput(o, y)
-    ibuf = Array{eltype(y)}(undef, size(y))
+    ibuf = needs_host_save(o) ? Array{eltype(y)}(undef, size(y)) : nothing
     ybuf = needs_host_y(o) ? Array{eltype(y)}(undef, size(y)) : nothing
-    HostOutput(o, ibuf, ybuf)
+    HostOutput{typeof(o), Array{eltype(y), ndims(y)}}(o, ibuf, ybuf)
 end
 
 _tohost!(buf, y) = isdevice(y) ? copyto!(buf, y) : y
 
 function (h::HostOutput)(y, t, dt, yfun)
     yh = isnothing(h.ybuf) ? y : _tohost!(h.ybuf, y)
-    h.o(yh, t, dt, ts -> _tohost!(h.ibuf, yfun(ts)))
+    # `yfun` is passed through unwrapped when the handler wants the device array, so a
+    # device-reducing handler sees exactly what the solver holds — no copy, no buffer.
+    h.o(yh, t, dt, isnothing(h.ibuf) ? yfun : ts -> _tohost!(h.ibuf, yfun(ts)))
 end
 
 # Metadata and any other calls (e.g. `output(dict; group="grid")`) pass straight through.

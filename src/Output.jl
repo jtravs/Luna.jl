@@ -63,22 +63,19 @@ haskey(o::MemoryOutput, key) = haskey(o.data, key)
     Note that from RK45.jl, this will be called with yn and tn as arguments.
 """
 function (o::MemoryOutput)(y, t, dt, yfun)
-    save, ts = o.save_cond(y, t, dt, o.saved)
     st = o.statsfun(y, t, dt)
     isnothing(st) || append_stats!(o, st) # `nothing`: no statistics this step (PeriodicStats)
     !haskey(o.data, o.yname) && initialise(o, y)
-    while save
+    foreach_save(o, y, t, dt, yfun) do idx, ts, val
         s = size(o.data[o.yname])
-        if s[end] < o.saved+1
-            o.data[o.yname] = fastcat(o.data[o.yname], yfun(ts))
+        if s[end] < idx
+            o.data[o.yname] = fastcat(o.data[o.yname], val)
             push!(o.data[o.tname], ts)
         else
             idcs = fill(:, ndims(y))
-            o.data[o.yname][idcs..., o.saved+1] = yfun(ts)
-            o.data[o.tname][o.saved+1] = ts
+            o.data[o.yname][idcs..., idx] = val
+            o.data[o.tname][idx] = ts
         end
-        o.saved += 1
-        save, ts = o.save_cond(y, t, dt, o.saved)
     end
 end
 
@@ -98,6 +95,53 @@ output handlers without a known save condition.
 """
 willsave(o, y, t, dt) = true
 willsave(o::MemoryOutput, y, t, dt) = first(o.save_cond(y, t, dt, o.saved))
+
+"""
+    foreach_save(f, o, y, t, dt, yfun)
+
+Run `f(idx, ts, val)` for every data point the save condition of `o` asks for at this
+step, advancing `o.saved`. `idx` is the 1-based save index, `ts` the propagation
+coordinate of the save, and `val` the field there (`yfun(ts)`).
+
+One accepted step can produce several saves (a coarse step over a fine save grid) or
+none, which is why this is a loop and not a test. Every output handler needs exactly the
+same loop, so it lives here once; `o` needs a `save_cond` and a mutable `saved` field.
+Returns the new `o.saved`.
+
+# Writing an output handler
+
+`Luna.run` requires of an output handler `o`:
+
+  * `o(y, t, dt, yfun)` — called on every accepted step with the solution `y` at `t`, the
+    step size, and an interpolant `yfun(ts)` giving the field at `ts ≤ t`. Use
+    [`foreach_save`](@ref) for the save loop.
+  * `o(dict; group=…)` and `o(key, value)` — metadata. Handlers that keep no metadata may
+    discard these.
+  * [`willsave`](@ref)`(o, y, t, dt)` — whether this step would save anything. Used to
+    apply the spectral/temporal windows before a save when `twin_period > 1`; the generic
+    fallback is the conservative `true`.
+  * [`check_cache`](@ref)`(o, y, t, dt)` — resume support; the generic fallback returns
+    its arguments unchanged.
+  * `Base.getindex`, `Base.haskey` — for reading results back.
+
+On a device, `y` and `yfun(ts)` are device arrays unless the handler asks otherwise; see
+[`Luna.needs_host_y`](@ref) and [`Luna.needs_host_save`](@ref).
+
+!!! note "The interpolant at a step endpoint"
+    When the save coordinate is the step endpoint — which `step_on` guarantees for saves
+    aligned to it — `RK45.interpolate` returns the stepped solution itself rather than
+    evaluating the dense-output polynomial. A handler that reduces saves on a device can
+    rely on getting the solver's own array, with no copy.
+"""
+function foreach_save(f, o, y, t, dt, yfun)
+    save, ts = o.save_cond(y, t, dt, o.saved)
+    while save
+        f(o.saved + 1, ts, yfun(ts))
+        o.saved += 1
+        save, ts = o.save_cond(y, t, dt, o.saved)
+    end
+    return o.saved
+end
 
 function append_stat!(o::MemoryOutput, name, value::Number)
     if ~haskey(o.data["stats"], name)
@@ -348,22 +392,20 @@ function (o::HDF5Output)(y, t, dt, yfun)
                 cachehash == o.cachehash || error(
                     "the hash for this propagation does not agree with cache in file")
             end
-            while save
+            foreach_save(o, y, t, dt, yfun) do idx, ts, val
                 s = collect(size(file[o.yname]))
                 idcs = fill(:, length(s)-1)
-                if s[end] < o.saved+1
+                if s[end] < idx
                     s[end] += 1
                     HDF5.set_extent_dims(file[o.yname], Tuple(s))
                 end
-                file[o.yname][idcs..., o.saved+1] = yfun(ts)
+                file[o.yname][idcs..., idx] = val
                 s = collect(size(file[o.tname]))
-                if s[end] < o.saved+1
+                if s[end] < idx
                     s[end] += 1
                     HDF5.set_extent_dims(file[o.tname], Tuple(s))
                 end
-                file[o.tname][o.saved+1] = ts
-                o.saved += 1
-                save, ts = o.save_cond(y, t, dt, o.saved)
+                file[o.tname][idx] = ts
             end
             isempty(o.stats_tmp) || append_stats!(file["stats"], o.stats_tmp)
             o.stats_tmp = Vector{Dict{String, Any}}()
