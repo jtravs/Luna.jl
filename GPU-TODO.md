@@ -169,12 +169,16 @@ cost is real work.
   items below. Worth doing regardless of the A40 results. Effort S–M (~60 lines).
 - [ ] **P2 — Raman by mode pairs (CtC-type runs).** The convolution is linear, so
   h∗E² = Σ_mn (h∗A_mA_n) e_m e_n: M(M+1)/2 pair convolutions (21 at M=6) instead of one
-  per node (65), then a small GEMM and the pointwise product with E. Raman −60 %, CtC
-  RHS −25 %; more for larger nr. Needs a transform-aware Raman path (the transform owns
-  Emt and the pair products) — the one place the analysis doc's tensor idea pays. Do
-  **not** do the same for Kerr: it is already exact on the fixed grid (5e-16 at nr=24)
-  and carries no per-node work, so Γ_mnpq would cost the same FLOPs and break response
-  encapsulation. Effort M.
+  per node (65), then a small GEMM and the pointwise product with E. Gain on the Raman
+  term = Np / [M(M+1)/2]: 65/21 ≈ 3× at nr=64, M=6 (CtC RHS −25 %), 65/10 ≈ 6.5× at
+  M=4 — but only 33/21 ≈ 1.6× at nr=32, so **tune `nr` first** and revisit this only
+  if a case with large Np or small M keeps Raman dominant. Needs a transform-aware
+  Raman path (the transform owns Emt and the pair products) — the one place the
+  analysis doc's tensor idea pays, and only because Raman carries two long FFTs per
+  node. Do **not** do the same for Kerr: it is already exact on the fixed grid (5e-16
+  at nr=24), its grid evaluation is ~5 FLOP per sample on a field the plasma needs
+  anyway (0.14 of 1.26 ms), and through the pair machinery it would cost a 21×21 GEMM
+  per sample (~3× more FLOPs) and break response encapsulation. Effort M.
 - [ ] **P2 — GPU: fuse the plasma's elementwise passes** between the three scans (rate;
   1−exp + phase; loss term + accumulate) — traffic −2.5×, intensity 0.5 → ~1.5 FLOP/B;
   matters on H100-class (bandwidth-bound), little on the A40 (then FP64-compute-bound).
