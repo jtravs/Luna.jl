@@ -103,7 +103,8 @@ lives in `ModelPNPS/GPU-TODO.md`.
   stays host code with one sync per step. Payoff: only for the launch-bound (small nt,
   few columns) regime — 2–3× there; ~nothing for the large cases. Measure first.
 
-- [ ] **P2 — Column-chunk fusion for very large `nt` (also memory).** The transform
+- [ ] **P2 — Column-chunk fusion for very large `nt` (also memory; see also the fused
+  CPU plasma column in §2b, which removes most of the CPU-side buffers).** The transform
   materialises `Et`, `Pt` (nto×npol×Np) and the plasma response five more arrays of that
   size. At nt=2^17, 65 nodes, scalar: ~7×135 MB ≈ 1 GB — fine. At 2-D vector nr=64×nθ=16
   ≈ 1000 columns and 2^17: ~7 GB — too much for one A40 alongside the RK45 registers, and
@@ -127,6 +128,71 @@ lives in `ModelPNPS/GPU-TODO.md`.
   evaluated on the host into a buffer and uploaded per stage (`RK45.make_prop!`). It is
   nω×nmodes×16 B per RHS (0.26 MB at nt=8192) — negligible until nt ≳ 2^17 with many
   modes. Effort M (device-native `neff(ω; z)` broadcast); payoff small.
+
+---
+
+## 2b. Next performance steps for `TransModalFixed` (measured, laptop 8 threads, 2026-08-17)
+
+Stage breakdown of one RHS (`scratchpad/stagebreak.jl`):
+
+| | VUV (nto 8192, M 4, 65 nodes) | CtC-type (nto 65536, M 6, 65 nodes) |
+|---|---|---|
+| **RHS total** | **1.26 ms** | **18.6 ms** |
+| plasma (rate + 3 cumulative integrals + elementwise) | 0.85 (68 %) | 8.1 (44 %) |
+| Raman (batched doubled-grid FFT pairs) | – | 7.0 (38 %) |
+| Kerr | 0.14 | 0.4 |
+| synthesis + projection GEMM | 0.10 | 1.2 |
+| modal IFFT + FFT + windows | 0.10 | 1.0 |
+
+Rate evaluation per sample: cached PPT spline ≈ 1–2 ns/thread, ADK ≈ 2.5 ns, **direct PPT
+≈ 120 ns** → recomputing the rate instead of the spline is ruled out (the plasma alone would
+be ~10× the whole RHS). FFTW *does* thread the batched Raman plan over the columns (31 → 7.2 ms
+from 1 to 8 threads); Julia-threading per-column plans is only ~20 % better, so the Raman
+cost is real work.
+
+- [ ] **P1 (no code) — tune `nr`.** With the smooth rate the plasma is converged at nr≈32
+  for 4 modes; the default 64 is a 2× safety margin. `nr=32–40` (check
+  `transverse_integral_error_rel` stays ~1e-9) is ≈1.6–2× on everything, CPU and GPU:
+  VUV RHS 1.26 → ~0.7 ms, CtC 18.6 → ~11 ms. Consider lowering the default once the
+  mode-count study (§4) is done.
+- [x] **`stats_period` / `mode_error=false`** for sweeps: −14 % (one of 7 transform calls
+  per step). Done.
+- [ ] **P1 — CPU: fuse the plasma column into two passes** (`_plasma_scalar!`/`_plasma_vector!`).
+  Today ~7 passes over the column through 5 intermediate arrays (rate, fraction, phase,
+  J, P). Instead: one SIMD pass for the rate, one serial pass carrying the three running
+  trapezoid sums in registers, reading E once and writing P once, with the *same*
+  arithmetic order as `Maths.cumtrapz!` so results stay bit-identical to the columnwise
+  reference (testable exactly). Expect the plasma to halve (VUV RHS −35 %, CtC −25 %),
+  and the five nto×Np buffers disappear on the CPU (the CtC column working set is 3 MB
+  today, past L2 — this also fixes that). **CPU only**: one thread walking a column is
+  exactly what a GPU must not do; the GPU counterparts are the fusion / time-tiled scan
+  items below. Worth doing regardless of the A40 results. Effort S–M (~60 lines).
+- [ ] **P2 — Raman by mode pairs (CtC-type runs).** The convolution is linear, so
+  h∗E² = Σ_mn (h∗A_mA_n) e_m e_n: M(M+1)/2 pair convolutions (21 at M=6) instead of one
+  per node (65), then a small GEMM and the pointwise product with E. Raman −60 %, CtC
+  RHS −25 %; more for larger nr. Needs a transform-aware Raman path (the transform owns
+  Emt and the pair products) — the one place the analysis doc's tensor idea pays. Do
+  **not** do the same for Kerr: it is already exact on the fixed grid (5e-16 at nr=24)
+  and carries no per-node work, so Γ_mnpq would cost the same FLOPs and break response
+  encapsulation. Effort M.
+- [ ] **P2 — GPU: fuse the plasma's elementwise passes** between the three scans (rate;
+  1−exp + phase; loss term + accumulate) — traffic −2.5×, intensity 0.5 → ~1.5 FLOP/B;
+  matters on H100-class (bandwidth-bound), little on the A40 (then FP64-compute-bound).
+  Then, if the scans dominate, the **time-tiled scan** (parallel over columns × time
+  blocks with carried block prefixes; analysis doc §9.3) — the GPU form of the fused CPU
+  column. **Decide after the A40 numbers.**
+- [ ] **P2 — GPU: FP32 rate evaluation** (spline + exp only; everything else FP64). The
+  rate is accurate to ~1e-4 by construction; FP64 exp/log are software sequences on
+  NVIDIA, so this lifts the compute co-limit on weak-FP64 cards (A40/L40S) ~30×; no
+  effect on H100. Test against the RK45 controller (step count), not only the spectrum.
+
+Arithmetic-intensity estimate (from the code; see the conversation of 2026-08-17): plasma
+device path ≈ 0.5 FLOP/B (bandwidth-bound; A40 ridge 0.85, H100 ~10), Kerr 0.3, GEMMs
+M/4, FFTs ~2; CPU columns are L2-resident at nto ≤ 8k (compute-bound on exp/log, ~4
+FLOP/B vs DRAM), DRAM-bound at nto ≥ 2^15. Best hardware for this code: HBM bandwidth
+(H100/H200/B200) ≫ A100 > A40 ≈ 64-core EPYC for the small scalar case; 5–10× in favour
+of any HBM GPU for the vector / large-nt cases. To measure instead of estimate: Nsight
+Compute `--set roofline` on the A40 job; LIKWID `MEM_DP` on a CPU node.
 
 ---
 
