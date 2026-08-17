@@ -11,6 +11,15 @@
     quoted with the machine and configuration they were measured on; anything not yet
     measured on GPU hardware is marked as an estimate.
 
+    Its companion is
+    [Three-dimensional free-space propagation: threading, memory and the device path](@ref),
+    which covers the `TransFree` path on the same branch line. The two transforms have
+    different bottlenecks — quadrature and per-node work there, array count and passes over
+    a multi-GB state here — but share the backend trait, the device execution model, the
+    package-extension mechanism and the deferred-loading/world-age constraints; those are
+    described in §3.7 below and §5 there, and the free-space document carries the A40
+    measurements that exist today.
+
 ## 1. Summary
 
 The multimode nonlinear polarisation ``P_j(\omega)`` (see

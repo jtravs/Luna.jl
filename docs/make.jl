@@ -18,6 +18,7 @@ makedocs(
         "Parameter scans" => "scans.md",
         "Developer guide" => [
             "Fixed-quadrature modal transform and GPU path" => "developer/modal_fixed_design.md",
+            "3-D free-space propagation: threading, memory and the device path" => "developer/transfree_design.md",
         ],
         "Modules" => [
             "$(split(fi, ".")[1]).jl" => "modules/$fi" for fi in readdir(modulesdir)
