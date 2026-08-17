@@ -423,12 +423,48 @@ algebraic (``\sim n_r^{-1.5}``) and non-monotone for the fixed rule (``10^{-2}``
 adaptive one (``5\times10^{-4}`` with 511 points at `rtol=1e-3`; 8k–65k points for
 ``\sim10^{-5}``; its own error estimate 10–1000× optimistic when tightened). Increasing the
 spline table from ``2^{14}`` to ``2^{18}`` knots changed nothing; replacing the sum by its
-integral (`sum_integral=true`) restored spectral convergence. The rate itself: the two
-forms differ by 0.1 % at ``10^{11}`` V/m, 7 % at ``5\times10^{10}`` and 20 % at
-``2\times10^{10}`` (He, 800 nm) — but the absolute rate at the latter fields is
+integral (`sum_integral=true`) restored spectral convergence.
+
+*The physics of the sum.* The PPT rate has the structure
+``W = A(E,\gamma)\sum_{n\ge n_0} e^{-\alpha(n-v)}\,\varphi_m\!\big(\sqrt{\beta(n-v)}\big)``
+with ``v=(I_p+U_p)/\hbar\omega`` the ponderomotively shifted threshold in photon units,
+``n_0=\lceil v\rceil``, and ``\alpha(\gamma)``, ``\beta(\gamma)`` functions of the
+Keldysh parameter: each term is the partial rate of the ``n``-photon (ATI) channel, and
+``\varphi_m(\sqrt{\beta x})\propto\sqrt{x}`` near threshold is the Wigner threshold law
+of a channel that has just opened. As the intensity rises ``U_p`` grows, ``v`` crosses an
+integer and the lowest channel closes: the rate stays continuous (``\varphi_m(0)=0``) but
+has a **square-root cusp** there. Gauss quadrature of an interior ``|x-c|^{1/2}``
+singularity converges as ``N^{-1.5}`` — exactly the exponent measured above, which
+confirms the diagnosis. `sum_integral=true` replaces the sum by ``\int_0^\infty f(x)\,dx``
+(closed form ``\sqrt{\pi}\,m!\,\beta^m/[2(\alpha+\beta)^{m+1}]\sqrt{\beta/\alpha}``),
+which by Euler–Maclaurin is the sum *averaged over the channel phase* (the fractional part
+of ``v``): not a biased approximation but the phase-averaged rate. In the tunnelling
+regime (``\gamma\lesssim0.5``, ``\alpha\approx\tfrac43\gamma^3\ll1``) ten or more of the
+``\sim70`` open channels contribute and the two forms agree to a fraction of a per cent;
+near ``\gamma\approx1``–2 one or two channels dominate and the literal sum oscillates
+about the integral with the channel phase. Measured (He, 800 nm): 0.1 % at
+``10^{11}`` V/m (``\gamma\approx0.4``), 7 % at ``5\times10^{10}`` (``\gamma\approx0.8``),
+20 % at ``2\times10^{10}`` (``\gamma\approx2``) — where the absolute rate is
 ``10^{4}``–``10^{11}\,{\rm s^{-1}}`` against ``10^{14}`` at the peak, i.e. negligible
-ionisation. In the tunnelling regime of the RDW/VUV runs (Keldysh ``\gamma\approx0.4``) the
-integral form is essentially exact.
+ionisation in these runs.
+
+*Physical reality.* Channel closings exist, but PPT models them crudely (monochromatic
+field, purely ponderomotive shift, no resonances or Coulomb threshold effects), and for the
+pulses Luna is used for the threshold is smeared by the pulse bandwidth: ``\delta v\approx
+(I_p/\hbar\omega)(\Delta\omega/\omega)\approx 2`` photons for a 7 fs pulse in He at
+800 nm, ``\approx1`` for 10 fs in Ar — the discrete structure is washed out over more than
+a channel spacing before any intensity averaging over the beam. For few-cycle pulses the
+phase-averaged form is therefore the more physical one; only for long, narrowband pulses at
+``\gamma\gtrsim1`` could the channel structure be observable, and there PPT's own accuracy
+(deviations of order unity from TDSE/experiment in the multiphoton–tunnelling transition)
+dwarfs the ±10–20 % channel-phase oscillation. What is lost by the new default is
+bit-for-bit agreement with the published channel-sum formula and with codes that implement
+it (rates ~10–20 % apart of alternating sign near ``\gamma\approx1``–2; peak electron
+densities in weakly ionising cases shifted by ~10 %, final fields much less, §4.4); what is
+gained is a rate the quadrature can integrate spectrally, and the removal of a numerical
+scatter (1–2 % between rules) larger than the physical difference between the two forms.
+The physically best middle ground would be a *soft* threshold (the sum convolved with the
+pulse spectrum), kept in the roadmap in case a case ever needs it.
 
 ### 4.4 End-to-end validation
 
