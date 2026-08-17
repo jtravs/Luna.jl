@@ -606,22 +606,56 @@ docstring or commit message.
 
 ## 10. Outstanding work
 
-The single list for this path is §7 of `GPU-TODO.md` on this branch. In priority order:
+The single list for this path is §7 of `GPU-TODO.md` on this branch.
 
-1. **Measure the device RHS breakdown** (P0). Everything below, and the A40-vs-A100
-   question in §7.4, is a traffic-model estimate until this exists.
-2. **Skip the host FFT prototype on the device path** (P1, effort S).
-   `setup(::EnvGrid, ::FreeGrid)` allocates a full host field as an FFTW planning
-   prototype, plans a 3-D host transform against it and allocates a second host field,
-   then adapts to the device — 4.5 GiB and a planning cost that the device path never
-   uses when `inputs` is empty.
-3. **`needs_host_save(o)`**, the save-side twin of `needs_host_y` (P2, effort S).
-   `HostOutput` unconditionally allocates a full host field for saved slices and copies
-   into it, with no way to decline. A handler that reduces on the device needs neither.
-4. **Drop the `ScaledPlan` normalisation pass** in the fast-path RHS (P2) — an avoidable
-   full-array pass per RHS, estimated ~7 % of step traffic.
-5. **Fuse `_apply_towin!` into the response evaluation** (P2) — another, similar.
-6. **Factor out the save-condition loop** and document the output-handler contract (P3).
+### 10.1 Done
+
+- [x] **Skip the host FFT prototype on the device path.** `setup(::EnvGrid, ::FreeGrid)`
+  built a full host array purely as an FFTW planning prototype, planned a 3-D host
+  transform against it and allocated a second host array, before adapting to the device.
+  When the caller supplies the state itself (`inputs === ()`, which is how the free-space
+  scan drivers work) none of that is used: the state is now allocated directly on the
+  device with `device_zeros`, and no host plan is built or inverted. **4.5 GiB off the
+  host peak at production shapes**, plus the planning pass. Guarded by `_no_inputs`, which
+  dispatches on the type rather than calling `isempty` — `inputs` may be a single
+  `Fields.SpatioTemporalField`, which is not iterable.
+- [x] **`needs_host_save(o)`**, the save-side twin of `needs_host_y`. `HostOutput` now
+  allocates its saved-field buffer only for handlers that want one, and passes the
+  interpolant through unwrapped otherwise. The default is `true`, so `MemoryOutput` and
+  `HDF5Output` are unchanged by construction. A device-reducing handler gets the solver's
+  own array for **every** save, including `z = 0` (the step start, reached through the
+  interpolant) — which removed a whole branch from the downstream ModelPNPS extractor.
+- [x] **`Output.foreach_save(f, o, y, t, dt, yfun)`**, and the output-handler contract
+  documented on it. One accepted step can produce several saves or none, and every handler
+  needs the same loop; `MemoryOutput` and `HDF5Output` are both refactored onto it, so the
+  helper is proven rather than merely offered.
+- [x] **The `ScaledPlan` pass and `_apply_towin!`, fused — for the pointwise device path.**
+  A device inverse plan is an `AbstractFFTs.ScaledPlan`, so applying it ran the transform
+  and *then* a separate full-array multiply by `1/N`. When every response is pointwise the
+  next operation is itself a broadcast, so the transform is now applied unnormalised
+  (`_ift_unscaled`) and the `1/N` folded in as a prescale on read, together with the
+  temporal window. **Two whole-array passes per RHS**, an estimated ~14 % of step traffic.
+  Nothing is assumed about the responses: `f(s·E)` is exactly what the normalised field
+  would have produced. The host path is untouched — `ldiv!` through the forward plan is
+  FFTW's fused normalisation and never had the extra pass — so bit-identity is unaffected.
+
+### 10.2 Remaining
+
+1. **Measure the device RHS breakdown** (P0). Everything quantitative below, and the
+   A40-vs-A100 question in §7.4, is a traffic-model estimate until this exists.
+2. **The same normalisation fold for the *general* (batched) path** (P2, effort M). With a
+   non-pointwise response the polarisation is accumulated across responses into a separate
+   buffer, so there is no single broadcast to fold into and the `ScaledPlan` is still used.
+   The route is a homogeneity-degree trait — both Kerr and the Raman envelope polarisation
+   are degree 3 in `Et`, so an unnormalised inverse plus a `(1/N)^d` factor folded into
+   `_scale_nl!` is exact — guarded on all responses declaring the same degree. Deliberately
+   **not** done with the rest: it adds a trait to `Nonlinear`'s public surface, which the
+   modal transform shares, and the benefit is one arm of one campaign. A mis-declared
+   degree would be caught immediately rather than silently (the error is a factor of
+   ``N^{\Delta d}``), so it is safe to add later with a device-vs-host A/B.
+3. **`_apply_towin!` for the general path** (P3). Same obstruction: the window must be
+   applied after all responses have accumulated, so it can only fold into the last
+   response's write.
 
 ## 11. Where things live
 
