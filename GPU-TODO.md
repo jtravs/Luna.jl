@@ -336,16 +336,42 @@ for that campaign; see `ModelPNPS/GPU-TODO.md` for the downstream half of each.
   host peak and the host planning time, for a few lines. This is the largest single item
   in the 14.2 GiB host figure after the beamlets.
 
-- [ ] **P1 — Let an output handler consume the *device* state** (Effort S–M).
-  `HostOutput` copies each saved slice to a host buffer so `Output` handlers see a host
-  array. For 3-D free space that slice is 2.25 GiB, and ModelPNPS immediately reduces it
-  to three `(Nω,)` vectors — 2 KB — so the copy (and, when streaming, a 36 GiB round trip
-  through a temp file) is pure waste. The machinery already exists on the statistics side:
-  `Stats.StateStat`/`wants_state` hands the device array through, and `needs_host_y`
-  already suppresses the per-step copy. Extend the same opt-in to output handlers, so a
-  handler can declare it reduces on device and receive the untouched device array.
-  Payoff: enables `ModelPNPS` §1 (below), which is worth 14–18 % of wall clock plus
-  72 GiB/point of temp I/O. **Do this before any kernel micro-optimisation.**
+- [x] ~~**P1 — Let an output handler consume the *device* state.**~~ **Not needed** — this
+  was listed as the enabler for ModelPNPS's save-time extraction, and that landed with
+  **no Luna change at all** (`ModelPNPS.TraceExtractOutput`). Three existing pieces of
+  design made it work: `needs_host_y` already defaults to `false`, so `HostOutput` passes
+  `y` through untouched; `nostats_only` is a plain generic function, so a handler can opt
+  out of the device-statistics refusal with a method on *its own* type; and
+  `RK45.interpolate` snaps to the step endpoint and returns `s.yn` **itself**
+  (`src/RK45.jl:321`), so a handler whose saves are pinned with `step_on` receives the
+  device array rather than a copy. Recorded because the general lesson is worth keeping:
+  the output interface was already device-transparent enough for a downstream package to
+  reduce on device without touching Luna.
+
+- [ ] **P2 — `needs_host_save(o)`, the save-side twin of `needs_host_y`** (Effort S).
+  What the item above *should* have said. `HostOutput` unconditionally allocates `ibuf`
+  (a full host field — 2.25 GiB at production) and unconditionally wraps `yfun` to copy
+  into it, with no way to decline. A handler that reduces on device needs neither. The
+  fix is the same shape as `needs_host_y`: a trait defaulting to `true`, checked when
+  allocating `ibuf` and when building the closure, so behaviour for `MemoryOutput` and
+  `HDF5Output` is unchanged by construction.
+  Payoff, measured against the shipped ModelPNPS implementation: the 2.25 GiB host
+  buffer, one device-to-host copy per delay point, and the whole host-fallback branch in
+  `_reduce_slice!`. That branch exists for exactly one slice — **`z = 0` is the step
+  *start*, not an endpoint**, so `Luna.run` reaches it through the interpolant. Note
+  `interpolate` already returns `s.y` (the device array) for `ti == s.t`, so it is
+  `HostOutput`, not the interpolant, that forces the copy: this trait alone would make
+  every slice device-resident and let the downstream reducer be a single code path.
+
+- [ ] **P3 — Factor out the save-condition loop** (Effort S). `MemoryOutput`,
+  `HDF5Output` and now `ModelPNPS.TraceExtractOutput` each carry the same
+  `while save; …; saved += 1; save, ts = save_cond(…); end` bookkeeping. An
+  `Output.foreach_save(f, o, y, t, dt, yfun)` helper would let a handler supply only the
+  per-slice action. Also worth documenting the handler contract while doing it: writing a
+  new one currently means grepping `Luna.run` to discover that it calls the 4-arg save,
+  `willsave`, `check_cache`, and two metadata forms — the last of which a handler must
+  swallow with a catch-all `(o)(d; kwargs...) = nothing` that could silently absorb a call
+  it ought to service.
 
 - [ ] **P2 — Drop the `ScaledPlan` normalisation pass in the fast-path RHS** (Effort S for
   the pointwise case, M in general). On device `IFT = inv(FT)` (`src/NonlinearRHS.jl:1162`)
