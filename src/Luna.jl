@@ -38,7 +38,7 @@ end
     set_fftw_threads(nthr)
 
 Set number of threads to be used by FFTW. If set to `0`, the number of threads used by
-FFTW is determined automatically (see [`Utils.FFTWthreads()`](@ref)).
+FFTW is determined automatically (see `Utils.FFTWthreads()`).
 
 An explicit `nthr > 0` takes effect even when Julia itself runs single-threaded, in
 which case libfftw3 uses its own native pthreads pool rather than Julia tasks.

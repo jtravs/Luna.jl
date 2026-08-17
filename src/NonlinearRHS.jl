@@ -1111,7 +1111,7 @@ free-space propagation.
   general path (e.g. for testing).
 - `arraytype=Array`: array type for the working buffers. Pass a GPU array type to run the
   transform on a device; the grid vectors are mirrored to the same type (see
-  [`Luna.GridVectors`](@ref)) and an explicit inverse FFT plan is stored, because
+  [`Luna.GridVectors`](@ref Luna.GridVectors)) and an explicit inverse FFT plan is stored, because
   `ldiv!` through a device plan's `ScaledPlan` would otherwise be built per call.
 """
 function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;

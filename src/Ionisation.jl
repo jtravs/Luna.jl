@@ -351,7 +351,7 @@ exists, load this rather than recalculate.
 - `Emax::Number`: Maximum field strength to include in the interpolant.
 - `cache::Bool`: Whether to save the pre-calculated rate to a file
 - `cachedir::String`: Path to the directory where the cache should be stored and loaded from.
-    Defaults to \$HOME/.luna/pptcache
+    Defaults to `\$HOME/.luna/pptcache`
 
 Other keyword arguments are passed on to [`IonRatePPT`](@ref)
 """

@@ -16,6 +16,9 @@ makedocs(
         ],
         "The simple interface" => "interface.md",
         "Parameter scans" => "scans.md",
+        "Developer guide" => [
+            "Fixed-quadrature modal transform and GPU path" => "developer/modal_fixed_design.md",
+        ],
         "Modules" => [
             "$(split(fi, ".")[1]).jl" => "modules/$fi" for fi in readdir(modulesdir)
         ],

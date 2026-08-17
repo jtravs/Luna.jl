@@ -407,7 +407,7 @@ batched(resp) = false
 
 Trait: `true` if `resp` has an array-level method for a real-space field with `npol`
 polarisation components, i.e. `resp(out, Et, ρ)` with `out`/`Et` of shape
-`(nt, npol, npts)` — the layout used by [`NonlinearRHS.TransModalFixed`](@ref). For a
+`(nt, npol, npts)` — the layout used by [`Luna.NonlinearRHS.TransModalFixed`](@ref). For a
 scalar field (`npol == 1`) this is [`batched(resp)`](@ref); vector fields default to `false`.
 """
 batched(resp, npol) = npol == 1 ? batched(resp) : false
@@ -451,7 +451,7 @@ Array-level (batched) version of [`PlasmaCumtrapz`](@ref) for a real-space field
 cumulative integrals and the plasma current/polarisation are computed for all transverse
 points at once, with the same arithmetic as the columnwise response. On the host the
 columns are processed in parallel with per-column kernels (`Utils.tforeach`); on a device
-everything is whole-array broadcasts with [`Maths.cumtrapz_scan!`](@ref) for the
+everything is whole-array broadcasts with [`Luna.Maths.cumtrapz_scan!`](@ref) for the
 cumulative integrals (a native scan where the backend provides one, e.g. `CUDA.cumsum!`,
 otherwise the portable doubling scan). Buffers are allocated lazily on the field's array type at the first
 call. `ratefunc` is kept as given (host callable, e.g. for `Stats.electrondensity`);

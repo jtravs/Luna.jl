@@ -1027,7 +1027,7 @@ end
 
 Find the first index in `f.x` which is larger than `x0`.
 
-This is similar to [`findfirst`](@ref), but it starts at the index which was last used.
+This is similar to `findfirst`, but it starts at the index which was last used.
 If the new value `x0` is close to the previous `x0`, this is much faster than `findfirst`.
 """
 function (f::FastFinder)(x0::Number)

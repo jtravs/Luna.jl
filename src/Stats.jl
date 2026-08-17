@@ -325,7 +325,7 @@ Create a stats function for a fixed-quadrature modal transform which collects, a
 step, the mode reconstruction error of the on-axis nonlinear polarisation (the modal
 expansion of the polarisation projected back to `r=0` against the polarisation evaluated
 directly there), the number of quadrature nodes, and the embedded quadrature error
-estimate of the transform ([`NonlinearRHS.integral_error!`](@ref)) as an RMS value, relative
+estimate of the transform ([`Luna.NonlinearRHS.integral_error!`](@ref)) as an RMS value, relative
 to the RMS polarisation, and — if `window=(λmin, λmax)` is given — relative to the
 polarisation within that wavelength window (`"transverse_integral_error_rel_window"`), which
 is the relevant measure for weak spectral features such as dispersive waves.
