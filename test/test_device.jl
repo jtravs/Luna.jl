@@ -616,7 +616,7 @@ if have_jlarrays
     end
 
     @testset "TransModalFixed on device" begin
-        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields, Modes,
+        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields, Modes, RK45,
                      Capillary, Ionisation, Stats
         JLArray = JLArrays.JLArray
         λ0 = 800e-9
@@ -671,6 +671,17 @@ if have_jlarrays
         # a whole propagation on device arrays versus the host, with a z-dependent linear
         # operator (evaluated on the host and uploaded by RK45.make_prop!) and with the
         # default statistics (host copies of the small modal state on every step)
+        # the z-dependent modal linear operator evaluates on the device (MarcatiliLinop)
+        # and agrees with its host evaluation
+        lz = LinearOps.make_linop(grid, modes, λ0)
+        @test lz isa Luna.Capillary.MarcatiliLinop && RK45.device_capable(lz)
+        oh = zeros(ComplexF64, length(grid.ω), length(modes)); lz(oh, 2e-3)
+        lzd = LinearOps.make_linop(grid, modes, λ0)
+        od = JLArray(zeros(ComplexF64, length(grid.ω), length(modes))); lzd(od, 2e-3)
+        @test lzd.ondevice && lzd.mask isa JLArray
+        @test Array(od) == oh
+        @test_throws ErrorException lzd(similar(oh), 2e-3) # no way back to the host
+
         function propagate(arraytype; stats_period=1, kwargs...)
             Eω, transform, FT = make(arraytype, Ionisation.IonRateADK(:Ar))
             linop = LinearOps.make_linop(grid, modes, λ0)

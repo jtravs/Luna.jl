@@ -5,8 +5,8 @@ import StaticArrays: SVector
 import Cubature: hquadrature
 using Reexport
 @reexport using Luna.Modes
-import Luna: Maths, Grid
-import Luna.PhysData: c, ε_0, μ_0, ref_index_fun, roomtemp, densityspline, sellmeier_gas
+import Luna: Maths, Grid, LinearOps, RK45, Utils
+import Luna.PhysData: c, ε_0, μ_0, ref_index_fun, roomtemp, densityspline, sellmeier_gas, wlfreq
 import Luna.Modes: AbstractMode, dimlimits, neff, field, Aeff, N, modeinfo,
                    zconstant, scale_invariant, azimuthal_order
 import Luna.LinearOps: make_linop, conj_clamp, neff_grid, neff_β_grid
@@ -98,8 +98,8 @@ function MarcatiliMode(a, gas, P;
                         clad=:SiO2, loss=true)
     rfg = ref_index_fun(gas, P, T)
     rfs = ref_index_fun(clad)
-    coren = (ω; z) -> rfg(wlfreq(ω))
-    cladn = (ω; z) -> rfs(wlfreq(ω))
+    coren = ConstIndex(rfg)
+    cladn = ConstIndex(rfs)
     MarcatiliMode(a, n, m, kind, ϕ, coren, cladn, model=model, loss=loss)
 end
 
@@ -112,7 +112,7 @@ index `cladn(ω; z)` with a core radius `a` which is filled with `gas` to pressu
 function MarcatiliMode(a, gas, P, cladn;
                         n=1, m=1, kind=:HE, ϕ=0.0, T=roomtemp, model=:full, loss=true)
     rfg = ref_index_fun(gas, P, T)
-    coren = (ω; z) -> rfg(wlfreq(ω))
+    coren = ConstIndex(rfg)
     MarcatiliMode(a, n, m, kind, ϕ, coren, cladn, model=model, loss=loss)
 end
 
@@ -125,7 +125,7 @@ by `coren(ω; z)`.
 function MarcatiliMode(a, coren;
                         n=1, m=1, kind=:HE, ϕ=0.0, model=:full, clad=:SiO2, loss=true)
     rfs = ref_index_fun(clad)
-    cladn = (ω; z) -> rfs(wlfreq(ω))
+    cladn = ConstIndex(rfs)
     MarcatiliMode(a, n, m, kind, ϕ, coren, cladn, model=model, loss=loss)
 end
 
@@ -135,7 +135,7 @@ end
 
 Create a `MarcatiliMode` for a capillary with radius `a` and no gas fill.
 """
-MarcatiliMode(a; kwargs...) = MarcatiliMode(a, (ω; z) -> 1; kwargs...)
+MarcatiliMode(a; kwargs...) = MarcatiliMode(a, ConstIndex(λ -> 1); kwargs...)
 
 """
     neff(m::MarcatiliMode, ω; z=0)
@@ -158,16 +158,37 @@ function neff(m::MarcatiliMode, ω; z=0)
     neff(m, ω, εco, vn, radius(m, z))
 end
 
+# The Marcatili effective index of one mode at one frequency from the core permittivity
+# `εco`, the cladding term `vn` (see get_vn), the Bessel zero `unm` and the radius `a`, for
+# the four combinations of loss (Val) and model (Val). These scalar kernels are the single
+# source of the arithmetic: the mode-level `neff` methods below call them, and so does the
+# broadcast of `LinearOps.MarcatiliLinop`, which evaluates all modes and frequencies at once
+# (on the host or a device) and is therefore bit-identical to the per-point evaluation.
+@inline function _neff_scalar(::Val{true}, ::Val{:full}, unm, ω, εco, vn, a)
+    k = ω/c
+    n = sqrt(complex(εco - (unm/(k*a))^2*(1 - im*vn/(k*a))^2))
+    return (real(n) < 1e-3) ? (1e-3 + im*clamp(imag(n), 0, Inf)) : n
+end
+@inline function _neff_scalar(::Val{true}, ::Val{:reduced}, unm, ω, εco, vn, a)
+    return ((1 + (εco - 1)/2 - c^2*unm^2/(2*ω^2*a^2))
+                + im*(c^3*unm^2)/(a^3*ω^3)*vn)
+end
+@inline function _neff_scalar(::Val{false}, ::Val{:full}, unm, ω, εco, vn, a)
+    k = ω/c
+    n = real(sqrt(εco - (unm/(k*a))^2*(1 - im*vn/(k*a))^2))
+    return (n < 1e-3) ? 1e-3 : n
+end
+@inline function _neff_scalar(::Val{false}, ::Val{:reduced}, unm, ω, εco, vn, a)
+    return real(1 + (εco - 1)/2 - c^2*unm^2/(2*ω^2*a^2))
+end
+
 # Dispatch on loss to make neff type stable
 # m.loss = Val{true}() (returns ComplexF64)
 function neff(m::MarcatiliMode{Ta, Tco, Tcl, Val{true}}, ω, εco, vn, a) where {Ta, Tcl, Tco}
     if m.model == :full
-        k = ω/c
-        n = sqrt(complex(εco - (m.unm/(k*a))^2*(1 - im*vn/(k*a))^2))
-        return (real(n) < 1e-3) ? (1e-3 + im*clamp(imag(n), 0, Inf)) : n
+        return _neff_scalar(Val(true), Val(:full), m.unm, ω, εco, vn, a)
     elseif m.model == :reduced
-        return ((1 + (εco - 1)/2 - c^2*m.unm^2/(2*ω^2*a^2))
-                    + im*(c^3*m.unm^2)/(a^3*ω^3)*vn)
+        return _neff_scalar(Val(true), Val(:reduced), m.unm, ω, εco, vn, a)
     else
         error("model must be :full or :reduced")
     end
@@ -176,11 +197,9 @@ end
 # m.loss = Val{false}() (returns Float64)
 function neff(m::MarcatiliMode{Ta, Tco, Tcl, Val{false}}, ω, εco, vn, a) where {Ta, Tcl, Tco}
     if m.model == :full
-        k = ω/c
-        n = real(sqrt(εco - (m.unm/(k*a))^2*(1 - im*vn/(k*a))^2))
-        return (n < 1e-3) ? 1e-3 : n
+        return _neff_scalar(Val(false), Val(:full), m.unm, ω, εco, vn, a)
     elseif m.model == :reduced
-        return real(1 + (εco - 1)/2 - c^2*m.unm^2/(2*ω^2*a^2))
+        return _neff_scalar(Val(false), Val(:reduced), m.unm, ω, εco, vn, a)
     else
         error("model must be :full or :reduced")
     end
@@ -194,7 +213,10 @@ function neff_wg(m::MarcatiliMode{Ta, Tco, Tcl, Val{true}}, ω; z=0) where {Ta, 
         k = ω/c
         return (m.unm/(k*a))^2*(1 - im*vn/(k*a))^2
     elseif m.model == :reduced
-        return c^2*m.unm^2/(2*ω^2*a^2) + im*(c^3*m.unm^2)/(a^3*ω^3)*vn
+        # `neff(m, εco, nwg)` forms `1 + (εco - 1)/2 - nwg`, so the imaginary (loss) part
+        # must enter with the opposite sign to the one in `_neff_scalar`, which adds it:
+        # (1 + (εco - 1)/2 - re) + im*x  ==  1 + (εco - 1)/2 - (re - im*x)
+        return c^2*m.unm^2/(2*ω^2*a^2) - im*(c^3*m.unm^2)/(a^3*ω^3)*vn
     else
         error("model must be :full or :reduced")
     end
@@ -304,11 +326,40 @@ Aeff(m::MarcatiliMode; z=0) = radius(m, z)^2 * m.aeff_intg
 
 
 """
+    ConstIndex(rf)
+
+A ``z``-independent refractive index `rf(λ)`, callable as `(ω; z)` like every core/cladding
+index function of a [`MarcatiliMode`](@ref). The standard constructors use it for a
+constant gas fill and for the cladding, so that the linear operator can *recognise* the
+``z``-independence and precompute the index once (see `LinearOps.MarcatiliLinop`); a
+user-supplied closure is treated as ``z``-dependent.
+"""
+struct ConstIndex{F}
+    rf::F
+end
+(c::ConstIndex)(ω; z=0.0) = c.rf(wlfreq(ω))
+
+"""
+    GradientCoreIndex(γ, dens)
+
+The core refractive index ``\\sqrt{1 + γ(λ)ρ(z)}`` of a gas fill with polarisability
+`γ(λ[µm])` (per unit density, `PhysData.sellmeier_gas`) and density profile
+`dens(z)`, callable as `(ω; z)`. Returned by [`gradient`](@ref); the linear operator uses
+its structure — ``z`` enters only through the scalar `dens(z)` — to evaluate the modes'
+effective indices as one broadcast per step (see `LinearOps.MarcatiliLinop`).
+"""
+struct GradientCoreIndex{G, D}
+    γ::G
+    dens::D
+end
+(c::GradientCoreIndex)(ω; z=0.0) = sqrt(1 + c.γ(wlfreq(ω)*1e6)*c.dens(z))
+
+"""
     gradient(gas, L, p0, p1; T=roomtemp)
 
 Convenience function to create density and core index profiles for
 simple two-point gradient fills defined by the waveguide length `L` and the pressures at
-`z=0` and `z=L`.
+`z=0` and `z=L`. Returns `(coren, dens)` with `coren` a [`GradientCoreIndex`](@ref).
 """
 function gradient(gas, L, p0, p1; T=roomtemp)
     γ = sellmeier_gas(gas)
@@ -317,8 +368,7 @@ function gradient(gas, L, p0, p1; T=roomtemp)
             z <= 0 ? p0 :
             sqrt(p0^2 + z/L*(p1^2 - p0^2))
     dens(z) = dspl(p(z))
-    coren(ω; z) = sqrt(1 + γ(wlfreq(ω)*1e6)*dens(z))
-    return coren, dens
+    return GradientCoreIndex(γ, dens), dens
 end
 
 """
@@ -342,8 +392,7 @@ function gradient(gas, Z, P; T=roomtemp)
         end
     end
     dens(z) = dspl(p(z))
-    coren(ω; z) = sqrt(1 + γ(wlfreq(ω)*1e6)*dens(z))
-    return coren, dens
+    return GradientCoreIndex(γ, dens), dens
 end
 
 #= Avoid repeated calculation of the waveguide part of the effective index for modes with
@@ -396,6 +445,179 @@ function transmission(a, λ, L; kind=:HE, n=1, m=1)
     # TODO hardcoded fill needs to be updated if using absorbing materials
     mode = MarcatiliMode(a, :He, 0; n=n, m=m, kind=kind)
     Modes.transmission(mode, wlfreq(λ), L)
+end
+
+
+#=================================================#
+#======  z-DEPENDENT LINEAR OPERATOR (fast)  =====#
+#=================================================#
+
+const MarcatiliCollection = Union{AbstractVector{<:MarcatiliMode}, Tuple{Vararg{MarcatiliMode}}}
+
+"""
+    marcatili_linop_ok(modes) -> Bool
+
+Whether [`MarcatiliLinop`](@ref) can represent the ``z``-dependent linear operator of
+`modes`: every mode is a `MarcatiliMode` (not a wrapper), with a [`ConstIndex`](@ref)
+cladding, a [`ConstIndex`](@ref) or [`GradientCoreIndex`](@ref) core (all of one kind), and
+all modes share the same `model` and `loss` setting.
+"""
+function marcatili_linop_ok(modes)
+    ms = collect(modes)
+    isempty(ms) && return false
+    all(m -> m isa MarcatiliMode, ms) || return false
+    all(m -> m.cladn isa ConstIndex, ms) || return false
+    all(m -> m.coren isa ConstIndex, ms) || all(m -> m.coren isa GradientCoreIndex, ms) ||
+        return false
+    allequal(m.model for m in ms) || return false
+    allequal(typeof(m.loss) for m in ms) || return false
+    return true
+end
+
+# the fast operator where it applies, the generic host closure otherwise
+function LinearOps.make_linop(grid::Grid.RealGrid, modes::MarcatiliCollection, λ0; ref_mode=1)
+    marcatili_linop_ok(modes) || return LinearOps._make_linop_generic(grid, modes, λ0; ref_mode)
+    MarcatiliLinop(grid, modes, λ0; ref_mode)
+end
+
+function LinearOps.make_linop(grid::Grid.EnvGrid, modes::MarcatiliCollection, λ0;
+                              ref_mode=1, thg=false)
+    marcatili_linop_ok(modes) || return LinearOps._make_linop_generic(grid, modes, λ0; ref_mode, thg)
+    MarcatiliLinop(grid, modes, λ0; ref_mode, thg)
+end
+
+"""
+    MarcatiliLinop
+
+``z``-dependent modal linear operator for a collection of [`MarcatiliMode`](@ref)s,
+callable as `linop!(out, z)` like the closure returned by the generic
+`LinearOps.make_linop` and giving bit-identical results, but evaluated as **one broadcast**
+over all frequencies and modes. ``z`` enters the Marcatili effective index only through two
+scalars per mode — the core radius ``a(z)`` (tapers) and, for a [`GradientCoreIndex`](@ref),
+the density ``ρ(z)`` in ``ε_{\\rm core} = 1 + γ(ω)ρ(z)`` (pressure gradients) — so the
+``ω``-dependent parts are precomputed once (the cladding term ``v_n(ω)`` per mode, ``γ(ω)``
+or ``ε_{\\rm core}(ω)`` per mode, ``u_{nm}``) and each call costs the host-side scalars
+(``a(z)``, ``ρ(z)``, the reference mode's ``β_1(z)``) plus a single elementwise kernel
+(`_neff_scalar`, the same arithmetic as `neff`). Because the kernel is a broadcast, the
+operator writes directly into a **device** array (`RK45.device_capable`), with no host loop
+and no per-stage upload: the precomputed arrays are moved to the array type of `out` on
+the first call with a device array (and the operator can then no longer be evaluated
+into a host array).
+
+The generic operator costs ~0.8 ms per stage for 4 modes on a 4097-point grid (a serial
+`Modes.neff` loop re-evaluating the gas and cladding indices per mode) — ~45 % of an RK45
+step of the RDW gradient example, and the cap on the step time of device runs on fast
+GPUs; this one costs tens of µs on the host and a few µs on a device.
+"""
+mutable struct MarcatiliLinop{mT, lossT, modelT}
+    modes::mT
+    ref_mode::Int
+    ω0::Float64 # wlfreq(λ0), for β1 (and βref)
+    ωc::Float64 # grid.ω0 for an EnvGrid (the carrier), 0 for a RealGrid
+    envelope::Bool
+    thg::Bool
+    gradient::Bool # core holds γ(ω) (εco = sqrt(1 + γρ)^2) rather than εco(ω)
+    loss::lossT # Val
+    model::modelT # Val
+    ondevice::Bool # whether the arrays below live on a device
+    ω::Any # (nω) frequency grid
+    mask::Any # (nω) Bool: grid.sidx
+    unm::Any # (1, M)
+    vn::Any # (nω, M) cladding term per mode
+    core::Any # (nω, M) εco(ω) or γ(ω) per mode
+    arow::Any # (1, M) core radius per mode at the current z
+    ρrow::Any # (1, M) density per mode at the current z (gradients; 1 otherwise)
+    arow_h::Vector{Float64} # host staging for arow/ρrow
+    ρrow_h::Vector{Float64}
+end
+
+RK45.device_capable(::MarcatiliLinop) = true
+
+function MarcatiliLinop(grid::Grid.AbstractGrid, modes, λ0; ref_mode=1, thg=false)
+    ms = collect(modes)
+    M = length(ms)
+    ω = grid.ω
+    nω = length(ω)
+    mask = collect(grid.sidx)
+    unm = reshape([Float64(m.unm) for m in ms], 1, M)
+    # cladding term per mode: εcl(ω) -> vn (kind-dependent), z-independent by construction
+    vn = Matrix{ComplexF64}(undef, nω, M)
+    for (i, m) in enumerate(ms), iω in 1:nω
+        vn[iω, i] = mask[iω] ? get_vn(m.cladn(ω[iω], z=0.0)^2, m.kind) : 0.0
+    end
+    gradient = ms[1].coren isa GradientCoreIndex
+    # core: γ(ω) per mode for gradients (εco(ω, z) = sqrt(1 + γ ρ(z))^2 as in
+    # GradientCoreIndex), or εco(ω) = coren(ω)^2 for constant fills
+    iref = findfirst(mask)
+    coreT = gradient ? Float64 : promote_type((typeof(m.coren(ω[iref], z=0.0)^2) for m in ms)...)
+    core = zeros(coreT, nω, M)
+    for (i, m) in enumerate(ms), iω in 1:nω
+        mask[iω] || continue
+        core[iω, i] = gradient ? m.coren.γ(wlfreq(ω[iω])*1e6) : m.coren(ω[iω], z=0.0)^2
+    end
+    envelope = grid isa Grid.EnvGrid
+    ωc = envelope ? grid.ω0 : 0.0
+    MarcatiliLinop(ms, ref_mode, wlfreq(λ0), ωc, envelope, thg, gradient,
+                   ms[1].loss, Val(ms[1].model), false,
+                   copy(ω), mask, unm, vn, core, ones(1, M), ones(1, M),
+                   ones(M), ones(M))
+end
+
+# move the precomputed arrays to the array type of `out` (once)
+function _adapt_to!(l::MarcatiliLinop, out)
+    dev(x) = copyto!(similar(out, eltype(x), size(x)), x)
+    l.ω = dev(l.ω); l.mask = dev(l.mask); l.unm = dev(l.unm)
+    l.vn = dev(l.vn); l.core = dev(l.core); l.arow = dev(l.arow); l.ρrow = dev(l.ρrow)
+    l.ondevice = true
+    nothing
+end
+
+@inline _εco(core, ρ, ::Val{true}) = sqrt(1 + core*ρ)^2 # cf. GradientCoreIndex
+@inline _εco(core, ρ, ::Val{false}) = core
+
+# one element of the operator (see LinearOps._make_linop_generic for the reference form)
+@inline function _marcatili_element(mask, ω, unm, core, vn, a, ρ, β1, βref, ωc, thg,
+                                    loss, model, grad)
+    mask || return zero(ComplexF64)
+    n = _neff_scalar(loss, model, unm, ω, _εco(core, ρ, grad), vn, a)
+    nc = LinearOps.conj_clamp(n, ω)
+    v = -im*(ω/c*nc - (ω - ωc)*β1)
+    thg ? v : v - (-im*βref)
+end
+
+function (l::MarcatiliLinop)(out, z)
+    if Utils.isdevice(out) && !l.ondevice
+        _adapt_to!(l, out)
+    elseif !Utils.isdevice(out) && l.ondevice
+        error("MarcatiliLinop: this operator has been used with a device array and cannot "*
+              "be evaluated into a host array afterwards")
+    end
+    ms = l.modes
+    β1 = dispersion(ms[l.ref_mode], 1, l.ω0, z=z)::Float64
+    # "thg" here means "no carrier subtraction": a RealGrid never subtracts, an EnvGrid
+    # only when thg=false
+    thg = !l.envelope || l.thg
+    βref = thg ? 0.0 : β(ms[l.ref_mode], l.ω0, z=z)
+    for (i, m) in enumerate(ms)
+        l.arow_h[i] = radius(m, z)
+        l.ρrow_h[i] = l.gradient ? m.coren.dens(z) : 1.0
+    end
+    if l.ondevice
+        copyto!(l.arow, l.arow_h); copyto!(l.ρrow, l.ρrow_h)
+    else
+        l.arow .= reshape(l.arow_h, 1, :); l.ρrow .= reshape(l.ρrow_h, 1, :)
+    end
+    _marcatili_broadcast!(out, l.mask, l.ω, l.unm, l.core, l.vn, l.arow, l.ρrow, β1, βref,
+                          l.ωc, thg, l.loss, l.model, Val(l.gradient))
+    out
+end
+
+# function barrier: the array fields of the struct are loosely typed
+function _marcatili_broadcast!(out, mask, ω, unm, core, vn, arow, ρrow, β1, βref, ωc, thg,
+                               loss, model, grad)
+    @. out = _marcatili_element(mask, ω, unm, core, vn, arow, ρrow, β1, βref, ωc, thg,
+                                loss, model, grad)
+    out
 end
 
 end

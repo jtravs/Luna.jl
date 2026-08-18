@@ -572,7 +572,24 @@ function neff_grid(grid, modes, λ0; ref_mode=1)
     _neff
 end
 
-function make_linop(grid::Grid.RealGrid, modes, λ0; ref_mode=1)
+"""
+    make_linop(grid, modes, λ0; ref_mode=1[, thg=false])
+
+``z``-dependent modal linear operator `linop!(out, z)` for a collection of modes (tapers,
+pressure gradients). For a collection of `Capillary.MarcatiliMode`s whose core and cladding
+index functions have a recognisable structure (`Capillary.ConstIndex` /
+`Capillary.GradientCoreIndex`, i.e. what the standard constructors and
+`Capillary.gradient` produce) `Capillary` adds methods returning a
+`Capillary.MarcatiliLinop`, which evaluates all modes and frequencies as one broadcast per
+call and can write directly into a device array; for anything else the generic closure
+below evaluates `Modes.neff` mode by mode and frequency by frequency on the host.
+"""
+make_linop(grid::Grid.RealGrid, modes, λ0; ref_mode=1) =
+    _make_linop_generic(grid, modes, λ0; ref_mode)
+make_linop(grid::Grid.EnvGrid, modes, λ0; ref_mode=1, thg=false) =
+    _make_linop_generic(grid, modes, λ0; ref_mode, thg)
+
+function _make_linop_generic(grid::Grid.RealGrid, modes, λ0; ref_mode=1)
     sidcs = (1:length(grid.ω))[grid.sidx]
     neff = neff_grid(grid, modes, λ0; ref_mode=ref_mode)
     linop! = let neff=neff, ω=grid.ω, modes=modes, ω0=wlfreq(λ0), ref_mode=ref_mode
@@ -589,7 +606,7 @@ function make_linop(grid::Grid.RealGrid, modes, λ0; ref_mode=1)
     end
 end
 
-function make_linop(grid::Grid.EnvGrid, modes, λ0; ref_mode=1, thg=false)
+function _make_linop_generic(grid::Grid.EnvGrid, modes, λ0; ref_mode=1, thg=false)
     sidcs = (1:length(grid.ω))[grid.sidx]
     neff = neff_grid(grid, modes, λ0; ref_mode=ref_mode)
     linop! = let neff=neff, ω=grid.ω, modes=modes, ω0=wlfreq(λ0), ref_mode=ref_mode
@@ -611,6 +628,5 @@ function make_linop(grid::Grid.EnvGrid, modes, λ0; ref_mode=1, thg=false)
         end
     end
 end
-
 
 end

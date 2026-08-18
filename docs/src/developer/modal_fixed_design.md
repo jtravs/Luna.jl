@@ -55,11 +55,10 @@ The headline findings, all detailed below:
   RDW propagation, and the embedded Gauss–Kronrod error estimate becomes trustworthy.
 - **Speed (CPU, laptop, 8 threads).** RDW VUV example, 1.5 m: 18.6 min (adaptive, old
   rate) → 138 s (adaptive, smooth rate) → 67 s (fixed, default ``n_r=64``) → 48 s (fixed,
-  ``n_r=32``), with the fused two-pass plasma kernel. CtC-type H₂ supercontinuum
-  (nt = 32768, 6 modes, Raman + plasma): 72 ms → 14.5 ms per RHS. The transform scales
-  with cores; the adaptive one did not. In the RDW gradient case the transform is now
-  only ~25 % of a step; the ``z``-dependent linear operator (~45 %) and the statistics
-  (~15 %) are the next targets (§5.2).
+  ``n_r=32``), with the fused two-pass plasma kernel; 52 s / 32 s with the broadcast (device-native)
+  ``z``-dependent linear operator as well. CtC-type H₂ supercontinuum (nt = 32768, 6
+  modes, Raman + plasma): 72 ms → 14.5 ms per RHS. The transform scales with cores; the
+  adaptive one did not.
 - **GPU.** The same code runs on CUDA arrays (validated with JLArrays on the host and by
   hardware-gated tests; the first A40 measurements are pending — see the roadmap). The
   plasma path is bandwidth-bound (≈0.5 FLOP/B), so HBM bandwidth, not FP64 rate, is what a
@@ -335,10 +334,19 @@ genuinely CUDA-specific hot-loop method: `Maths.scan!` on `CuArray` → `Base.cu
 `Luna.setup(...; arraytype)` allocates the state and all transform buffers with
 `Luna.device_zeros`, plans the state FFT on the device (`Utils.plan_rfft_backend`), builds
 `norm_modal(grid; arraytype)` with the frequency axis mirrored, and adapts the input field.
-`Luna.run` uploads a constant host linear operator once; a ``z``-dependent one (the RDW
-*gradient* example) is evaluated on the host into a buffer and uploaded per stage
-(`RK45.make_prop!`, `device_capable(linop!)` opt-out for future device-native operators).
-Saved fields come back through `Luna.HostOutput`.
+`Luna.run` uploads a constant host linear operator once. A ``z``-dependent one is, for
+`Capillary.MarcatiliMode` collections built by the standard constructors (tapers, pressure
+gradients, both), a `Capillary.MarcatiliLinop`: ``z`` enters the Marcatili effective index
+only through the scalars ``a(z)`` and ``ρ(z)`` (``ε_{\rm core} = 1+γ(ω)ρ(z)``, recognisable
+because `Capillary.gradient` returns a `GradientCoreIndex` and the constructors use
+`ConstIndex` for constant fills and claddings), so ``γ(ω)``, the cladding term ``v_n(ω)``
+and ``u_{nm}`` are precomputed once and each stage is one broadcast over ``n_ω\times M``
+(the same scalar kernel `_neff_scalar` as `Modes.neff`, hence bit-identical), evaluated
+directly on the device (`RK45.device_capable`; the arrays move to the device on first
+use) or on the host (~40 µs instead of ~800 µs per stage). Anything else — wrapped modes,
+user-supplied ``z``-dependent index closures, other mode types — keeps the generic host
+closure, which `RK45.make_prop!` evaluates into a host buffer and uploads per stage. Saved
+fields come back through `Luna.HostOutput`.
 
 **Statistics on a device run.** `Stats.collect_stats` returns a `StatsCollector` which
 accepts the *device* array itself (`Luna.device_stats`): it copies it into its own host
@@ -600,18 +608,29 @@ the pulse wings, where the rate is zero — 93 % of the samples in the RDW examp
 division is skipped where the rate vanishes (it adds exactly ±0.0). Sweep cost 6.1 → 2.3 ns
 per sample per thread. The host path allocates only the rate and P.
 
-**One RK45 step** (RDW VUV gradient case, ``n_r=32``, 11.0 ms measured): 6 × (linear
-operator 0.78 ms + RHS 0.46 ms) + statistics 2.9 ms + windows 0.07 ms. So after the
-transform work the step is dominated by (a) the **``z``-dependent linear operator** for
-the pressure gradient — `LinearOps.make_linop` evaluates `Modes.neff(mode, ω; z)` for every
-(mode, ω) at every stage, ~48 ns each: the gas index (`coren`, a density spline × Sellmeier)
-and the cladding index (`cladn`, a `CmplxBSpline`) are re-evaluated per mode although the
-gas index is common to all modes and the cladding index is ``z``-independent (~45 % of the
-step; roadmap §8.3), and (b) the **statistics** — of which `fwhm_t` alone was 1.3 ms
-because `Maths.level_xings` returned "no crossing" (empty higher modes) by throwing and
-catching an exception, ~100 µs each; fixed to return the same NaNs without throwing
-(statistics 2.4 → 1.4 ms per step, of which the mode-error statistic's transform call is
-0.65 ms).
+**One RK45 step** (RDW VUV gradient case, ``n_r=32``, 11.0 ms measured before, 7.4 ms
+after): 6 × (linear operator 0.78 ms + RHS 0.46 ms) + statistics 2.9 ms + windows 0.07 ms.
+So after the transform work the step was dominated by (a) the **``z``-dependent linear
+operator** for the pressure gradient — the generic `LinearOps.make_linop` closure evaluates
+`Modes.neff(mode, ω; z)` for every (mode, ω) at every stage, ~48 ns each, re-evaluating the
+gas index (a density spline × Sellmeier) and the cladding index (a `CmplxBSpline`) per mode
+(~45 % of the step) — now replaced by `Capillary.MarcatiliLinop` (§3.7): one broadcast per
+stage, 0.036 ms vs 0.385 ms at nω=1025 on the host, bit-identical, device-native; the
+1.5 m RDW run went 67 → 52 s at ``n_r=64`` and 48 → 32 s at ``n_r=32``; and (b) the
+**statistics** — of which `fwhm_t` alone was 1.3 ms because `Maths.level_xings` returned
+"no crossing" (empty higher modes) by throwing and catching an exception, ~100 µs each;
+fixed to return the same NaNs without throwing (statistics 2.4 → 1.4 ms per step, of which
+the mode-error statistic's transform call is 0.65 ms). What remains of the 7.4 ms step is
+6 × RHS 2.8 ms, statistics ~1.6 ms, and ~3 ms of RK45 stage updates/error norm/windows/
+output. On a device the operator no longer caps the step: the host work per stage is the
+three scalars ``a(z)``, ``ρ(z)``, ``β_1(z)``.
+
+While doing this a latent bug was found and fixed: the older fixed-core acceleration
+`Capillary.neff_wg` → `neff(m, εco, nwg)` (used by the mode-averaged ``z``-dependent
+operator and by tuple collections of fixed-core modes) had the imaginary (loss) sign of
+the `:reduced` model reversed, so with `model=:reduced, loss=true` the loss was clamped to
+zero there (1.3 % operator difference vs `Modes.neff`); `:full`, the default, was
+unaffected. Both paths now agree with `Modes.neff` bit-for-bit (tested).
 
 Rate evaluation per sample: cached PPT spline ≈ 1–2 ns per thread, ADK ≈ 2.5 ns, direct
 `IonRatePPT` ≈ 120 ns — recomputing the rate instead of the spline is ruled out on any
@@ -770,8 +789,11 @@ the record.
   per step).
 - [x] **P1 — CPU: fuse the plasma column into two passes.** Done (§5.2): plasma 3×
   faster on the RDW case (0.85 → 0.28 ms), 2× on CtC; RHS −45 % / −22 %; bit-identical.
-- [ ] **P1 — CPU: the ``z``-dependent modal linear operator** (pressure gradients — the
-  RDW standard case): 0.78 ms per call, 6 calls per step = ~45 % of a step at ``n_r=32``.
+- [x] **P1 — the ``z``-dependent modal linear operator, device-native** — done
+  (`Capillary.MarcatiliLinop`, §3.7/§5.2): tapers, gradients and both; bit-identical to
+  the generic closure; 10× faster on the host, one broadcast on a device; RDW VUV 1.5 m
+  48 → 32 s at ``n_r=32``. The description below is kept for the record. Was: 0.78 ms per
+  call, 6 calls per step = ~45 % of a step at ``n_r=32``.
   `LinearOps.neff_grid` for a vector of `MarcatiliMode`s should evaluate the gas index once
   per ``z`` for all modes that share it (today `Interface.makemode_s` builds a separate
   `Capillary.gradient` — and density spline — per mode, so even identity-based sharing

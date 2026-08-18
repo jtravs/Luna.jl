@@ -157,3 +157,59 @@ for zi in range(0, L, length=10)
     @test outm == outdm
 end
 end
+@testset "MarcatiliLinop (multimode, tapers and gradients)" begin
+    import Luna: RK45
+    import LinearAlgebra: norm
+    λ0 = 800e-9
+    grid = Grid.RealGrid(1.0, λ0, (200e-9, 3000e-9), 300e-15)
+    egrid = Grid.EnvGrid(1.0, λ0, (400e-9, 2000e-9), 300e-15)
+    coren, dens = Capillary.gradient(:He, 1.0, 0.8, 0.0)
+    @test coren isa Capillary.GradientCoreIndex
+    taper(z) = 125e-6*(1 - 0.3z)
+    cases = [
+        [Capillary.MarcatiliMode(125e-6, coren; n=1, m=k) for k in 1:4],           # gradient
+        [Capillary.MarcatiliMode(taper, :Ar, 1.0; n=1, m=k) for k in 1:4],         # taper
+        [Capillary.MarcatiliMode(taper, coren; n=1, m=k) for k in 1:4],            # both
+        [Capillary.MarcatiliMode(taper, coren; kind=:HE, n=1, m=1),                # mixed kinds
+         Capillary.MarcatiliMode(taper, coren; kind=:TE, n=0, m=1),
+         Capillary.MarcatiliMode(taper, coren; kind=:TM, n=0, m=1),
+         Capillary.MarcatiliMode(taper, coren; kind=:HE, n=2, m=1)],
+        [Capillary.MarcatiliMode(125e-6, coren; n=1, m=k, loss=false) for k in 1:3],
+        [Capillary.MarcatiliMode(125e-6, coren; n=1, m=k, model=:reduced) for k in 1:3],
+        Tuple(Capillary.MarcatiliMode(125e-6, coren; n=1, m=k, model=:reduced) for k in 1:3),
+    ]
+    for modes in cases
+        @test Capillary.marcatili_linop_ok(modes)
+        for (g, thgs) in ((grid, (false,)), (egrid, (false, true)))
+            for thg in thgs
+                new = g isa Grid.EnvGrid ? LinearOps.make_linop(g, modes, λ0; thg) :
+                                          LinearOps.make_linop(g, modes, λ0)
+                old = g isa Grid.EnvGrid ? LinearOps._make_linop_generic(g, modes, λ0; thg) :
+                                          LinearOps._make_linop_generic(g, modes, λ0)
+                @test new isa Capillary.MarcatiliLinop
+                @test RK45.device_capable(new) && !RK45.device_capable(old)
+                for z in (0.0, 0.3, 0.77, 1.0)
+                    on = zeros(ComplexF64, length(g.ω), length(modes)); oo = similar(on)
+                    new(on, z); old(oo, z)
+                    @test on == oo # bit-identical: same scalar kernel, same operation order
+                    @test all(iszero, on[.!g.sidx, :])
+                end
+            end
+        end
+    end
+    # a user-supplied core index (arbitrary closure) or a wrapped mode falls back to the
+    # generic closure
+    modes = [Capillary.MarcatiliMode(125e-6, (ω; z) -> 1.0 + 1e-4*z; n=1, m=k) for k in 1:2]
+    @test !Capillary.marcatili_linop_ok(modes)
+    @test !(LinearOps.make_linop(grid, modes, λ0) isa Capillary.MarcatiliLinop)
+    dmodes = [Modes.delegated(m) for m in cases[1]]
+    @test !(LinearOps.make_linop(grid, dmodes, λ0) isa Capillary.MarcatiliLinop)
+    # the fixed-core acceleration path (neff_wg) agrees with Modes.neff for every model
+    # (the :reduced loss sign used to be reversed there)
+    for model in (:full, :reduced), loss in (true, false)
+        m = Capillary.MarcatiliMode(100e-6, :Ar, 1.0; n=1, m=2, model, loss)
+        for ω in grid.ω[grid.sidx][1:100:end]
+            @test Modes.neff(m, ω; z=0) == Capillary.neff(m, m.coren(ω, z=0)^2, Capillary.neff_wg(m, ω; z=0))
+        end
+    end
+end
