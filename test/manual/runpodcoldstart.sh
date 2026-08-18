@@ -138,10 +138,15 @@ git config --global --add safe.directory '*'
 # ------------------------------------------------------------------ Julia ---
 step "Julia $JULIA_CHANNEL"
 if [ ! -x "$VOL/juliaup/bin/julia" ]; then
+    # juliaup's installer: --add-to-path no (formerly --no-modify-path; PATH comes from
+    # env.sh), --default-channel, --path (install location; JULIAUP_DEPOT_PATH is also
+    # set by env.sh). Startup/background self-update checks off: nothing should phone home
+    # or change versions under a benchmark.
     curl -fsSL https://install.julialang.org | sh -s -- \
-        --yes --no-modify-path \
+        --yes --add-to-path no \
         --default-channel "$JULIA_CHANNEL" \
-        --path "$VOL/juliaup"
+        --path "$VOL/juliaup" \
+        --startup-selfupdate 0 --background-selfupdate 0
 else
     echo "    already on volume"
 fi
