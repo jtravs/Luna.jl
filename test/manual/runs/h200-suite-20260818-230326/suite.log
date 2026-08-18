@@ -1,0 +1,270 @@
+
+[1;36m==> H100/H200 suite → /workspace/runs/h200-suite-20260818-230326[0m  [2m(23:03:26, t+0s)[0m
+host ee7c96d6a122  threads 8  cpu target generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1)  Luna modal-fixed @ 4753af4
+name, memory.total [MiB], memory.free [MiB], driver_version, power.limit [W]
+NVIDIA H200, 143771 MiB, 143156 MiB, 580.178.04, 700.00 W
+julia version 1.12.7
+
+[1;36m==> transform benchmark on CUDA only: vuv, ctc (phase A: isolated RHS; phase B: short propagations)[0m  [2m(23:03:26, t+0s)[0m
+[ Info: Julia ≥ 1.12 with 8 threads: using libfftw3's native pthreads for FFTs (FFTW.jl's Julia-task callback deregistered).
+=== Luna fixed-quadrature modal transform: CPU/GPU benchmark ===
+host: ee7c96d6a122  date: 2026-08-18T23:03:56.507  julia 1.12.7  threads: 8
+FFTW planning: measure, FFTW threads: 8  arraytypes: [:cuda]  cases: ["vuv", "ctc"]
+propagation lengths [m]: vuv=0.3, ctc=0.02
+CUDA toolchain: 
+- runtime 13.3.0, artifact installation
+- driver 580.178.4 for 13.3
+- compiler 13.3.33, artifact installation
+
+CUDA libraries: 
+- cuBLAS: 13.6.0
+- cuSPARSE: 12.8.2
+- cuSOLVER: 12.2.6
+- cuFFT: 12.3.0
+- cuRAND: 10.4.3
+- CUPTI: 2026.2.1 (API 13.3.1)
+- NVML: 13.0.0+580.178.4
+
+Julia packages: 
+- CUDACore: 6.2.1
+- GPUArrays: 11.5.11
+- GPUCompiler: 1.23.0
+- KernelAbstractions: 0.9.42
+- CUDA_Driver_jll: 13.3.1+0
+- CUDA_Compiler_jll: 0.4.4+1
+- CUDA_Runtime_jll: 0.23.0+1
+- NVPTX_LLVM_Backend_jll: 22.1.7+1
+
+Toolchain:
+- Julia: 1.12.7
+- LLVM: 18.1.7
+
+1 device:
+  0: NVIDIA H200 (sm_90, 139.798 GiB / 140.401 GiB available)
+     compiles to sm_90a / PTX 9.3 (LLVM: sm_90a / PTX 9.0)
+GPU: NVIDIA H200
+
+==============================================================================
+Phase A: isolated RHS and primitives
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 3.33 PHz
+[ Info: Samples needed: 7994.47, samples: 8192, δt = 50.03 as
+[ Info: Requested time window: 400.0 fs, actual time window: 409.9 fs
+[ Info: Grid: samples 4096 / 8192, ωmax 3.14e+16 / 6.28e+16
+[ Info: Using PPT ionisation rate.
+[ Info: Found cached PPT rate for 24.59 eV, 800.0 nm
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+vuv     cuda  nt=4096 nto=8192 modes=4 nodes=65 npol=1  RHS 0.553 ms  (5.32e+05 points/RHS; KerrField,PlasmaCumtrapzBatched)
+        primitives: modal FFT pair 0.036, GEMM pair 0.078, rate pass 0.021, 3 scans 0.166, Raman FFT pair 0.061 (not in RHS) ms → sum 0.300 vs RHS 0.553
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 1.76 PHz
+[ Info: Samples needed: 42323.64, samples: 65536, δt = 94.51 as
+[ Info: Requested time window: 4000.0 fs, actual time window: 6193.8 fs
+[ Info: Grid: samples 32768 / 65536, ωmax 1.66e+16 / 3.32e+16
+[ Info: Using ADK ionisation rate (due to molecular gas choice).
+[ Info: Including the Raman response (due to molecular gas choice).
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+ctc     cuda  nt=32768 nto=65536 modes=6 nodes=65 npol=1  RHS 1.825 ms  (4.26e+06 points/RHS; KerrField,PlasmaCumtrapzBatched,RamanPolarFieldBatched)
+        primitives: modal FFT pair 0.046, GEMM pair 0.091, rate pass 0.052, 3 scans 0.420, Raman FFT pair 0.338 ms → sum 0.947 vs RHS 1.825
+==============================================================================
+Phase B: propagations
+warm-up propagation (cuda) ... [ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 3.33 PHz
+[ Info: Samples needed: 7994.47, samples: 8192, δt = 50.03 as
+[ Info: Requested time window: 400.0 fs, actual time window: 409.9 fs
+[ Info: Grid: samples 4096 / 8192, ωmax 3.14e+16 / 6.28e+16
+[ Info: Using PPT ionisation rate.
+[ Info: Found cached PPT rate for 24.59 eV, 800.0 nm
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 13.891 seconds, 5 steps
+26.5 s
+[ Info: Starting propagation
+[ Info: Propagation finished in 3.118 seconds, 137 steps
+vuv     cuda  propagation 0.300 m: 3.5 s, 137 steps, 25.82 ms/step; 7×RHS = 3.87 ms (15% of step), device memory 0.06 GiB; final field vs cuda: rel L2 0.00e+00; peak ρe 3.37e+20 m^-3
+[ Info: Starting propagation
+[ Info: Propagation finished in 53.065 seconds, 846 steps
+ctc     cuda  propagation 0.020 m: 55.1 s, 845 steps, 65.25 ms/step; 7×RHS = 12.78 ms (20% of step), device memory 0.06 GiB; final field vs cuda: rel L2 0.00e+00; peak ρe 1.56e+14 m^-3
+
+=== Summary (Markdown) ===
+| case | array | nt/nto | modes | nodes×pol | RHS ms | steps | ms/step | 7×RHS/step | rel L2 vs cuda | device GiB |
+|---|---|---|---|---|---|---|---|---|---|---|
+| vuv | cuda | 4096/8192 | 4 | 65×1 | 0.553 | 137 | 25.82 | 15% | 0.0e+00 | 0.06 |
+| ctc | cuda | 32768/65536 | 6 | 65×1 | 1.825 | 845 | 65.25 | 20% | 0.0e+00 | 0.06 |
+
+| case | array | FFT pair | GEMM pair | rate pass | 3 scans | Raman FFTs | sum | RHS |
+|---|---|---|---|---|---|---|---|---|
+| vuv | cuda | 0.036 | 0.078 | 0.021 | 0.166 | 0.061 | 0.300 | 0.553 |
+| ctc | cuda | 0.046 | 0.091 | 0.052 | 0.420 | 0.338 | 0.947 | 1.825 |
+appended 2 rows to /workspace/runs/h200-suite-20260818-230326/bench.csv
+=== done ===
+
+real	3m12.700s
+user	4m20.994s
+sys	0m13.174s
+
+[1;36m==> production-like full-length runs on CUDA (CTC_LENGTH=0.3)[0m  [2m(23:06:39, t+193s)[0m
+[ Info: Julia ≥ 1.12 with 8 threads: using libfftw3's native pthreads for FFTs (FFTW.jl's Julia-task callback deregistered).
+production timing on cuda (first run of each case includes compilation)
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 3.33 PHz
+[ Info: Samples needed: 7994.47, samples: 8192, δt = 50.03 as
+[ Info: Requested time window: 400.0 fs, actual time window: 409.9 fs
+[ Info: Grid: samples 4096 / 8192, ωmax 3.14e+16 / 6.28e+16
+[ Info: Using PPT ionisation rate.
+[ Info: Found cached PPT rate for 24.59 eV, 800.0 nm
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 36.783 seconds, 4393 steps
+vuv 1.5 m nr=32 lean stats (warm-up)       119.8 s  ≈  4391 steps   27.28 ms/step  band energy 6.9139e-06 J  peak ρe 1.89e+22 m^-3
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 3.33 PHz
+[ Info: Samples needed: 7994.47, samples: 8192, δt = 50.03 as
+[ Info: Requested time window: 400.0 fs, actual time window: 409.9 fs
+[ Info: Grid: samples 4096 / 8192, ωmax 3.14e+16 / 6.28e+16
+[ Info: Using PPT ionisation rate.
+[ Info: Found cached PPT rate for 24.59 eV, 800.0 nm
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 25.803 seconds, 4393 steps
+vuv 1.5 m nr=32 lean stats                  29.6 s  ≈  4391 steps    6.74 ms/step  band energy 6.9139e-06 J  peak ρe 1.89e+22 m^-3  device 0.09 GiB
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 3.33 PHz
+[ Info: Samples needed: 7994.47, samples: 8192, δt = 50.03 as
+[ Info: Requested time window: 400.0 fs, actual time window: 409.9 fs
+[ Info: Grid: samples 4096 / 8192, ωmax 3.14e+16 / 6.28e+16
+[ Info: Using PPT ionisation rate.
+[ Info: Found cached PPT rate for 24.59 eV, 800.0 nm
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 25.393 seconds, 4393 steps
+vuv 1.5 m nr=64 lean stats                  28.1 s  ≈  4391 steps    6.41 ms/step  band energy 6.9139e-06 J  peak ρe 1.89e+22 m^-3  device 0.12 GiB
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 3.33 PHz
+[ Info: Samples needed: 7994.47, samples: 8192, δt = 50.03 as
+[ Info: Requested time window: 400.0 fs, actual time window: 409.9 fs
+[ Info: Grid: samples 4096 / 8192, ωmax 3.14e+16 / 6.28e+16
+[ Info: Using PPT ionisation rate.
+[ Info: Found cached PPT rate for 24.59 eV, 800.0 nm
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 1 minute, 2.304 seconds, 4393 steps
+vuv 1.5 m nr=32 default stats               69.0 s  ≈  4391 steps   15.71 ms/step  band energy 6.9139e-06 J  peak ρe 1.89e+22 m^-3  device 0.09 GiB
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 1.76 PHz
+[ Info: Samples needed: 42323.64, samples: 65536, δt = 94.51 as
+[ Info: Requested time window: 4000.0 fs, actual time window: 6193.8 fs
+[ Info: Grid: samples 32768 / 65536, ωmax 1.66e+16 / 3.32e+16
+[ Info: Using ADK ionisation rate (due to molecular gas choice).
+[ Info: Including the Raman response (due to molecular gas choice).
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 3 minutes, 2.849 seconds, 14362 steps
+ctc 0.3 m nr=64 lean stats                 199.4 s  ≈ 14361 steps   13.89 ms/step  band energy 3.4772e-07 J  peak ρe 3.31e+24 m^-3  device 0.67 GiB
+[ Info: Orthogonal polarisation modes are not required.
+[ Info: Vector fields are not required.
+[ Info: Freq limits 0.07 - 1.76 PHz
+[ Info: Samples needed: 42323.64, samples: 65536, δt = 94.51 as
+[ Info: Requested time window: 4000.0 fs, actual time window: 6193.8 fs
+[ Info: Grid: samples 32768 / 65536, ωmax 1.66e+16 / 3.32e+16
+[ Info: Using ADK ionisation rate (due to molecular gas choice).
+[ Info: Including the Raman response (due to molecular gas choice).
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Using radial modal integral.
+[ Info: Setting up and planning FFTs...
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Setup finished.
+[ Info: Found FFTW wisdom at /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: FFTW wisdom saved to /root/julia_depot/scratchspaces/30eb0fb0-5147-11e9-3356-d75b018717ce/lunacache/FFTWcache_8threads
+[ Info: Starting propagation
+[ Info: Propagation finished in 2 minutes, 11.880 seconds, 14362 steps
+ctc 0.3 m nr=32 lean stats                 132.9 s  ≈ 14361 steps    9.26 ms/step  band energy 3.4773e-07 J  peak ρe 3.31e+24 m^-3  device 0.38 GiB
+done
+
+real	9m57.394s
+user	13m14.053s
+sys	0m19.427s
+
+[1;36m==> done in 790 s — results in /workspace/runs/h200-suite-20260818-230326 (also /workspace/runs/latest)[0m  [2m(23:16:36, t+790s)[0m

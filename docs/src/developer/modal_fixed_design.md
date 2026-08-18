@@ -756,7 +756,7 @@ a rented Runpod H100/H200 pod prepared by `test/manual/runpodcoldstart.sh` (volu
 `/workspace`; results under `/workspace/runs/<timestamp>/`). Laptop CPU rehearsal (for the mechanics only): 0.5 s setup + propagation
 per point, first point +3.5 s compilation.
 
-### 5.6 First H200 results (Runpod pod, 2026-08-18, commit `3ef4839`)
+### 5.6 H200 results (Runpod pod, 2026-08-18)
 
 NVIDIA H200 (140 GiB), CUDA 13.3 driver/runtime, Julia 1.12.7, 8 host threads on a 24-vCPU
 slice with `JULIA_CPU_TARGET=generic` (since changed — the host side of these numbers is
@@ -789,15 +789,38 @@ pessimistic). Log: `test/manual/runs/h200-suite-20260818-214254/`.
   volume; collection is now done afterwards by one process, batch processes never read
   each other's files, and the suite bounds the wait.
 
-Conclusions: correctness on H200 is established; for the small modal case the GPU is not
-faster than a good CPU (the RHS is ~35 launches + syncs, 0.5 ms either way) and sharing
-the card between processes does not help while the host is the bottleneck — the levers
-are the batched-state propagation of all scan points at once (§5.5, roadmap) and a
-faster host (native-target images, more threads); for the large case (`ctc`) the GPU is
-4× a laptop with the Raman host work now removed (expect better on the next run), and the
-gradient/taper cases no longer pay the host operator (§3.7). Rerun with the corrected
-environment (`JULIA_CPU_TARGET` multi-target, `JULIA_NUM_PRECOMPILE_TASKS`, FFTW threads)
-before drawing final numbers.
+**Second run** (`4753af4`, same pod, multi-target `JULIA_CPU_TARGET`, Raman kernel cached,
+warmed phase B; log `test/manual/runs/h200-suite-20260818-230326/`):
+
+| | run 1 | run 2 | laptop CPU, 8 threads |
+|---|---|---|---|
+| `vuv` RHS (nto 8192, 4 modes, 65 nodes) | 0.53 ms | 0.55 ms | 0.46 ms (nr=32: 0.69 at 65 nodes) |
+| `ctc` RHS (nto 65536, 6 modes, Raman + plasma) | 6.2 ms | **1.83 ms** (kernels 0.95) | 13.6 ms |
+| RDW VUV 1.5 m, lean stats, nr=32 / 64 | 5.1 / 4.3 ms/step | 6.7 / 6.4 ms/step | ~5–7 ms/step |
+| RDW VUV 1.5 m, default stats, nr=32 | 9.8 ms/step | 15.7 ms/step | 7.4 ms/step |
+| CtC 0.3 m (14 361 steps), lean, nr=64 / 32 | 27.3 / 26.2 ms/step | **13.9 / 9.3 ms/step** | ~110 ms/step |
+| bench phase B `ctc` 0.02 m, default stats | 75 ms/step | 65 ms/step (7×RHS = 20 %) | – |
+
+Reading it: (i) the Raman kernel cache took the `ctc` RHS from 6.2 to 1.8 ms and the CtC
+propagation to 9.3 ms/step at nr=32 — **~12× the laptop; the full 1.5 m CtC case is
+~11 min on the H200 versus ~2 h on the laptop**. (ii) The small `vuv` case is unchanged
+and host-bound: 0.55 ms of RHS (~35 launches + syncs) and 6–7 ms/step, i.e. the H200 ≈ a
+laptop, as §5.3 predicted; run 2's host share is even ~1.5 ms/step higher than run 1's,
+which the multi-target images should not cause — treat as pod noise until an
+`unset JULIA_CPU_TARGET` (native) comparison is made. (iii) **The default statistics
+are the dominant host cost of a device run**: +9 ms/step on `vuv` and ~50 ms/step on
+`ctc` (six modes on a 65 536-point grid: host FFTs, on-axis reference with the columnwise
+Raman, fwhm's), several times the GPU work — lean settings (`mode_error=false`,
+`stats_period`) are mandatory for GPU production, and on-device statistics (roadmap)
+moves from P2 to P1 for large grids.
+
+Conclusions: correctness on H200 is established; the GPU pays for the large case (~12×
+a laptop for CtC, more with lean statistics or on-device statistics), while for the
+small modal case the GPU is not faster than a good CPU (the RHS is launch/sync-bound and
+the step host-bound) and sharing the card between processes does not help while the
+host is the bottleneck — the levers there are the batched-state propagation of all scan
+points at once (§5.5, roadmap), on-device statistics, and a faster host; the
+gradient/taper cases no longer pay the host operator (§3.7). Recorded in the roadmap.
 
 ## 6. Testing
 
@@ -941,9 +964,11 @@ the record.
   a CPU. Loop synthesis GEMM → responses → projection GEMM over column blocks (the FFTs are
   on the modal side and unaffected). Effort M. (The fused CPU column above removes most of
   the CPU-side buffers.)
-- [ ] **P2 — Modal statistics on device.** Effort M (~300–400 lines in `Stats.jl`, a
-  device method per field-touching statistic returning scalars); payoff ≤15 % of a step
-  at nt=8192, 25–50 % at nt=2^17. Decide after measurement.
+- [ ] **P1 — Modal statistics on device.** Effort M (~300–400 lines in `Stats.jl`, a
+  device method per field-touching statistic returning scalars). Measured on the H200
+  (§5.6): the default statistics cost +9 ms/step on `vuv` and ~50 ms/step on `ctc` — several
+  times the GPU work of a step — so device runs must use lean statistics today; making the
+  defaults device-native removes that constraint.
 - [ ] **P1 — GPU parameter scans** (§5.5, §5.6): the H200 rehearsal showed one process at
   12.7 s/point (400 points ≈ 85 min) and *no* gain from four processes sharing the GPU
   (host-bound). Next: the batched-state propagation of all points at once (per-column
