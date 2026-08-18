@@ -35,7 +35,23 @@ if ! mountpoint -q "$VOL" 2>/dev/null; then
 fi
 
 # (not juliaup: the installer refuses to install into an existing directory)
-mkdir -p "$VOL"/{julia_depot,code,runs,claude,logs}
+mkdir -p "$VOL"/{code,runs,claude,logs}
+
+DEPOT_LOCAL=/root/julia_depot
+DEPOT_TAR="$VOL/julia_depot.tar"
+
+# `runpodcoldstart.sh save`: persist the container-disk depot to the volume as one
+# tarball (uncompressed: sequential write at volume speed, ~30 s for 8 GB; gzip would
+# take minutes of CPU for little gain). Run it at the end of a session in which packages
+# were added or precompiled, before the pod is terminated.
+if [ "${1:-}" = "save" ]; then
+    [ -d "$DEPOT_LOCAL" ] || { echo "no depot at $DEPOT_LOCAL"; exit 1; }
+    step "Saving depot $DEPOT_LOCAL → $DEPOT_TAR"
+    tar cf "$DEPOT_TAR.tmp" -C "$(dirname "$DEPOT_LOCAL")" "$(basename "$DEPOT_LOCAL")" \
+        --exclude='logs/*' --exclude='scratchspaces/*/lunacache/*.h5' && mv -f "$DEPOT_TAR.tmp" "$DEPOT_TAR"
+    ls -lh "$DEPOT_TAR"; echo "  done in $((SECONDS-t0))s"
+    exit 0
+fi
 
 # A full depot with CUDA artifacts is ~6-8 GB. Runpod volumes also account for
 # metadata, and a Julia depot is 100k+ tiny files, so df can bite early.
@@ -78,8 +94,15 @@ cat > "$VOL/env.sh" <<'EOF'
 # Sourced from ~/.bashrc on every pod. Edit here, not in .bashrc.
 
 export JULIAUP_DEPOT_PATH=/workspace/juliaup
-export JULIA_DEPOT_PATH=/workspace/julia_depot
+# The Julia depot (packages, artifacts, compile caches: ~100k small files, 6-8 GB) lives
+# on the CONTAINER DISK, not the network volume: the volume does sequential I/O at
+# ~350 MB/s but ~5 ms per small-file create, which turns Pkg.add/precompile into hours.
+# It is persisted across pods as ONE tarball on the volume (/workspace/julia_depot.tar):
+# the cold start restores it, `runpodcoldstart.sh save` refreshes it.
+export JULIA_DEPOT_PATH=/root/julia_depot
 export PATH="/workspace/juliaup/bin:$HOME/.local/bin:$PATH"
+# If package/artifact downloads crawl, try a region-specific Pkg server, e.g.
+#   export JULIA_PKG_SERVER=https://us-east.pkg.julialang.org   (or eu-central, ...)
 
 # Containers LIE about resources: /proc/cpuinfo and free(1) report the whole
 # HOST (possibly 192 cores / 2 TB), not your cgroup slice. JULIA_NUM_THREADS=auto
@@ -135,6 +158,30 @@ source "$VOL/env.sh"
 git config --global user.name  "$GIT_NAME"
 git config --global user.email "$GIT_EMAIL"
 git config --global --add safe.directory '*'
+
+# ------------------------------------------------------------ Julia depot ---
+step "Julia depot on the container disk ($DEPOT_LOCAL)"
+if [ -d "$DEPOT_LOCAL" ]; then
+    echo "    present ($(du -sh "$DEPOT_LOCAL" 2>/dev/null | cut -f1))"
+elif [ -f "$DEPOT_TAR" ]; then
+    echo "    restoring from $DEPOT_TAR ($(du -h "$DEPOT_TAR" | cut -f1)) — sequential read, minutes at most"
+    tar xf "$DEPOT_TAR" -C "$(dirname "$DEPOT_LOCAL")" && echo "    restored in $((SECONDS-t0))s"
+elif [ -d "$VOL/julia_depot" ] && [ "${MIGRATE_DEPOT:-1}" = "1" ]; then
+    # a depot from the earlier layout (files on the volume): stream it across once,
+    # then it is only ever read again from the tarball. Slow-ish (per-file reads on the
+    # volume) but faster than re-downloading on a slow network; MIGRATE_DEPOT=0 skips it.
+    echo "    migrating the old on-volume depot $VOL/julia_depot (one-off; MIGRATE_DEPOT=0 to skip)"
+    mkdir -p "$DEPOT_LOCAL"
+    ( cd "$VOL/julia_depot" && tar cf - . ) | ( cd "$DEPOT_LOCAL" && tar xf - ) \
+        && echo "    migrated in $((SECONDS-t0))s — remove $VOL/julia_depot when happy" \
+        || warn "migration failed; a fresh depot will be built"
+else
+    echo "    fresh (packages will download; run '$0 save' at the end of the session)"
+fi
+mkdir -p "$DEPOT_LOCAL"
+_root_free_gb=$(df -BG --output=avail /root 2>/dev/null | tail -1 | tr -dc '0-9')
+[ -n "${_root_free_gb:-}" ] && [ "$_root_free_gb" -lt 12 ] && \
+    warn "only ${_root_free_gb} GB free on the container disk — a full depot needs ~8 GB"
 
 # ------------------------------------------------------------------ Julia ---
 step "Julia $JULIA_CHANNEL"
@@ -283,8 +330,8 @@ julia --project="$DEV" -e '
 
 # ----------------------------------------------------------------- summary --
 step "Ready"
-_depot_gb=$(du -sBG "$VOL/julia_depot" 2>/dev/null | tr -dc '0-9' || echo '?')
-_depot_files=$(find "$VOL/julia_depot" 2>/dev/null | wc -l || echo '?')
+_depot_gb=$(du -sBG "$DEPOT_LOCAL" 2>/dev/null | tr -dc '0-9' || echo '?')
+_depot_files=$(find "$DEPOT_LOCAL" 2>/dev/null | wc -l || echo '?')
 _vol_used=$(df -h --output=used,size,pcent "$VOL" 2>/dev/null | tail -1 || echo '?')
 if [ "${POD_MEM_GB:-0}" -gt 0 ]; then
     _mem_str="${POD_MEM_GB} GB"
@@ -302,7 +349,8 @@ cat <<EOF
   host slice   ${POD_CPUS} vCPU (cgroup), ${_mem_str} RAM
                JULIA_NUM_THREADS=${JULIA_NUM_THREADS}  (LUNA_THREADS= to override)
   volume       ${_vol_used}  used/size/pct
-  depot        ${_depot_gb} GB across ${_depot_files} files
+  depot        ${_depot_gb} GB across ${_depot_files} files (container disk;
+               persist with: bash $0 save   → $DEPOT_TAR)
 
   Total cold start: $((SECONDS-t0))s
   (If this is under ~5 min on a warm volume, a custom Docker image
