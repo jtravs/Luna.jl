@@ -47,8 +47,10 @@ DEPOT_TAR="$VOL/julia_depot.tar"
 if [ "${1:-}" = "save" ]; then
     [ -d "$DEPOT_LOCAL" ] || { echo "no depot at $DEPOT_LOCAL"; exit 1; }
     step "Saving depot $DEPOT_LOCAL → $DEPOT_TAR"
-    tar cf "$DEPOT_TAR.tmp" -C "$(dirname "$DEPOT_LOCAL")" "$(basename "$DEPOT_LOCAL")" \
-        --exclude='logs/*' --exclude='scratchspaces/*/lunacache/*.h5' && mv -f "$DEPOT_TAR.tmp" "$DEPOT_TAR"
+    # (GNU tar: --exclude is positional and must precede the paths it applies to)
+    tar --exclude='*/logs/*' --exclude='*/lunacache/*.h5' \
+        -cf "$DEPOT_TAR.tmp" -C "$(dirname "$DEPOT_LOCAL")" "$(basename "$DEPOT_LOCAL")" \
+        && mv -f "$DEPOT_TAR.tmp" "$DEPOT_TAR"
     ls -lh "$DEPOT_TAR"; echo "  done in $((SECONDS-t0))s"
     exit 0
 fi
