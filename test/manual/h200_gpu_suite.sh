@@ -65,6 +65,12 @@ export LUNA_TEST_CUDA=1
 export LUNA_ARRAYTYPE=cuda
 export JULIA_NUM_THREADS="${LUNA_THREADS:-${JULIA_NUM_THREADS:-8}}"
 export OPENBLAS_NUM_THREADS="$JULIA_NUM_THREADS"
+export LUNA_FFTW_THREADS="${LUNA_FFTW_THREADS:-$JULIA_NUM_THREADS}"   # see env.sh
+# the image's CUDA toolkit on LD_LIBRARY_PATH breaks CUDA.jl's artifact libraries (see
+# env.sh); strip it here too in case env.sh is an older version
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH=$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/cuda' | paste -sd: -)
+fi
 
 t0=$SECONDS
 has() { case ",$STEPS," in *",$1,"*) return 0;; *) return 1;; esac; }

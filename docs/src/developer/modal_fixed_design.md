@@ -640,6 +640,10 @@ batched Raman plan over the columns (131072×65 rfft pair: 31.2 / 19.3 / 9.5 / 7
 1/2/4/8 threads); Julia-threading single-column plans is only ~20 % faster (5.7 ms), so
 the Raman cost is genuine work.
 
+FFTW's thread count defaults to one per Julia thread with native pthreads (capped by
+`Sys.CPU_THREADS`, which inside a container reports the host — set `LUNA_FFTW_THREADS`
+explicitly there, as the Runpod `env.sh` does).
+
 Every new `(2n_{to}\times n_p)` batched shape costs a one-time FFTW `PATIENT` planning
 that can take **tens of minutes** (once per machine and thread count; wisdom is cached
 under `~/.julia/scratchspaces/.../lunacache`). The benchmark script uses `MEASURE`; the

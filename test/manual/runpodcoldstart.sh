@@ -160,6 +160,10 @@ export POD_MEM_GB=$(_pod_mem_gb)
 # override with LUNA_THREADS=24 and compare before trusting the bigger number.
 export JULIA_NUM_THREADS=${LUNA_THREADS:-$(( POD_CPUS < 8 ? POD_CPUS : 8 ))}
 export OPENBLAS_NUM_THREADS=$JULIA_NUM_THREADS
+# Luna's FFTW thread count: its default caps at Sys.CPU_THREADS, which inside a container
+# is the HOST's core count (the cgroup quota is not in the affinity mask), so 8 Julia
+# threads got 32 FFTW pthreads on an 8-vCPU slice. Pin it to the Julia thread count.
+export LUNA_FFTW_THREADS=$JULIA_NUM_THREADS
 
 # Precompile caches are keyed on CPU target. 'generic' keeps the cache valid
 # when you land on a host with a different CPU, at the cost of some host-side

@@ -86,6 +86,14 @@ function FFTWthreads()
     # Julia ≥ 1.12 (observed with FFTW.jl 1.10 on x64 Linux).
     nthr = settings["fftw_threads"]
     nthr > 0 && return nthr
+    # LUNA_FFTW_THREADS: for environments where neither the Julia thread count nor
+    # `Sys.CPU_THREADS` reflects the cores this process may use (containers report the
+    # host's CPUs; the cgroup quota is not in the affinity mask), set it explicitly.
+    envthr = get(ENV, "LUNA_FFTW_THREADS", "")
+    if !isempty(envthr)
+        n = tryparse(Int, envthr)
+        !isnothing(n) && n > 0 && return n
+    end
     Threads.nthreads() == 1 && return 1
     # With FFTW.jl's Julia-task callback, FFTW "threads" are Julia tasks and
     # oversubscribing them (4× the Julia threads, the historical default) only improves
