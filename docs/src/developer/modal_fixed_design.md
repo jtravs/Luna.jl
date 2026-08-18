@@ -748,7 +748,8 @@ Rehearsal tooling: `test/manual/gpu_scan_rehearsal.jl` runs a small scan through
 extrapolates to 400 points, runs with `--batch k,i` for the multi-process case, and
 extracts the reduced results with `Processing.scanproc`; `test/manual/h200_gpu_suite.sh`
 runs it (with the CUDA tests, the CUDA-only benchmark and full-length production runs) on
-a rented GPU box. Laptop CPU rehearsal (for the mechanics only): 0.5 s setup + propagation
+a rented Runpod H100/H200 pod prepared by `test/manual/runpodcoldstart.sh` (volume at
+`/workspace`; results under `/workspace/runs/<timestamp>/`). Laptop CPU rehearsal (for the mechanics only): 0.5 s setup + propagation
 per point, first point +3.5 s compilation.
 
 ## 6. Testing
