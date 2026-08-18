@@ -77,6 +77,9 @@ julia --version
 ln -sfn "$RUNDIR" /workspace/runs/latest
 
 if has pkgs; then
+    step "matplotlib for PyPlot (Luna loads PyPlot; PyCall uses /usr/bin/python3)"
+    python3 -c "import matplotlib" 2>/dev/null && echo "    present" || \
+        python3 -m pip install --quiet matplotlib || echo "    WARN: matplotlib install failed; 'using Luna' will fail"
     step "packages the test/benchmark scripts import directly (idempotent)"
     julia --project="$DEV" -e '
         using Pkg

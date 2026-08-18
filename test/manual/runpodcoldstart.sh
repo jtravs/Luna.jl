@@ -88,6 +88,20 @@ else
     fi
 fi
 
+# Luna's Plotting module loads PyPlot at `using Luna`, and PyPlot needs matplotlib in the
+# Python that PyCall is built against (/usr/bin/python3 on these images) — without it
+# `using Luna` fails during PyPlot's __init__. Container disk, so every new pod needs it.
+step "matplotlib for PyPlot"
+if python3 -c "import matplotlib" 2>/dev/null; then
+    echo "    already present"
+else
+    python3 -m pip install --quiet matplotlib >"$VOL/logs/pip-matplotlib.log" 2>&1 \
+        || { export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1; \
+             apt-get install -y -qq --no-install-recommends python3-matplotlib >>"$VOL/logs/pip-matplotlib.log" 2>&1; } \
+        || warn "could not install matplotlib — 'using Luna' will fail (see $VOL/logs/pip-matplotlib.log)"
+    python3 -c "import matplotlib; print('    matplotlib', matplotlib.__version__)" 2>/dev/null || true
+fi
+
 # ------------------------------------------------------------ environment ---
 step "Environment file"
 cat > "$VOL/env.sh" <<'EOF'

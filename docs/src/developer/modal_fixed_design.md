@@ -955,6 +955,11 @@ the record.
   plumbing.
 - [ ] **P3** — README / CHANGELOG entries (new default modal integral; the PPT default
   change is physics-visible; `arraytype`).
+- [ ] **P3 — PyPlot as a weak dependency.** `using Luna` loads `Plotting` → PyPlot, whose
+  init needs matplotlib in PyCall's Python; on a bare GPU pod `using Luna` fails until
+  matplotlib is installed (the cold start now does it). Making `Plotting` a package
+  extension (or lazy) would remove a heavy, headless-hostile dependency from every
+  compute job. Effort M.
 
 ### 8.7 Rejected (do not re-litigate)
 
