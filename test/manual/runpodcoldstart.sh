@@ -45,12 +45,31 @@ if [ -n "${_vol_free_gb:-}" ] && [ "$_vol_free_gb" -lt 8 ]; then
 fi
 
 # ------------------------------------------------------ system packages ----
-# These live on the container disk and are lost on every new pod. Cheap.
+# These live on the container disk and are lost on every new pod. Cheap — and only
+# conveniences, so this step must never abort the bootstrap: it is skipped when the tools
+# are already there, and an apt failure (a broken NVIDIA repo entry, the image's own
+# apt lock, a legacy-keyring warning) is logged and ignored. Warnings such as
+# "Key is stored in legacy trusted.gpg keyring" and "debconf: delaying package
+# configuration" are normal on these images.
 step "System packages"
-export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y -qq --no-install-recommends \
-    curl ca-certificates git tmux rsync less vim htop unzip build-essential
+if command -v git >/dev/null && command -v curl >/dev/null && \
+   command -v tmux >/dev/null && command -v rsync >/dev/null; then
+    echo "    already present"
+else
+    export DEBIAN_FRONTEND=noninteractive
+    _aptlog="$VOL/logs/apt-$(date +%Y%m%d-%H%M%S).log"
+    if apt-get update -qq >"$_aptlog" 2>&1 && \
+       apt-get install -y -qq --no-install-recommends \
+           curl ca-certificates git tmux rsync less vim htop unzip build-essential \
+           >>"$_aptlog" 2>&1; then
+        echo "    installed (log: $_aptlog)"
+    else
+        warn "apt-get failed — continuing without it (see $_aptlog)"
+        for t in git curl; do
+            command -v "$t" >/dev/null || { echo "ERROR: $t is required and missing"; exit 1; }
+        done
+    fi
+fi
 
 # ------------------------------------------------------------ environment ---
 step "Environment file"
