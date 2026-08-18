@@ -735,6 +735,7 @@ mutable struct RamanPolarEnvBatched{TR, hvT, fT}
     B::Any # (2nt, ny, nx) doubled work array, allocated lazily on the field's array type
     FT::Any # in-place batched FFT plan along dim 1 of B (created with B)
     IFT::Any # inverse of FT
+    lastρ::Float64 # density the response kernel `hω`/`hωd` was last computed for
 end
 
 batched(::RamanPolarEnvBatched) = true
@@ -753,7 +754,7 @@ function RamanPolarEnvBatched(t, r)
     Utils.saveFFTwisdom()
     hω = hFT * h
     RamanPolarEnvBatched(r, h, ht, hω, hω, hFT, t[2] - t[1], length(t),
-                         nothing, nothing, nothing)
+                         nothing, nothing, nothing, NaN)
 end
 
 function (R::RamanPolarEnvBatched)(out, Et, ρ)
@@ -772,12 +773,24 @@ function (R::RamanPolarEnvBatched)(out, Et, ρ)
         # it needs a staging copy, which is refreshed per call below.
         Utils.isdevice(Et) && (R.hωd = similar(Et, ComplexF64, length(R.hω)))
     end
-    # update the response function and its transform once per call — it depends only on
-    # the scalar density, so this is exact (RamanPolarEnv recomputes it per column)
+    # update the response function and its transform only when the density changed — it
+    # depends on nothing else, so this is exact (RamanPolarEnv recomputes it per column).
+    # It is host work (the response kernel, a 2nt-point FFT, and on a device an upload):
+    # ~0.5 ms per call on a laptop for nt = 65536 and several ms on a slow host, i.e. a
+    # large share of the RHS on a GPU; constant-pressure runs pay it once.
+    _update_raman_kernel!(R, ρ)
+    _raman_batched!(out, Et, ρ, R.B, R.FT, R.IFT, R.hωd, R.dt, nt)
+end
+
+# shared by the batched envelope and field Raman responses (both have r, ht, h, hω, hωd,
+# hFT and lastρ)
+function _update_raman_kernel!(R, ρ)
+    ρ == R.lastρ && return nothing
     R.r(R.ht, ρ)
     R.hω .= R.hFT * R.h
     R.hωd === R.hω || copyto!(R.hωd, R.hω)
-    _raman_batched!(out, Et, ρ, R.B, R.FT, R.IFT, R.hωd, R.dt, nt)
+    R.lastρ = ρ
+    nothing
 end
 
 # function barrier: B/FT/IFT fields are loosely typed on the struct
@@ -875,6 +888,7 @@ mutable struct RamanPolarFieldBatched{TR, hvT, fT}
     C::Any # (nt, npts) complex work array for the analytic signal (thg=false only)
     cFT::Any # in-place complex plan along dim 1 of C
     cIFT::Any # its inverse
+    lastρ::Float64 # density the response kernel `hω`/`hωd` was last computed for
 end
 
 batched(::RamanPolarFieldBatched) = true
@@ -894,7 +908,7 @@ function RamanPolarFieldBatched(t, r; thg=true)
     Utils.saveFFTwisdom()
     hω = hFT * h
     RamanPolarFieldBatched(r, h, ht, hω, hω, hFT, thg, t[2] - t[1], length(t),
-                           nothing, nothing, nothing, nothing, nothing, nothing, nothing)
+                           nothing, nothing, nothing, nothing, nothing, nothing, nothing, NaN)
 end
 
 function (R::RamanPolarFieldBatched)(out, Et, ρ)
@@ -922,11 +936,9 @@ function (R::RamanPolarFieldBatched)(out, Et, ρ)
         # it needs a staging copy, which is refreshed per call below.
         Utils.isdevice(Et) && (R.hωd = similar(Et, ComplexF64, length(R.hω)))
     end
-    # update the response function and its transform once per call — it depends only on
-    # the scalar density, so this is exact (RamanPolarField recomputes it per column)
-    R.r(R.ht, ρ)
-    R.hω .= R.hFT * R.h
-    R.hωd === R.hω || copyto!(R.hωd, R.hω)
+    # update the response function and its transform only when the density changed (exact;
+    # see _update_raman_kernel!)
+    _update_raman_kernel!(R, ρ)
     _raman_field_batched!(outr, Etr, ρ, R.B, R.Bω, R.FT, R.IFT, R.hωd, R.dt, nt,
                           R.thg, R.C, R.cFT, R.cIFT)
     out

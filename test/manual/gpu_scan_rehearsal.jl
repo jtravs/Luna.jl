@@ -23,6 +23,8 @@ using Luna
 import Luna: Processing, Fields, PhysData, Interface, Utils
 using Printf, Statistics
 
+# `Scan(...)` consumes ARGS (--batch/--range/--queue), so record the mode first
+const batchmode = any(a -> startswith(a, "--"), ARGS)
 arraytype = Symbol(get(ENV, "LUNA_ARRAYTYPE", "cpu"))
 N = parse(Int, get(ENV, "SCAN_N", "2"))
 flength = parse(Float64, get(ENV, "SCAN_FLENGTH", "1.5"))
@@ -76,10 +78,13 @@ if !isempty(tprop)
     end
 end
 
-# the reduced results, off the HDF5 outputs (this is what a scan is for). With several
-# --batch processes writing the same directory this may run before the others finish, so
-# a failure here is only a warning.
-if isdir(outputdir)
+# the reduced results, off the HDF5 outputs (this is what a scan is for). Only in a
+# single-process run: with several --batch/--range/--queue processes writing the same
+# directory, reading files other processes still hold open blocks on HDF5's file lock
+# (indefinitely on some network filesystems — this froze the suite on a Runpod volume);
+# collect afterwards from one process instead, e.g.
+#   julia -e 'using Luna; Processing.scanproc(dir) do o ... end'
+if isdir(outputdir) && !batchmode
   try
     Eband, ρmax = Processing.scanproc(outputdir) do o
         grid = o["grid"]; Eω = o["Eω"][:, :, end]

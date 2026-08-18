@@ -122,14 +122,29 @@ if has scan; then
         julia --project="$DEV" "$LUNA/test/manual/gpu_scan_rehearsal.jl"
     step "scan rehearsal: 2×2 RDW VUV, 4 processes sharing the GPU (--batch 4,i)"
     T0=$SECONDS
+    # HDF5 file locking on the network volume can block a process that touches a file
+    # another one still has open; the batch processes never read each other's files
+    # (collection is done afterwards, below), and locking is off for good measure.
     for i in 1 2 3 4; do
-        SCAN_N=2 SCAN_OUT="$RUNDIR/scan_4proc" \
+        HDF5_USE_FILE_LOCKING=FALSE SCAN_N=2 SCAN_OUT="$RUNDIR/scan_4proc" \
             julia --project="$DEV" "$LUNA/test/manual/gpu_scan_rehearsal.jl" --batch 4,$i \
             > "$RUNDIR/scan_4proc_$i.log" 2>&1 &
     done
-    wait
+    # bounded wait: 15 min, then kill what is left rather than hang the suite
+    for _ in $(seq 1 180); do jobs -r | grep -q . || break; sleep 5; done
+    if jobs -r | grep -q .; then echo "WARN: batch processes still running after 15 min — killing"; kill $(jobs -pr) 2>/dev/null; wait; fi
     echo "4 processes × 1 point each: wall $((SECONDS-T0)) s (each process paid its own compilation; compare the per-point propagation lines):"
     grep -h "point \|per point" "$RUNDIR"/scan_4proc_*.log || true
+    echo "collected results of the 4-process scan:"
+    julia --project="$DEV" -e "using Luna; import Luna: Processing, Fields, PhysData
+        Eb, ρ = Processing.scanproc(\"$RUNDIR/scan_4proc\") do o
+            grid = o[\"grid\"]; Eω = o[\"Eω\"][:, :, end]
+            _, ef = Fields.energyfuncs(Luna.Grid.RealGrid(grid))
+            λ = PhysData.wlfreq.(grid[\"ω\"]); idcs = 100e-9 .<= λ .<= 140e-9
+            sum(ef(Eω[:, i] .* idcs) for i in axes(Eω, 2)), maximum(o[\"stats\"][\"electrondensity\"])
+        end
+        println(\"VUV band energy [µJ]:\"); display(1e6 .* Eb); println()
+        println(\"peak electron density [m^-3]:\"); display(ρ); println()" || echo "WARN: collection failed"
     echo "GPU memory now:"; nvidia-smi --query-gpu=memory.used --format=csv || true
 fi
 

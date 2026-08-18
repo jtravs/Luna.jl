@@ -218,6 +218,19 @@ end
 
 # ---------------------------------------------------------------- phase B: propagations
 println("=" ^ 78); println("Phase B: propagations"); flush(stdout)
+# Warm-up: phase A only ever called the transform, so the first propagation of this
+# process would otherwise pay the compilation of Luna.run, RK45, the statistics and the
+# output handling — ~100 s on a slow host, which swamped a 137-step propagation on the
+# H200 (157 "ms/step"). One short propagation per array type compiles it all.
+for arraytype in arraytypes
+    print("warm-up propagation ($arraytype) ... "); flush(stdout)
+    t0 = time()
+    prop_capillary(125e-6, 2e-3, :He, (0.8, 0); λ0=800e-9, τfwhm=7.5e-15, energy=275e-6, modes=4,
+                   trange=400e-15, λlims=(90e-9, 4e-6), shotnoise=false, saveN=2, nr=32,
+                   arraytype, status_period=600, stats_kwargs=Dict(:error_window => (100e-9, 140e-9)))
+    @printf("%.1f s\n", time() - t0); flush(stdout)
+    Luna.device_reclaim()
+end
 for name in casenames
     haskey(CASES, name) || continue
     reffield = nothing

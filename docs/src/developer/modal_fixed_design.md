@@ -756,6 +756,49 @@ a rented Runpod H100/H200 pod prepared by `test/manual/runpodcoldstart.sh` (volu
 `/workspace`; results under `/workspace/runs/<timestamp>/`). Laptop CPU rehearsal (for the mechanics only): 0.5 s setup + propagation
 per point, first point +3.5 s compilation.
 
+### 5.6 First H200 results (Runpod pod, 2026-08-18, commit `3ef4839`)
+
+NVIDIA H200 (140 GiB), CUDA 13.3 driver/runtime, Julia 1.12.7, 8 host threads on a 24-vCPU
+slice with `JULIA_CPU_TARGET=generic` (since changed — the host side of these numbers is
+pessimistic). Log: `test/manual/runs/h200-suite-20260818-214254/`.
+
+- **Hardware tests: 69/69 pass** in 6.4 min (host-bound; 3.6 min on the A40 node):
+  device norm ratio 1 ± 10⁻¹⁴, transform vs host 10⁻¹⁵ (ADK, PPT, Raman thg on/off),
+  end-to-end propagation vs host 4×10⁻¹¹.
+- **Isolated RHS (phase A)**: `vuv` (nto 8192, 4 modes, 65 nodes) **0.53 ms**, kernels sum
+  0.31 ms (FFT pair 0.04, GEMMs 0.08, rate 0.02, three native scans 0.17) → ~0.2 ms of
+  launch/sync overhead; `ctc` (nto 65536, 6 modes, Raman) **6.2 ms** with kernels summing
+  to only 1.0 ms — the gap is host work inside the RHS: the batched Raman recomputed the
+  response kernel on the host, transformed it (2nto-point FFT) and uploaded it *every
+  call* (0.5 ms on the laptop, several ms on this host); it is now cached on the density
+  (`_update_raman_kernel!`), which removes it entirely for constant-pressure runs.
+- **Production, lean statistics** (`mode_error=false`, `stats_period=10`): RDW VUV 1.5 m
+  **22.5 s at nr=32 (5.1 ms/step), 18.8 s at nr=64** — i.e. the H200 ≈ the 8-thread laptop
+  for this small, launch-bound case, as predicted (§5.3); with the default statistics
+  42.8 s (9.8 ms/step: 4.6 ms/step of host statistics on this host). CtC-type 0.3 m:
+  14 361 steps in 6.4 min (26 ms/step, both nr) — 4× the laptop; the full 1.5 m would be
+  ~32 min. First propagation of a process: +95 s of compilation on this host.
+- **Phase B of the benchmark** was compilation-dominated (157 "ms/step" for a 137-step
+  vuv propagation): fixed with a warm-up propagation before phase B.
+- **Scan rehearsal (2×2, lean, one process)**: 3.6–4.2 ms/step, 1.4–1.5 s setup per point,
+  12.7 s per point on average → **400 points ≈ 85 min in one process**. **Four processes
+  sharing the GPU gave no gain**: each ran 3–5× slower per step (host-bound: 4×8 threads on
+  24 vCPUs, generic host code, no MPS), so total throughput was worse than sequential.
+  The end of that step then hung — each process ran `Processing.scanproc` over the shared
+  directory while others still wrote to it, and HDF5's file lock blocks on the network
+  volume; collection is now done afterwards by one process, batch processes never read
+  each other's files, and the suite bounds the wait.
+
+Conclusions: correctness on H200 is established; for the small modal case the GPU is not
+faster than a good CPU (the RHS is ~35 launches + syncs, 0.5 ms either way) and sharing
+the card between processes does not help while the host is the bottleneck — the levers
+are the batched-state propagation of all scan points at once (§5.5, roadmap) and a
+faster host (native-target images, more threads); for the large case (`ctc`) the GPU is
+4× a laptop with the Raman host work now removed (expect better on the next run), and the
+gradient/taper cases no longer pay the host operator (§3.7). Rerun with the corrected
+environment (`JULIA_CPU_TARGET` multi-target, `JULIA_NUM_PRECOMPILE_TASKS`, FFTW threads)
+before drawing final numbers.
+
 ## 6. Testing
 
 - `test/test_modal_quadrature.jl`: rules, nodes/weights, orthonormality of the mode sets on
@@ -901,10 +944,11 @@ the record.
 - [ ] **P2 — Modal statistics on device.** Effort M (~300–400 lines in `Stats.jl`, a
   device method per field-touching statistic returning scalars); payoff ≤15 % of a step
   at nt=8192, 25–50 % at nt=2^17. Decide after measurement.
-- [ ] **P2 — GPU parameter scans** (§5.5): rehearse on the H200 (`h200_gpu_suite.sh`),
-  then a 20 × 20 RDW VUV scan with lean statistics in-process, several `--batch` processes
-  sharing the GPU; if the GPU stays idle, the batched-state propagation of all points at
-  once (per-column density and per-point linear operator; effort M–L).
+- [ ] **P1 — GPU parameter scans** (§5.5, §5.6): the H200 rehearsal showed one process at
+  12.7 s/point (400 points ≈ 85 min) and *no* gain from four processes sharing the GPU
+  (host-bound). Next: the batched-state propagation of all points at once (per-column
+  density and per-point linear operator; effort M–L) — the only lever left for the small
+  case; and rerun the rehearsal with the corrected host environment.
 - [ ] **P3** — FP32 GEMMs (never for A40/H200).
 - [ ] **P2 (policy) — FFTW planning of large batched shapes**: `PATIENT` for a fresh
   ``2n_{to}\times n_p`` Raman shape takes tens of minutes on first use; consider `MEASURE`
