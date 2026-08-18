@@ -118,6 +118,16 @@ export PATH="/workspace/juliaup/bin:$HOME/.local/bin:$PATH"
 # If package/artifact downloads crawl, try a region-specific Pkg server, e.g.
 #   export JULIA_PKG_SERVER=https://us-east.pkg.julialang.org   (or eu-central, ...)
 
+# The pod image ships its own CUDA toolkit and puts /usr/local/cuda/lib64 on
+# LD_LIBRARY_PATH. CUDA.jl uses its own toolkit artifacts, and mixing the two gives
+# loader errors such as
+#   libcublas.so: undefined symbol: cublasLtDDDMatmulAlgoGetHeuristicForStream, version libcublasLt.so.13
+# (the artifact's cublas resolved against the image's older cublasLt). Drop the toolkit
+# entries; keep the driver ones (/usr/local/nvidia/...), which CUDA.jl needs.
+if [ -n "${LD_LIBRARY_PATH:-}" ]; then
+    export LD_LIBRARY_PATH=$(printf '%s' "$LD_LIBRARY_PATH" | tr ':' '\n' | grep -v '/cuda' | paste -sd: - )
+fi
+
 # Containers LIE about resources: /proc/cpuinfo and free(1) report the whole
 # HOST (possibly 192 cores / 2 TB), not your cgroup slice. JULIA_NUM_THREADS=auto
 # would therefore start ~190 threads on a 24-vCPU pod. Read the cgroup instead.
@@ -311,7 +321,7 @@ nvidia-smi --query-gpu=name,memory.total,power.limit,power.max_limit \
            --format=csv,noheader || warn "nvidia-smi failed"
 
 julia --project="$DEV" -e '
-    using CUDA
+    using CUDA, Libdl
     if !CUDA.functional()
         println("CUDA NOT FUNCTIONAL"); CUDA.versioninfo(); exit(1)
     end
@@ -326,6 +336,12 @@ julia --project="$DEV" -e '
     println("  driver CUDA : ", CUDA.driver_version())
     println("  runtime     : ", CUDA.runtime_version())
     println("  julia       : ", VERSION)
+    # every library must come from the artifact depot, none from /usr/local/cuda: a mix
+    # is what produces "undefined symbol ... libcublasLt.so.13"-type loader errors
+    for lib in (CUDA.CUBLAS.libcublas, CUDA.CUFFT.libcufft)
+        p = try Libdl.dlpath(lib) catch; "?" end
+        println("  ", rpad(basename(string(lib)), 12), ": ", p)
+    end
     VERSION >= v"1.13-" && println("  WARNING: CUDA.jl support for 1.13 is not settled; use 1.12")
 
     # Effective copy bandwidth. Compare against the spec sheet: a rented card
