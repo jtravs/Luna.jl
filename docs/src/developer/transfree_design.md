@@ -533,7 +533,49 @@ workspace is therefore negligible at this shape — the one quantity the plan co
 predict, and which had been carried as a risk to the campaign memory budget with a
 provisional "≤ 1 field" allowance.
 
-### 7.4 What is *not* known
+### 7.4 H200 (measured, 2026-08-18)
+
+Runpod H200 (143.8 GB, 700 W, driver CUDA 13.3), Julia 1.12.7, 8 host threads. Warm
+propagations only — the first case in a process carries ~11 s of CUDA kernel compilation.
+
+| case | grid | field GiB | steps | s/step | **s/step per GiB** | device/field | wall/point |
+|---|---|---|---|---|---|---|---|
+| `dd05` | 256×640² | 1.56 | 74 | 0.123 | 0.079 | 10.56 | ~9.9 s |
+| `04` | 256×768² | 2.25 | 57 | 0.180 | 0.080 | 10.50 | 10.3 s |
+| `dd20` | 256×1024² | 4.00 | 70 | 0.284 | 0.071 | 10.50 | 19.9 s |
+| `100um` | 512×640² | 3.12 | 85 | 0.241 | 0.077 | 10.52 | 20.5 s |
+
+**The bound question of §7.5 is settled: this path is bandwidth-bound on an H200.**
+Cost per GiB of state is flat to **1.13×** across a 2.6× range of field size, which is
+what saturation looks like; against the traffic model that is **≈2340 GB/s, 49 % of the
+card's 4.8 TB/s**, a normal achieved fraction for FP64 3-D FFTs plus elementwise passes,
+while using **5.8 % of its 34 TFLOPS of FP64**. The A40 was therefore FP64-bound, as §7.4
+inferred from its running ~6× slower than its own bandwidth allowed.
+
+At matched step count the H200 is **20× the A40** at the `04` shape (0.180 vs 3.68 s/step).
+
+Two consequences:
+
+- **Running several delay points on one card cannot help.** One point already saturates
+  the memory system; concurrency would only split the same bandwidth. (Contrast the modal
+  path, whose ~0.5M-element kernels leave the card idle between launches — see
+  [The fixed-quadrature modal transform and the device (GPU) path](@ref) §5.)
+- **The cuFFT plan workspace is ≈0.5 of a field** (10.5 resident fields, against exactly
+  10.0 on an A40) — larger than on the A40 but small, and constant across all four shapes,
+  so the memory budget stays predictable. `dd20` at 42 GiB would be marginal on a 48 GB
+  card and is comfortable here.
+
+Per-point overhead outside the propagation is **~1 s** (garbage collection, pool reclaim,
+the delayed input, the on-device extraction). What is *not* small is **`build_setup`:
+41–72 s**, host-side, once per process — negligible over a 200-point scan but the
+dominant cost of a short one, and the thing to attack if campaigns ever run many short
+processes. That is `ModelPNPS/GPU-TODO.md` §2.
+
+Campaign estimates from these numbers, one card, one process: `dd05` and `04` ~45–90 min
+for 200 points, `dd20` ~80 min, `100um` ~95 min for 241 points. The `04` campaign
+currently takes ~9 h wall on 20 concurrent HPC points.
+
+### 7.5 What is *not* known
 
 The split of GPU step time between the two 3-D FFTs, the eight propagator applications, the
 response and window broadcasts, the stage combines and the norm has **not** been measured.
@@ -641,8 +683,11 @@ The single list for this path is §7 of `GPU-TODO.md` on this branch.
 
 ### 10.2 Remaining
 
-1. **Measure the device RHS breakdown** (P0). Everything quantitative below, and the
-   A40-vs-A100 question in §7.4, is a traffic-model estimate until this exists.
+1. ~~**Measure the device RHS breakdown** (P0).~~ **Partly answered** by the H200 run
+   (§7.4): the path is bandwidth-bound there, at ~49 % of peak, so the hardware question
+   is settled — bandwidth, not FP64 rate, is what this code buys. A per-kernel breakdown
+   (FFT vs propagator vs stage combines) would still be needed to rank items 2–3 below,
+   and is one `CUDA.@profile` on a single RHS.
 2. **The same normalisation fold for the *general* (batched) path** (P2, effort M). With a
    non-pointwise response the polarisation is accumulated across responses into a separate
    buffer, so there is no single broadcast to fold into and the `ScaledPlan` is still used.
