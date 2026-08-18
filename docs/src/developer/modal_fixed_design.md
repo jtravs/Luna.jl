@@ -779,7 +779,19 @@ the record.
   ``z``-independent (the standard constructors' `cladn` closures are; give them a shared,
   registered closure so `neff_grid` can know it exactly), then the closed-form `neff` per
   mode. Same numbers (same functions on the same inputs), ~3× faster operator, ~−30 % per
-  step. Effort M (Interface + Capillary + LinearOps).
+  step. Effort M (Interface + Capillary + LinearOps). **Better still, and the same
+  amount of work: make it device-native.** For a Marcatili mode ``z`` enters `neff` only
+  through two scalars per stage — the core radius ``a(z)`` (tapers) and the density
+  ``\rho(z)`` in ``\varepsilon_{\rm core} = 1 + \gamma(\omega)\rho(z)`` (gradients) —
+  so with ``\gamma(\omega)``, the cladding term and ``u_{nm}`` precomputed on the device the
+  operator is one broadcast over ``n_\omega\times M`` per stage (µs), no host loop and no
+  upload; tapers, gradients and both together use the same kernel, and on the CPU the same
+  broadcast is ~20 µs instead of ~800. Needs `Capillary.gradient` to return a recognisable
+  callable (`GradientCoreIndex(γ, dens)`) rather than an anonymous closure, and a fallback
+  to the host loop for other mode types or user-supplied ``z``-dependent `coren`/`cladn`
+  (`RK45.make_prop!` already has the `device_capable` hook). This matters most on
+  H100-class GPUs, where the device RHS shrinks to a fraction of the host operator's
+  ~0.8 ms per stage and Amdahl caps the gradient cases (§5.3).
 - [x] **`fwhm_t` statistic exception path** — fixed (§5.2).
 - [ ] **P2 — Raman by mode pairs.** ``h*E^2 = \sum_{mn}(h*A_mA_n)\,e_me_n``: ``M(M+1)/2``
   pair convolutions instead of one per node, then a small GEMM. Gain on the Raman term
@@ -810,8 +822,8 @@ the record.
   device method per field-touching statistic returning scalars); payoff ≤15 % of a step
   at nt=8192, 25–50 % at nt=2^17. Decide after measurement.
 - [ ] **P3** — several simulations per GPU for sweeps (`SlurmExec(gres, instances)`, no
-  code; document); FP32 GEMMs (never for A40/H200); device-native ``z``-dependent linear
-  operator (small).
+  code; document); FP32 GEMMs (never for A40/H200). (The device-native ``z``-dependent
+  linear operator has moved into the P1 item above.)
 - [ ] **P2 (policy) — FFTW planning of large batched shapes**: `PATIENT` for a fresh
   ``2n_{to}\times n_p`` Raman shape takes tens of minutes on first use; consider `MEASURE`
   above some size, or document `Luna.set_fftw_mode(:measure)` for large-nt Raman runs.
