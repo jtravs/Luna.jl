@@ -34,7 +34,8 @@ if ! mountpoint -q "$VOL" 2>/dev/null; then
     warn "wiped on terminate. Check the pod was created with a volume attached."
 fi
 
-mkdir -p "$VOL"/{juliaup,julia_depot,code,runs,claude,logs}
+# (not juliaup: the installer refuses to install into an existing directory)
+mkdir -p "$VOL"/{julia_depot,code,runs,claude,logs}
 
 # A full depot with CUDA artifacts is ~6-8 GB. Runpod volumes also account for
 # metadata, and a Julia depot is 100k+ tiny files, so df can bite early.
@@ -138,6 +139,12 @@ git config --global --add safe.directory '*'
 # ------------------------------------------------------------------ Julia ---
 step "Julia $JULIA_CHANNEL"
 if [ ! -x "$VOL/juliaup/bin/julia" ]; then
+    # a leftover directory from a failed attempt (or the old mkdir above) makes the
+    # installer refuse to run; it holds nothing worth keeping without bin/julia
+    if [ -d "$VOL/juliaup" ]; then
+        warn "removing incomplete $VOL/juliaup from an earlier attempt"
+        rm -rf "$VOL/juliaup"
+    fi
     # juliaup's installer: --add-to-path no (formerly --no-modify-path; PATH comes from
     # env.sh), --default-channel, --path (install location; JULIAUP_DEPOT_PATH is also
     # set by env.sh). Startup/background self-update checks off: nothing should phone home
@@ -147,6 +154,7 @@ if [ ! -x "$VOL/juliaup/bin/julia" ]; then
         --default-channel "$JULIA_CHANNEL" \
         --path "$VOL/juliaup" \
         --startup-selfupdate 0 --background-selfupdate 0
+    hash -r
 else
     echo "    already on volume"
 fi
