@@ -25,8 +25,10 @@
 #   julia --project=<env> -t <threads> test/manual/hpc_gpu_bench.jl [options]
 #     --arraytypes=cpu,cuda    (default: cpu, plus cuda if CUDA is functional)
 #     --cases=vuv,ctc,vector,bignt   (default: all)
-#     --scale=0.2              fraction of each case's full fibre length to propagate
-#                              (default 0.2; the per-step numbers do not depend on it)
+#     --lengths=vuv:0.3,ctc:0.02,vector:0.1,bignt:0.3   fibre length [m] propagated per
+#                              case for the ms/step measurement (defaults as shown: a few
+#                              hundred to ~1000 steps each; the CtC case takes ~50 steps/mm).
+#                              The per-step numbers do not depend on it.
 #     --nrep=20                repetitions for the isolated RHS timing
 #     --fftw=measure|patient|estimate   FFTW planning rigour on the CPU (default measure:
 #                              PATIENT plans a fresh (2·nto × npts) batched Raman shape for
@@ -34,8 +36,13 @@
 #     --primitives=0           skip the primitives micro-benchmark
 #     --out=<csv path>         also append the summary rows to a CSV file
 #
+# Order of work: first the isolated RHS timings and the primitives for every case and array
+# type (fast — the key numbers), then the propagations. Everything printed is flushed, so a
+# job killed by the wall-time limit still leaves the tables in the .output file (Julia
+# buffers stdout when it is redirected to a file).
+#
 # The results table is printed at the end (Markdown), so it can be pasted straight into
-# GPU-TODO.md.
+# the developer guide.
 # =============================================================================
 using Luna
 import Luna: Interface, Maths, Utils, PhysData, Modes, Capillary, Nonlinear
@@ -50,7 +57,10 @@ for a in ARGS
     isnothing(m) && error("unrecognised argument $a")
     opts[m.captures[1]] = m.captures[2]
 end
-scale = parse(Float64, get(opts, "scale", "0.2"))
+lengths = Dict("vuv" => 0.3, "ctc" => 0.02, "vector" => 0.1, "bignt" => 0.3)
+for kv in split(get(opts, "lengths", ""), ","; keepempty=false)
+    k, v = split(kv, ":"); lengths[String(k)] = parse(Float64, v)
+end
 nrep = parse(Int, get(opts, "nrep", "20"))
 doprim = get(opts, "primitives", "1") != "0"
 csvpath = get(opts, "out", "")
@@ -72,7 +82,9 @@ casenames = haskey(opts, "cases") ? String.(split(opts["cases"], ",")) :
 
 println("=== Luna fixed-quadrature modal transform: CPU/GPU benchmark ===")
 println("host: $(gethostname())  date: $(now())  julia $(VERSION)  threads: $(Threads.nthreads())")
-println("FFTW planning: $fftwmode  arraytypes: $arraytypes  cases: $casenames  scale: $scale")
+println("FFTW planning: $fftwmode, FFTW threads: $(FFTW.get_num_threads())  arraytypes: $arraytypes  cases: $casenames")
+println("propagation lengths [m]: ", join(["$k=$(lengths[k])" for k in casenames if haskey(lengths, k)], ", "))
+flush(stdout)
 if cuda_ok
     CUDA = Base.require(Base.PkgId(Luna.CUDA_UUID, "CUDA"))
     Base.invokelatest(getfield(CUDA, :versioninfo))
@@ -83,7 +95,7 @@ println()
 
 # ----------------------------------------------------------------------------- cases
 # `args`: positional prop_capillary arguments; `kw`: keywords; `flength` is the full length
-# (the benchmark propagates `scale*flength`).
+# (the benchmark propagates the per-case `lengths`).
 const CASES = Dict(
     "vuv" => (args=(125e-6, 1.5, :He, (0.8, 0)),
               kw=(λ0=800e-9, τfwhm=7.5e-15, energy=275e-6, modes=4, trange=400e-15,
@@ -115,8 +127,8 @@ function timeit(f; n=nrep)
     median(ts)
 end
 
-function shortened(case)
-    args = (case.args[1], scale*case.args[2], case.args[3:end]...)
+function shortened(case, name)
+    args = (case.args[1], lengths[name], case.args[3:end]...)
     (; args, kw=case.kw)
 end
 
@@ -128,48 +140,26 @@ end
 
 results = NamedTuple[]
 prims = NamedTuple[]
+built = Dict{Tuple{String, Symbol}, Any}()
 
+# ----------------------------------------------------------- phase A: RHS and primitives
+println("=" ^ 78); println("Phase A: isolated RHS and primitives"); flush(stdout)
 for name in casenames
     haskey(CASES, name) || (println("unknown case $name, skipping"); continue)
-    case = shortened(CASES[name])
-    println("=" ^ 78)
-    println("case $name: ", case.args, "  ", case.kw)
-    reffield = nothing
+    case = shortened(CASES[name], name)
     for arraytype in arraytypes
-        println("--- $name on $arraytype")
         Luna.device_reclaim()
-        free0 = devfree()
         Eω, grid, linop, transform, FT, output = build(case, arraytype)
         nt, nto = length(grid.t), length(grid.to)
         nmodes = size(Eω, 2)
         npts = length(transform.quad); npol = transform.ts.npol
         resps = join(string.(nameof.(typeof.(transform.resp_eval))), ",")
-        println("    nt=$nt nto=$nto modes=$nmodes nodes=$npts npol=$npol  responses: $resps")
         nl = similar(Eω)
-        # isolated RHS (field-independent for the fixed rule)
         trhs = Base.invokelatest(timeit, () -> Base.invokelatest(transform, nl, Eω, 0.0))
-        @printf("    isolated RHS: %.3f ms  (%.2e time-domain points per RHS)\n",
-                trhs, nto*npol*npts)
-        # propagation
-        t0 = time()
-        Base.invokelatest(Luna.run, Eω, grid, linop, transform, FT, output;
-                          status_period=60, allow_device_stats=true)
-        wall = time() - t0
-        st = output["stats"]
-        nsteps = length(st["z"])
-        peakmem = isnan(free0) ? NaN : gib(free0 - devfree())
-        Efinal = Array(output["Eω"][:, :, end])
-        rel = isnothing(reffield) ? 0.0 : norm(Efinal .- reffield)/norm(reffield)
-        arraytype == first(arraytypes) && (reffield = Efinal)
-        @printf("    propagation %.3f m: %.1f s, %d steps, %.2f ms/step; 7×RHS = %.2f ms (%.0f%% of step)",
-                case.args[2], wall, nsteps, 1e3*wall/nsteps, 7trhs, 100*7trhs/(1e3*wall/nsteps))
-        isnan(peakmem) || @printf(", device memory %.2f GiB", peakmem)
-        @printf("\n    final field vs %s: rel L2 %.2e;  peak electron density %.2e m^-3\n",
-                first(arraytypes), rel, maximum(st["electrondensity"]))
-        push!(results, (; case=name, arraytype, nt, nto, nmodes, npts, npol, trhs, wall,
-                        nsteps, msstep=1e3*wall/nsteps, share=7trhs/(1e3*wall/nsteps),
-                        rel, peakmem))
-        # ------------------------------------------------ primitives at this shape
+        @printf("%-7s %-5s nt=%d nto=%d modes=%d nodes=%d npol=%d  RHS %.3f ms  (%.2e points/RHS; %s)\n",
+                name, arraytype, nt, nto, nmodes, npts, npol, trhs, nto*npol*npts, resps)
+        flush(stdout)
+        built[(name, arraytype)] = (; Eω, grid, linop, transform, FT, output, nt, nto, nmodes, npts, npol, trhs)
         if doprim
             A = Luna.resolve_arraytype(arraytype)
             T = eltype(transform.Et)
@@ -183,9 +173,9 @@ for name in casenames
             pl = Base.invokelatest(Utils.plan_rfft_backend, Emt, 1); ipl = inv(pl)
             t_fft = Base.invokelatest(timeit, () -> (mul!(Emω, pl, Emt); mul!(Emt, ipl, Emω)))
             t_gemm = Base.invokelatest(timeit, () -> (mul!(Et, Emt, S); mul!(Emt, Et, Wp)))
-            # an ionisation-rate-like elementwise pass (exp of a reciprocal) + three scans
             Ep = reshape(Et, nto, npol, npts); E1 = view(Ep, :, 1, :)
-            # (threaded in chunks on the host, as the pointwise responses are; one kernel on a device)
+            # an ionisation-rate-like elementwise pass (exp of a reciprocal), threaded in
+            # chunks on the host as the pointwise responses are, one kernel on a device
             t_rate = Base.invokelatest(timeit, () -> (Utils.tchunks(R, E1) do R, E1
                                                           @. R = exp(-1e10/abs(E1))
                                                       end; nothing))
@@ -202,19 +192,50 @@ for name in casenames
                 end
             end
             t_scan = Base.invokelatest(timeit, scan3!)
-            # doubled-grid batched Raman FFT pair (real field)
             B = Luna.device_zeros(A, Float64, (2nto, npts)); Bω = Luna.device_zeros(A, ComplexF64, (nto+1, npts))
             fill!(B, 1.0)
             plB = Base.invokelatest(Utils.plan_rfft_backend, B, 1); iplB = inv(plB)
             t_raman = Base.invokelatest(timeit, () -> (mul!(Bω, plB, B); mul!(B, iplB, Bω)))
             hasraman = any(r -> r isa Nonlinear.RamanPolarFieldBatched, transform.resp_eval)
             total = t_fft + t_gemm + t_rate + t_scan + (hasraman ? t_raman : 0.0)
-            @printf("    primitives: modal FFT pair %.3f ms, GEMM pair %.3f ms, rate pass %.3f ms, 3 scans %.3f ms, Raman FFT pair %.3f ms%s  → sum %.3f ms vs RHS %.3f ms\n",
+            @printf("        primitives: modal FFT pair %.3f, GEMM pair %.3f, rate pass %.3f, 3 scans %.3f, Raman FFT pair %.3f%s ms → sum %.3f vs RHS %.3f\n",
                     t_fft, t_gemm, t_rate, t_scan, t_raman, hasraman ? "" : " (not in RHS)", total, trhs)
+            flush(stdout)
             push!(prims, (; case=name, arraytype, t_fft, t_gemm, t_rate, t_scan, t_raman, total, trhs))
             Emt = Emω = Et = S = Wp = R = R2 = B = Bω = tmp = nothing
+            GC.gc(); Luna.device_reclaim()
         end
-        Eω = nl = transform = linop = output = nothing
+    end
+end
+
+# ---------------------------------------------------------------- phase B: propagations
+println("=" ^ 78); println("Phase B: propagations"); flush(stdout)
+for name in casenames
+    haskey(CASES, name) || continue
+    reffield = nothing
+    for arraytype in arraytypes
+        b = built[(name, arraytype)]
+        Luna.device_reclaim()
+        free0 = devfree()
+        t0 = time()
+        Base.invokelatest(Luna.run, b.Eω, b.grid, b.linop, b.transform, b.FT, b.output;
+                          status_period=120, allow_device_stats=true)
+        wall = time() - t0
+        st = b.output["stats"]
+        nsteps = length(st["z"])
+        peakmem = isnan(free0) ? NaN : gib(free0 - devfree())
+        Efinal = Array(b.output["Eω"][:, :, end])
+        rel = isnothing(reffield) ? 0.0 : norm(Efinal .- reffield)/norm(reffield)
+        arraytype == first(arraytypes) && (reffield = Efinal)
+        @printf("%-7s %-5s propagation %.3f m: %.1f s, %d steps, %.2f ms/step; 7×RHS = %.2f ms (%.0f%% of step)",
+                name, arraytype, lengths[name], wall, nsteps, 1e3*wall/nsteps, 7b.trhs, 100*7b.trhs/(1e3*wall/nsteps))
+        isnan(peakmem) || @printf(", device memory %.2f GiB", peakmem)
+        @printf("; final field vs %s: rel L2 %.2e; peak ρe %.2e m^-3\n", first(arraytypes), rel,
+                maximum(st["electrondensity"]))
+        flush(stdout)
+        push!(results, (; case=name, arraytype, b.nt, b.nto, b.nmodes, b.npts, b.npol, trhs=b.trhs, wall,
+                        nsteps, msstep=1e3*wall/nsteps, share=7b.trhs/(1e3*wall/nsteps), rel, peakmem))
+        built[(name, arraytype)] = nothing
         GC.gc(); Luna.device_reclaim()
     end
 end
@@ -256,4 +277,4 @@ if !isempty(csvpath)
     end
     println("appended $(length(results)) rows to $csvpath")
 end
-println("=== done ===")
+println("=== done ==="); flush(stdout)

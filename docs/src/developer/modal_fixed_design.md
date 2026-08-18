@@ -656,6 +656,29 @@ the mode-error statistic), GPU-vs-CPU agreement, resident device memory and a pr
 micro-benchmark at the same shapes, with a Markdown summary. Its results belong in this
 document once available.
 
+**First submission (job 442792, 2026-08-18, node gpu17, A40 48 GB, 16 CPU threads):** the
+hardware tests all passed — 69/69: cuFFT semantics, native scan, RK45 error norm
+host-vs-device ratio ``1\pm10^{-14}`` at every cancellation level and both shapes, modal
+transform vs host ``1.2\times10^{-14}`` (ADK), ``9\times10^{-15}`` (PPT spline),
+``8.6\times10^{-15}`` (Raman, `thg` on/off), end-to-end gradient propagation vs host
+``1.3\times10^{-10}``, resident memory 12 fields (TransFree test), lazy `:cuda` subprocess
+OK; CPU tests 243/244 (the error was a missing direct `QuadGK` dependency in the job
+environment). The benchmark's per-RHS numbers were **lost**: Julia buffers stdout when it
+is redirected to a file and the job hit the 4 h limit inside a 0.3 m CtC propagation
+(~14 000 steps; that case takes ~50 steps/mm), so only the `@info` lines on stderr
+survived. Those showed the `vuv` case at 76 ms/step on the CPU and 50 ms/step on the GPU
+against 15 ms/step on the laptop — i.e. the *host* side of the node was ~5× slower than
+expected, and it dominates the GPU run too (linear operator, statistics, windows). Prime
+suspect, now fixed: Luna's FFTW default of 4× the Julia threads (64 pthreads on a 16-core
+cgroup allocation, a 2020 default from the Julia-task-callback era) — with native pthreads
+on Linux the count is now capped at the available parallelism (`Sys.CPU_THREADS`, which
+respects the affinity mask; macOS keeps 4× because there `Sys.CPU_THREADS` counts only
+performance cores and the extra threads measurably help). The job now runs the benchmark
+before the slow CPU tests, flushes every printed line, uses per-case propagation lengths
+(vuv 0.3 m, ctc 0.02 m, vector 0.1 m, bignt 0.3 m), and its environment needs `QuadGK`.
+Whether the FFTW default explains all of the slowdown will be visible in the next run's
+phase A (isolated RHS timings, printed first).
+
 ## 6. Testing
 
 - `test/test_modal_quadrature.jl`: rules, nodes/weights, orthonormality of the mode sets on
@@ -721,7 +744,10 @@ the record.
 
 ### 8.2 Measure first (user actions on the DMOG A40)
 
-- [ ] Submit `test/manual/hpc_gpu_suite.sbatch` (§5.4). Record the summary tables here.
+- [ ] Re-submit `test/manual/hpc_gpu_suite.sbatch` (§5.4): the first run validated the
+  device path (69/69 hardware tests, agreement to ``10^{-14}``/``10^{-10}``) but lost the
+  benchmark output; the job is reordered, flushed, shorter, and the FFTW thread default
+  fixed. Record the phase-A RHS table and phase-B ms/step here.
 - [ ] `test/manual/modal_fixed_rdw.jl vuv quick 1.5 {cpu,cuda}` and a full CPU node
   (`-t 32`) for the per-step share of "everything else" (linear op, RK45, stats, output).
 - Expected (unmeasured): scalar 4-mode nt=8192 → A40 ≈ 8-thread laptop, slower than a

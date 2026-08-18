@@ -51,7 +51,8 @@ never installed and nothing needs deregistering.
 """
 function set_fftw_threads(nthr=0)
     settings["fftw_threads"] = nthr
-    FFTW.set_num_threads(Utils.FFTWthreads())
+    # decide the threading mode first (loads the FFTW libraries and, on Julia ≥ 1.12,
+    # deregisters FFTW.jl's Julia-task callback), then set the count — which depends on it
     if VERSION >= v"1.12" && Threads.nthreads() > 1
         if Utils.use_native_fftw_threads() && !_native_fftw_logged[]
             _native_fftw_logged[] = true
@@ -60,6 +61,7 @@ function set_fftw_threads(nthr=0)
                           "(FFTW.jl's Julia-task callback deregistered).")
         end
     end
+    FFTW.set_num_threads(Utils.FFTWthreads())
 end
 const _native_fftw_logged = Ref(false)
 

@@ -86,7 +86,22 @@ function FFTWthreads()
     # Julia ≥ 1.12 (observed with FFTW.jl 1.10 on x64 Linux).
     nthr = settings["fftw_threads"]
     nthr > 0 && return nthr
-    Threads.nthreads() == 1 ? 1 : 4*Threads.nthreads()
+    Threads.nthreads() == 1 && return 1
+    # With FFTW.jl's Julia-task callback, FFTW "threads" are Julia tasks and
+    # oversubscribing them (4× the Julia threads, the historical default) only improves
+    # load balance. With libfftw3's native pthreads (Julia ≥ 1.12, see
+    # `use_native_fftw_threads`) they are OS threads: more of them than the cores this
+    # process may use oversubscribes a Slurm cgroup, and every small host FFT (statistics,
+    # windows) then pays for it — observed as a ~5× slower propagation step on a 16-core
+    # GPU-node allocation. On Linux `Sys.CPU_THREADS` is the available parallelism (it
+    # respects the affinity mask/cgroup), so cap there; keep 4× elsewhere (on Apple silicon
+    # `Sys.CPU_THREADS` counts only the performance cores and the extra threads help).
+    # `Luna.set_fftw_threads(n)` overrides in either case.
+    nthr = 4*Threads.nthreads()
+    if VERSION >= v"1.12" && Sys.islinux() && use_native_fftw_threads()
+        nthr = min(nthr, max(Threads.nthreads(), Sys.CPU_THREADS))
+    end
+    nthr
 end
 
 """
@@ -100,7 +115,15 @@ only changes how FFTW's parallel jobs are executed, never the plans or their res
 Returns `true` if the callback was deregistered, `false` if not applicable (MKL provider,
 or FFTW.jl internals changed).
 """
+# memoised: the deregistration is a one-off side effect, and `FFTWthreads` asks every time
+const _native_fftw_threads = Ref{Union{Nothing, Bool}}(nothing)
+
 function use_native_fftw_threads()
+    isnothing(_native_fftw_threads[]) || return _native_fftw_threads[]
+    _native_fftw_threads[] = _use_native_fftw_threads()
+end
+
+function _use_native_fftw_threads()
     # Coupled to FFTW.jl internals (verified against FFTW.jl 1.10): feature-detect and
     # bail out gracefully rather than erroring on future versions.
     FFTW.fftw_provider == "fftw" || return false
@@ -108,8 +131,9 @@ function use_native_fftw_threads()
     try
         # Force both libraries to load first: on Julia ≥ 1.11, FFTW.jl installs its
         # callback lazily at first library load, so deregistering before both are loaded
-        # would be silently undone. set_num_threads ccalls into both libraries.
-        FFTW.set_num_threads(FFTWthreads())
+        # would be silently undone. set_num_threads ccalls into both libraries (the count
+        # is set properly by `Luna.set_fftw_threads` right after).
+        FFTW.set_num_threads(Threads.nthreads())
         ccall((:fftw_threads_set_callback, FFTW.libfftw3), Cvoid,
               (Ptr{Cvoid}, Ptr{Cvoid}), C_NULL, C_NULL)
         ccall((:fftwf_threads_set_callback, FFTW.libfftw3f), Cvoid,
