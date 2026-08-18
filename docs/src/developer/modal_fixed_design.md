@@ -747,7 +747,13 @@ the record.
 - [ ] Re-submit `test/manual/hpc_gpu_suite.sbatch` (§5.4): the first run validated the
   device path (69/69 hardware tests, agreement to ``10^{-14}``/``10^{-10}``) but lost the
   benchmark output; the job is reordered, flushed, shorter, and the FFTW thread default
-  fixed. Record the phase-A RHS table and phase-B ms/step here.
+  fixed. It now also asks for 32 CPUs and runs a **CPU thread-scaling sweep**
+  (`test/manual/cpu_thread_scaling.jl`: 1–32 threads, one process each, FFTW/BLAS threads
+  = Julia threads: isolated RHS of the vuv and ctc cases, one linear-operator and one
+  statistics call, ms/step of a short vuv propagation) — the fair CPU baseline for the GPU
+  numbers on a 128-core node, and the direct test of whether serial host work (linear
+  operator, statistics) caps the step. Record the phase-A RHS table, phase-B ms/step and
+  the scaling table here.
 - [ ] `test/manual/modal_fixed_rdw.jl vuv quick 1.5 {cpu,cuda}` and a full CPU node
   (`-t 32`) for the per-step share of "everything else" (linear op, RK45, stats, output).
 - Expected (unmeasured): scalar 4-mode nt=8192 → A40 ≈ 8-thread laptop, slower than a

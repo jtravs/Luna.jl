@@ -19,12 +19,19 @@
 #      case and array type; phase B: a short propagation per case (LENGTHS) with ms/step,
 #      transform share, GPU-vs-CPU agreement and resident device memory. Every line is
 #      flushed as it is printed. Markdown summary at the end.
-#   4. Luna's CPU tests for the parts touched by this work (~10 min): modal quadrature,
+#   4. a CPU thread-scaling sweep (test/manual/cpu_thread_scaling.jl, ~20 min): one fresh
+#      process per thread count in 1 2 4 8 16 32 (up to the allocation; FFTW and BLAS
+#      threads set to the same count, so each point emulates an allocation of that many
+#      cores) printing the isolated RHS of the vuv and ctc cases, one linear-operator and
+#      one statistics call, and the ms/step of a short vuv propagation. This is the fair
+#      CPU baseline for the GPU numbers (a node has 128 cores) and shows where the rest of
+#      the step (linear operator, statistics) caps the transform's scaling.
+#   5. Luna's CPU tests for the parts touched by this work (~10 min): modal quadrature,
 #      fixed transform, batched responses, vector plasma, device logic (JLArrays)
-#   5. optionally (RDW=1) the full-length RDW VUV validation script on both backends
+#   6. optionally (RDW=1) the full-length RDW VUV validation script on both backends
 #      (test/manual/modal_fixed_rdw.jl vuv quick 1.5 {cpu,cuda}) — adds ~20 min.
 #
-# Expected duration with the defaults: ~1 h; --time is 4 h for headroom (first-run
+# Expected duration with the defaults: ~1.5 h; --time is 4 h for headroom (first-run
 # precompilation and FFTW planning). NB the first submission (442792) spent 3 h in the
 # ctc CPU propagation because it was 0.3 m long (~50 steps/mm) and lost the benchmark's
 # stdout to buffering; both fixed (per-case lengths, flushed output, benchmark first).
@@ -34,6 +41,7 @@
 #   sbatch --export=ALL,LENGTHS=vuv:0.1,ctc:0.005 test/manual/hpc_gpu_suite.sbatch  (quicker)
 #   sbatch --export=ALL,CASES=vuv,ctc,BENCH_ONLY=1 test/manual/hpc_gpu_suite.sbatch
 #   sbatch --export=ALL,RDW=1 test/manual/hpc_gpu_suite.sbatch
+#   sbatch --cpus-per-task=64 --export=ALL,SCALING_THREADS="1 2 4 8 16 32 64" test/manual/hpc_gpu_suite.sbatch
 #
 # ONE-TIME SETUP (see the block at the bottom of this file).
 # =============================================================================
@@ -47,10 +55,11 @@
 ## (nto ≈ 1.3e5 × 65 nodes × ~10 buffers ≈ 1 GB) plus the Julia + CUDA runtime.
 #SBATCH --mem=32G
 ## CPUs: the CPU half of the benchmark is the comparison the GPU has to beat, so give it
-## a realistic thread count. (A production CPU node run would use more; the per-step
-## numbers scale roughly with threads for the plasma/Raman columns.)
+## a realistic thread count (a node has 2×64 cores); the thread-scaling sweep uses up to
+## this many. 32 keeps the GPU-partition scheduling easy; --cpus-per-task=64 with
+## SCALING_THREADS="1 2 4 8 16 32 64" gives the full-socket baseline.
 #SBATCH --ntasks=1
-#SBATCH --cpus-per-task=16
+#SBATCH --cpus-per-task=32
 #SBATCH --gres gpu:1
 #SBATCH -p gpu
 
@@ -64,7 +73,9 @@ LENGTHS="${LENGTHS:-vuv:0.3,ctc:0.02,vector:0.1,bignt:0.3}"
 CASES="${CASES:-vuv,ctc,vector,bignt}"
 BENCH_ONLY="${BENCH_ONLY:-0}"
 RDW="${RDW:-0}"
-NTHREADS="${SLURM_CPUS_PER_TASK:-16}"
+SCALING="${SCALING:-1}"
+NTHREADS="${SLURM_CPUS_PER_TASK:-32}"
+SCALING_THREADS="${SCALING_THREADS:-1 2 4 8 16 32}"
 
 export JULIA_NUM_THREADS="$NTHREADS"
 export OPENBLAS_NUM_THREADS="$NTHREADS"
@@ -103,6 +114,19 @@ echo "=== CPU vs GPU benchmark (lengths=$LENGTHS cases=$CASES) ==="
 time julia --project="$ENVDIR" "$LUNA/test/manual/hpc_gpu_bench.jl" \
     --cases="$CASES" --lengths="$LENGTHS" --out="$GPUROOT/bench-$(hostname)-${SLURM_JOB_ID:-none}.csv"
 echo
+
+if [ "$SCALING" = "1" ]; then
+    echo "=== CPU thread scaling (threads: $SCALING_THREADS, up to $NTHREADS) ==="
+    for n in $SCALING_THREADS; do
+        if [ "$n" -le "$NTHREADS" ]; then
+            JULIA_NUM_THREADS=$n OPENBLAS_NUM_THREADS=$n OMP_NUM_THREADS=$n \
+                julia --project="$ENVDIR" "$LUNA/test/manual/cpu_thread_scaling.jl" \
+                --out="$GPUROOT/scaling-$(hostname)-${SLURM_JOB_ID:-none}.csv" \
+                2>"$GPUROOT/scaling-${SLURM_JOB_ID:-none}-t$n.log"  # @info noise per point
+        fi
+    done
+    echo
+fi
 
 if [ "$BENCH_ONLY" != "1" ]; then
     echo "=== CPU tests: modal quadrature, fixed transform, batched responses, vector plasma, device logic ==="
@@ -155,6 +179,9 @@ echo "=== done ==="
 #     shows how far each RHS is from the sum of its kernels (launch latency / syncs).
 #   * "GPU/CPU speed-up" lines at the end. Expected (unmeasured before this job): ~1× or
 #     worse for vuv (launch-bound), several × for ctc/vector/bignt.
+#   * thread scaling: "RHS vuv"/"RHS ctc" should fall ~linearly to 16–32 threads (plasma
+#     columns are 65 per RHS, so beyond ~32 the per-column threading saturates); if
+#     "linop"/"stats" do not fall, that is the serial host work capping ms/step.
 #   * From job 442792 (tests only survived): CUDA tests 69/69 — device norm ratio
 #     1 ± 1e-14, modal transform vs host 1e-14 (ADK, PPT, Raman), propagation vs host
 #     1.3e-10; CPU tests 243/244 (the one error was the missing QuadGK dependency).
