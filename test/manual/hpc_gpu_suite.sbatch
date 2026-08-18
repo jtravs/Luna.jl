@@ -24,8 +24,9 @@
 #      threads set to the same count, so each point emulates an allocation of that many
 #      cores) printing the isolated RHS of the vuv and ctc cases, one linear-operator and
 #      one statistics call, and the ms/step of a short vuv propagation. This is the fair
-#      CPU baseline for the GPU numbers (a node has 128 cores) and shows where the rest of
-#      the step (linear operator, statistics) caps the transform's scaling.
+#      CPU baseline for the GPU numbers (a GPU node has 2 × 32-core EPYC 7543, 512 GB and
+#      2 A40s; 32 CPUs is one socket) and shows where the rest of the step (linear
+#      operator, statistics) caps the transform's scaling.
 #   5. Luna's CPU tests for the parts touched by this work (~10 min): modal quadrature,
 #      fixed transform, batched responses, vector plasma, device logic (JLArrays)
 #   6. optionally (RDW=1) the full-length RDW VUV validation script on both backends
@@ -42,6 +43,7 @@
 #   sbatch --export=ALL,CASES=vuv,ctc,BENCH_ONLY=1 test/manual/hpc_gpu_suite.sbatch
 #   sbatch --export=ALL,RDW=1 test/manual/hpc_gpu_suite.sbatch
 #   sbatch --cpus-per-task=64 --export=ALL,SCALING_THREADS="1 2 4 8 16 32 64" test/manual/hpc_gpu_suite.sbatch
+#     (the whole node's CPUs — both sockets — for the scaling sweep; schedules less easily)
 #
 # ONE-TIME SETUP (see the block at the bottom of this file).
 # =============================================================================
@@ -55,9 +57,11 @@
 ## (nto ≈ 1.3e5 × 65 nodes × ~10 buffers ≈ 1 GB) plus the Julia + CUDA runtime.
 #SBATCH --mem=32G
 ## CPUs: the CPU half of the benchmark is the comparison the GPU has to beat, so give it
-## a realistic thread count (a node has 2×64 cores); the thread-scaling sweep uses up to
-## this many. 32 keeps the GPU-partition scheduling easy; --cpus-per-task=64 with
-## SCALING_THREADS="1 2 4 8 16 32 64" gives the full-socket baseline.
+## a realistic thread count; the thread-scaling sweep uses up to this many. A GPU node has
+## 2 × 32-core AMD EPYC 7543 (64 cores), 512 GB RAM and 2 A40s, so 32 is one full socket
+## and leaves the other socket and GPU free; --cpus-per-task=64 with
+## SCALING_THREADS="1 2 4 8 16 32 64" takes the whole node's CPUs. If Slurm counts SMT
+## threads as CPUs, 32 "CPUs" may be 16 cores — the lscpu/nproc lines in the log say.
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=32
 #SBATCH --gres gpu:1
@@ -93,6 +97,9 @@ export LUNA_TEST_CUDA=1
 
 echo "=== node: $(hostname)  job: ${SLURM_JOB_ID:-none}  threads: $NTHREADS ==="
 echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+# what the allocation actually is: cores vs SMT threads, sockets, and the affinity mask
+lscpu | grep -E "^Model name|^CPU\(s\)|^Thread\(s\) per core|^Core\(s\) per socket|^Socket\(s\)|^NUMA node\(s\)" || true
+echo "nproc (affinity-limited): $(nproc)   SLURM_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK:-<unset>}   SLURM_MEM_PER_NODE=${SLURM_MEM_PER_NODE:-<unset>}"
 nvidia-smi --query-gpu=index,name,memory.total,memory.free,driver_version --format=csv || true
 echo "Luna: $(git -C "$LUNA" rev-parse --abbrev-ref HEAD) @ $(git -C "$LUNA" rev-parse --short HEAD)"
 echo
