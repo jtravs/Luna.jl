@@ -28,7 +28,8 @@
 #     --lengths=vuv:0.3,ctc:0.02,vector:0.1,bignt:0.3   fibre length [m] propagated per
 #                              case for the ms/step measurement (defaults as shown: a few
 #                              hundred to ~1000 steps each; the CtC case takes ~50 steps/mm).
-#                              The per-step numbers do not depend on it.
+#                              The per-step numbers do not depend on it. (--scale=f, the
+#                              old form, is still accepted: min(f × full length, default).)
 #     --nrep=20                repetitions for the isolated RHS timing
 #     --fftw=measure|patient|estimate   FFTW planning rigour on the CPU (default measure:
 #                              PATIENT plans a fresh (2·nto × npts) batched Raman shape for
@@ -58,6 +59,13 @@ for a in ARGS
     opts[m.captures[1]] = m.captures[2]
 end
 lengths = Dict("vuv" => 0.3, "ctc" => 0.02, "vector" => 0.1, "bignt" => 0.3)
+# --scale (the old interface: a fraction of each case's full length) is still accepted for
+# a job script submitted before --lengths existed; --lengths overrides it per case
+if haskey(opts, "scale")
+    sc = parse(Float64, opts["scale"])
+    fulllengths = Dict("vuv" => 1.5, "ctc" => 1.5, "vector" => 0.5, "bignt" => 1.5)
+    for (k, L) in fulllengths; lengths[k] = min(sc*L, lengths[k]); end
+end
 for kv in split(get(opts, "lengths", ""), ","; keepempty=false)
     k, v = split(kv, ":"); lengths[String(k)] = parse(Float64, v)
 end
