@@ -32,10 +32,13 @@
 #   6. optionally (RDW=1) the full-length RDW VUV validation script on both backends
 #      (test/manual/modal_fixed_rdw.jl vuv quick 1.5 {cpu,cuda}) — adds ~20 min.
 #
-# Expected duration with the defaults: ~1.5 h; --time is 4 h for headroom (first-run
-# precompilation and FFTW planning). NB the first submission (442792) spent 3 h in the
-# ctc CPU propagation because it was 0.3 m long (~50 steps/mm) and lost the benchmark's
-# stdout to buffering; both fixed (per-case lengths, flushed output, benchmark first).
+# Expected duration with the defaults: ~1.5 h; --time is 12 h for headroom (first-run
+# precompilation of new commits, FFTW planning, and a host side that job 442792 showed can
+# be several times slower than a laptop). Every result line is flushed as it is printed,
+# so a job that runs over still leaves everything up to that point in the .output file.
+# NB the first submission (442792) spent 3 h in the ctc CPU propagation because it was
+# 0.3 m long (~50 steps/mm) and lost the benchmark's stdout to buffering; both fixed
+# (per-case lengths, flushed output, benchmark first).
 #
 # Submit:
 #   sbatch test/manual/hpc_gpu_suite.sbatch
@@ -52,7 +55,7 @@
 #SBATCH -o luna-gpu-suite-%j.output
 #SBATCH -e luna-gpu-suite-%j.error
 #SBATCH -J luna-gpu-suite
-#SBATCH --time=04:00:00
+#SBATCH --time=12:00:00
 ## Host memory (TOTAL). The largest host footprint is the CPU side of the ctc case
 ## (nto ≈ 1.3e5 × 65 nodes × ~10 buffers ≈ 1 GB) plus the Julia + CUDA runtime.
 #SBATCH --mem=32G
