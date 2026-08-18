@@ -3,6 +3,7 @@ import ArgParse: ArgParseSettings, parse_args, parse_item, @add_arg_table!
 import Logging: @info, @warn
 import Printf: @sprintf
 import Base: length, size
+import Luna
 import Luna: Utils
 import FileWatching.Pidfile: mkpidlock
 import HDF5
@@ -527,6 +528,7 @@ function runscan(f, scan::Scan{LocalExec})
             @warn msg
         end
         Base.GC.gc()
+        Luna.device_reclaim() # return pooled device memory between points (no-op on the host)
     end
     out
 end
@@ -544,6 +546,7 @@ function runscan(f, scan::Scan{RangeExec})
             @warn msg
         end
         Base.GC.gc()
+        Luna.device_reclaim() # return pooled device memory between points (no-op on the host)
     end
     out
 end
@@ -591,6 +594,7 @@ function runscan(f, scan::Scan{BatchExec})
             @warn msg
         end
         Base.GC.gc()
+        Luna.device_reclaim() # return pooled device memory between points (no-op on the host)
     end
 end
 
@@ -769,6 +773,7 @@ function _runscan(f, scan::Scan{QueueExec})
             end
         end
         Base.GC.gc()
+        Luna.device_reclaim() # return pooled device memory between points (no-op on the host)
         # Exit after `maxpoints` points (failed attempts count too — the point of the limit
         # is a fresh process per attempt, not a retry budget). We deliberately do NOT check
         # for queue completion here: the completion marker is created by whichever process

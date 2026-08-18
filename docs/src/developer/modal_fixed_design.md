@@ -698,6 +698,59 @@ before the slow CPU tests, flushes every printed line, uses per-case propagation
 Whether the FFTW default explains all of the slowdown will be visible in the next run's
 phase A (isolated RHS timings, printed first).
 
+### 5.5 Fast parameter scans on a GPU (analysis; not yet run on hardware)
+
+The target: a 20 × 20 energy × pressure scan of the RDW VUV example (400 propagations of
+~4400 steps) on one GPU, with the lowest latency and only reduced results ("collected"
+quantities) coming off the device. What each point costs today, and what to do about it:
+
+- **Per-point host setup** (`prop_capillary_args`: gradient/density splines, mode
+  matrices, PPT table load from the cache, host FFT plans for the statistics): ~0.5 s per
+  point after the first (measured on the laptop; the first point pays compilation, ~4 s).
+  With ~30 s of propagation per point on a GPU this is negligible; if the propagation
+  ever gets to ~1 s per point it becomes the floor. Cheap wins if needed: build the mode
+  collection and gradient once outside the loop and use `Luna.setup`/`Luna.run` directly
+  instead of `prop_capillary` (the mode matrices and PPT table are then reused).
+- **Per-step host work** dominates the device run: the default statistics are ~1.6 ms per
+  step on the host (a 4400-step point → 7 s, comparable to or larger than the whole GPU
+  propagation) — use `stats_kwargs=Dict(:mode_error=>false)` (drops the extra transform
+  call and the on-axis reference evaluation) and `stats_period=10`; the ``z``-dependent
+  linear operator is now a device broadcast (§3.7); the remaining host work per step is
+  the RK45 error-norm sync and a few scalars.
+- **Output**: `saveN=2` (start and end field) is enough for a scan whose reduced
+  quantities are computed afterwards; each save is a small device→host copy. The
+  `ScanHDF5Output` per point (~0.5 MB at saveN=2) is what `Processing.scanproc` reads to
+  extract band energies, peak densities, spectra — the "collected" results. Nothing else
+  needs to leave the device.
+- **JIT and process model**: one Julia process per point (`SlurmExec(instances=…)` style)
+  would pay compilation and CUDA initialisation (~1 min) per point — never for a GPU
+  scan. Run the scan in-process (`LocalExec`, the default `runscan`), so compilation is
+  paid once. `runscan` now calls `Luna.device_reclaim()` after every point (returns
+  pooled device memory; a no-op on the host).
+- **GPU occupancy**: a single 4-mode nt=8192 propagation is launch-latency-bound and uses a
+  fraction of an H200. Throughput comes from **several processes sharing the GPU**, each
+  running a slice of the scan in-process: `julia script.jl --batch k,i` for `i=1:k`
+  (`Scans.BatchExec`; every process has its own CUDA context, ~300–500 MB of device
+  memory each; CUDA MPS improves the overlap but plain time-slicing already helps for
+  launch-bound kernels). Expect 3–5× over one process for the small case; measure with the
+  rehearsal script's 4-process step. `--queue n` (`QueueExec`, `addprocs` workers pulling
+  from a queue file) load-balances the same way.
+- **The structural option** (roadmap): propagate all 400 points as **one batched state**
+  `(nω, M, 400)` — same grid and modes, per-point density and linear operator, one RK45
+  with a shared step size (set by the worst point). The transform already handles a
+  column dimension; the plasma/Kerr `ρ` would become a per-column vector and the linear
+  operator a per-point array; the whole scan then fills the GPU with ~4×10⁵ columns per
+  RHS and finishes in one propagation. Effort M–L; only worth it if the multi-process
+  approach leaves the GPU idle.
+
+Rehearsal tooling: `test/manual/gpu_scan_rehearsal.jl` runs a small scan through the real
+`Scans` machinery with the lean settings, times setup/propagation/output per point,
+extrapolates to 400 points, runs with `--batch k,i` for the multi-process case, and
+extracts the reduced results with `Processing.scanproc`; `test/manual/h200_gpu_suite.sh`
+runs it (with the CUDA tests, the CUDA-only benchmark and full-length production runs) on
+a rented GPU box. Laptop CPU rehearsal (for the mechanics only): 0.5 s setup + propagation
+per point, first point +3.5 s compilation.
+
 ## 6. Testing
 
 - `test/test_modal_quadrature.jl`: rules, nodes/weights, orthonormality of the mode sets on
@@ -843,9 +896,11 @@ the record.
 - [ ] **P2 — Modal statistics on device.** Effort M (~300–400 lines in `Stats.jl`, a
   device method per field-touching statistic returning scalars); payoff ≤15 % of a step
   at nt=8192, 25–50 % at nt=2^17. Decide after measurement.
-- [ ] **P3** — several simulations per GPU for sweeps (`SlurmExec(gres, instances)`, no
-  code; document); FP32 GEMMs (never for A40/H200). (The device-native ``z``-dependent
-  linear operator has moved into the P1 item above.)
+- [ ] **P2 — GPU parameter scans** (§5.5): rehearse on the H200 (`h200_gpu_suite.sh`),
+  then a 20 × 20 RDW VUV scan with lean statistics in-process, several `--batch` processes
+  sharing the GPU; if the GPU stays idle, the batched-state propagation of all points at
+  once (per-column density and per-point linear operator; effort M–L).
+- [ ] **P3** — FP32 GEMMs (never for A40/H200).
 - [ ] **P2 (policy) — FFTW planning of large batched shapes**: `PATIENT` for a fresh
   ``2n_{to}\times n_p`` Raman shape takes tens of minutes on first use; consider `MEASURE`
   above some size, or document `Luna.set_fftw_mode(:measure)` for large-nt Raman runs.
