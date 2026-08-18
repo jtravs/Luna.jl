@@ -53,13 +53,11 @@ if [ "${1:-}" = "save" ]; then
     exit 0
 fi
 
-# A full depot with CUDA artifacts is ~6-8 GB. Runpod volumes also account for
-# metadata, and a Julia depot is 100k+ tiny files, so df can bite early.
-_vol_free_gb=$(df -BG --output=avail "$VOL" 2>/dev/null | tail -1 | tr -dc '0-9')
-if [ -n "${_vol_free_gb:-}" ] && [ "$_vol_free_gb" -lt 8 ]; then
-    warn "only ${_vol_free_gb} GB free on $VOL — a cold depot needs ~6-8 GB."
-    warn "Volumes can be grown but never shrunk; expand it before continuing."
-fi
+# Runpod network volumes are quota-enforced on shared storage: df reports the backing
+# cluster, not your allocation, so the only meaningful number is what you use. The depot
+# tarball is ~6-8 GB; keep an eye on it against the volume size you rented.
+_vol_used=$(du -sh "$VOL" 2>/dev/null | cut -f1 || echo '?')
+echo "    volume in use: ${_vol_used} (df cannot see the quota of a network volume)"
 
 # ------------------------------------------------------ system packages ----
 # These live on the container disk and are lost on every new pod. Cheap — and only
@@ -113,7 +111,10 @@ export JULIAUP_DEPOT_PATH=/workspace/juliaup
 # ~350 MB/s but ~5 ms per small-file create, which turns Pkg.add/precompile into hours.
 # It is persisted across pods as ONE tarball on the volume (/workspace/julia_depot.tar):
 # the cold start restores it, `runpodcoldstart.sh save` refreshes it.
-export JULIA_DEPOT_PATH=/root/julia_depot
+# The TRAILING COLON matters: it appends Julia's bundled depots (the shipped stdlib
+# pkgimages under <julia>/share/julia). Without it the stdlibs are recompiled into our
+# depot (Pkg alone ~75 s, then StyledStrings, Dates, ...), which is what a bare value did.
+export JULIA_DEPOT_PATH=/root/julia_depot:
 export PATH="/workspace/juliaup/bin:$HOME/.local/bin:$PATH"
 # If package/artifact downloads crawl, try a region-specific Pkg server, e.g.
 #   export JULIA_PKG_SERVER=https://us-east.pkg.julialang.org   (or eu-central, ...)
@@ -164,12 +165,18 @@ export OPENBLAS_NUM_THREADS=$JULIA_NUM_THREADS
 # is the HOST's core count (the cgroup quota is not in the affinity mask), so 8 Julia
 # threads got 32 FFTW pthreads on an 8-vCPU slice. Pin it to the Julia thread count.
 export LUNA_FFTW_THREADS=$JULIA_NUM_THREADS
+# Same container lie, worse consequence: Pkg sizes its precompile worker pool from
+# Sys.CPU_THREADS + 1, i.e. ~190 concurrent Julia processes on a 24-vCPU slice — the
+# whole environment then precompiles at a crawl (an hour-long cold start). Cap it at the
+# cgroup CPU count.
+export JULIA_NUM_PRECOMPILE_TASKS=$POD_CPUS
 
-# Precompile caches are keyed on CPU target. 'generic' keeps the cache valid
-# when you land on a host with a different CPU, at the cost of some host-side
-# performance. Your hot loops are on the GPU so this is the right trade.
-# Delete this line if you find CPU-side code (FFTW, setup) is too slow.
-export JULIA_CPU_TARGET=generic
+# Package images are only loadable on a CPU that supports the features they were
+# compiled for. Unset (= native) makes the depot tarball specific to the CPU of the pod
+# that built it — a pod with a different CPU recompiles everything (~15 min); 'generic'
+# is portable but slow host code. Julia's own x86-64 multi-target string gives both:
+# a generic clone plus optimised ones, exactly what the shipped stdlib images use.
+export JULIA_CPU_TARGET="generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1)"
 
 # Claude Code: config + credentials on the volume, so you log in once ever.
 export CLAUDE_CONFIG_DIR=/workspace/claude
@@ -366,7 +373,7 @@ julia --project="$DEV" -e '
 step "Ready"
 _depot_gb=$(du -sBG "$DEPOT_LOCAL" 2>/dev/null | tr -dc '0-9' || echo '?')
 _depot_files=$(find "$DEPOT_LOCAL" 2>/dev/null | wc -l || echo '?')
-_vol_used=$(df -h --output=used,size,pcent "$VOL" 2>/dev/null | tail -1 || echo '?')
+_vol_used=$(du -sh "$VOL" 2>/dev/null | cut -f1 || echo '?')
 if [ "${POD_MEM_GB:-0}" -gt 0 ]; then
     _mem_str="${POD_MEM_GB} GB"
 else
@@ -382,7 +389,8 @@ cat <<EOF
 
   host slice   ${POD_CPUS} vCPU (cgroup), ${_mem_str} RAM
                JULIA_NUM_THREADS=${JULIA_NUM_THREADS}  (LUNA_THREADS= to override)
-  volume       ${_vol_used}  used/size/pct
+               JULIA_NUM_PRECOMPILE_TASKS=${JULIA_NUM_PRECOMPILE_TASKS}
+  volume       ${_vol_used} in use (quota not visible to df)
   depot        ${_depot_gb} GB across ${_depot_files} files (container disk;
                persist with: bash $0 save   → $DEPOT_TAR)
 
