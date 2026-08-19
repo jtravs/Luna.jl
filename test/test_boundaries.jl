@@ -2,9 +2,10 @@ import Test: @test, @testset, @test_throws
 import FFTW
 import LinearAlgebra: mul!, ldiv!
 import Luna
-import Luna: Grid, Boundaries, Maths, RK45, Output
+import Luna: Grid, Boundaries, Maths, RK45, Output, Processing, PhysData
 import Luna.Interface: prop_capillary_args
 import Logging
+import Random: MersenneTwister
 
 #= These tests cover the rate-based absorbing boundaries. The property they exist to
    protect is that the absorption depends on the propagation *distance* and not on how many
@@ -207,6 +208,77 @@ end
 @info "tolerance sensitivity: :rate $rate, :legacy $legacy"
 @test rate < 1e-5
 @test legacy > 20*rate # the mechanism is genuinely exercised
+end
+
+@testset "temporal walk-off" begin
+#= The temporal absorber's job is to destroy light that walks off the end of the time
+   window *before* it wraps around and aliases onto the rest of the field. Nothing above
+   exercises that: the temporal tests use a zero linear operator, so nothing moves.
+
+   Use the case where this actually bites in practice -- a deep-UV resonant dispersive wave
+   in a deliberately small time window. The DW is emitted at ~230 nm around z = 0.2 m and
+   then walks away from the pump at the group-delay difference of the fibre (~100 fs/m
+   here), so in a 171 fs window it leaves the flat region at ~0.7 m and reaches the window
+   edge at ~1.0 m, i.e. halfway along the 2 m fibre. =#
+RDWBAND = (200e-9, 260e-9)
+ZMAX = 2.0
+
+function walkoff_arm(boundary; max_dz=ZMAX/2, rtol=1e-6)
+    Eω, grid, linop, transform, FT, output = prop_capillary_args(
+        50e-6, ZMAX, :Ar, 0.4; λ0=800e-9, energy=29e-6, τfwhm=10e-15,
+        λlims=(150e-9, 4e-6), trange=100e-15, saveN=51, plasma=false, boundary,
+        rng=MersenneTwister(1234))
+    Luna.run(Eω, grid, linop, transform, FT, output; rtol, boundary, max_dz)
+    output
+end
+
+#= Energy in the DW band, via a hard 0/1 spectral mask. Processing.energy's tuple bandpass
+   picks its taper width from the frequency spacing, which differs between grids; a hard
+   mask is exact by Parseval and comparable across everything here. =#
+function bandE(output)
+    grid = Processing.makegrid(output)
+    mask = float.(RDWBAND[1] .< PhysData.wlfreq.(grid.ω) .< RDWBAND[2])
+    Processing.energy(grid, output["Eω"]; bandpass=mask)
+end
+
+# power in the leading half of the window, where anything that wraps around must appear
+function leadingpower(output)
+    t, Et = Processing.getEt(output, ZMAX; bandpass=(RDWBAND..., 1e14))
+    maximum(abs2.(Et[t .< -30e-15, 1]))
+end
+
+rate, legacy, none, ratefine, legacyfine = Logging.with_logger(Logging.NullLogger()) do
+    (walkoff_arm(:rate), walkoff_arm(:legacy), walkoff_arm(:none),
+     walkoff_arm(:rate; max_dz=ZMAX/4000), walkoff_arm(:legacy; max_dz=ZMAX/4000))
+end
+
+z = rate["z"]
+i0 = argmin(abs.(z .- 0.5)) # before the DW has reached the taper
+Erate, Elegacy, Enone = bandE(rate), bandE(legacy), bandE(none)
+
+# the absorber does nothing at all until the pulse gets there
+@test isapprox(Erate[i0], Enone[i0]; rtol=1e-2)
+
+# ... and then removes the DW: two orders of magnitude, where :none keeps most of it
+@test Erate[end]/Erate[i0] < 1e-2
+@test Elegacy[end]/Elegacy[i0] < 1e-2
+@test Enone[end]/Enone[i0] > 0.5
+
+#= What :none keeps is not physics, it is wraparound: with no absorber the DW reappears at
+   the *front* of the time window. That is the aliasing the boundary exists to prevent. =#
+@test leadingpower(none) > 100*leadingpower(rate)
+@test leadingpower(none) > 100*leadingpower(legacy)
+
+#= The point of rate semantics: how much is absorbed depends on the distance travelled, not
+   on how the solver chose to subdivide it. Same rtol in both arms -- so the same local
+   error control and the same physics -- with max_dz forcing ~3.5x as many steps, hence
+   3.5x as many applications of the historical window. =#
+dr = abs(bandE(ratefine)[end] - Erate[end])/Erate[end]
+dl = abs(bandE(legacyfine)[end] - Elegacy[end])/Elegacy[end]
+@info "walk-off, step-count sensitivity of the surviving DW: :rate $dr, :legacy $dl"
+@test dr < 0.05
+@test dl > 0.1        # the mechanism is genuinely exercised
+@test dl > 10*dr
 end
 
 @testset "run interface" begin
