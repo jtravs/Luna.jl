@@ -685,10 +685,16 @@ if have_jlarrays
         function propagate(arraytype; stats_period=1, kwargs...)
             Eω, transform, FT = make(arraytype, Ionisation.IonRateADK(:Ar))
             linop = LinearOps.make_linop(grid, modes, λ0)
-            statsfun = Stats.default(grid, Eω, modes, linop, transform; gas=:Ar)
-            # the default collector takes the device array itself (and copies what it needs
-            # to the host), so HostOutput does not need to copy the state on every step
+            statsfun = Stats.default(grid, Eω, modes, linop, transform; gas=:Ar,
+                                     error_window=(200e-9, 400e-9), windows=[(300e-9, 900e-9)])
+            # the default collector takes the device array itself, so HostOutput does not
+            # copy the state on every step — and with the default statistics all being
+            # device-capable it keeps no host copy at all
             @test Luna.device_stats(statsfun)
+            if arraytype !== Array
+                @test all(Stats.device_capable, statsfun.funcs)
+                @test !statsfun.hostneeded
+            end
             stats_period > 1 && (statsfun = Output.PeriodicStats(statsfun, stats_period))
             output = Output.MemoryOutput(0, grid.zmax, 3, statsfun)
             @test !Luna.needs_host_y(output)
@@ -701,11 +707,27 @@ if have_jlarrays
         od = propagate(JLArray; allow_device_stats=true)
         @test od["Eω"] isa Array
         @test relerr(od["Eω"], oh["Eω"]) < 1e-10
-        @test isapprox(od["stats"]["energy"], oh["stats"]["energy"]; rtol=1e-8)
-        @test isapprox(od["stats"]["electrondensity"], oh["stats"]["electrondensity"];
-                       rtol=1e-6)
-        @test isapprox(od["stats"]["mode_reconstruction_error"],
-                       oh["stats"]["mode_reconstruction_error"]; rtol=1e-6)
+        # every default statistic computed on the device agrees with the host evaluation
+        # (the arithmetic differs in summation order and in the on-axis reference of the
+        # mode-error statistic, which uses the batched responses on a device)
+        # (the two propagations are separate JLArray/host runs whose step sizes agree only
+        # to ~1e-9, so step-indexed statistics agree to ~1e-8; a wrong device statistic
+        # would be off by O(1))
+        tols = Dict("energy" => 1e-6, "energy_300.00nm_900.00nm" => 1e-6, "ω0" => 1e-6,
+                    "peakpower" => 1e-6, "peakpower_allmodes" => 1e-6, "peakintensity" => 1e-6,
+                    "fwhm_t_min" => 1e-6, "fwhm_t_max" => 1e-6, "fwhm_t_min_allmodes" => 1e-6,
+                    "fwhm_t_max_allmodes" => 1e-6, "fwhm_r" => 1e-6, "electrondensity" => 1e-6,
+                    "peak_ionisation_rate" => 1e-6, "mode_reconstruction_error" => 1e-6,
+                    "transverse_integral_error_abs" => 1e-6, "transverse_integral_error_rel" => 1e-6,
+                    "transverse_integral_error_rel_window" => 1e-6, "transverse_points" => 0,
+                    "density" => 0, "pressure" => 0, "zdw" => 0, "z" => 1e-6, "dz" => 1e-4)
+        for (k, tol) in tols
+            @test haskey(od["stats"], k) && haskey(oh["stats"], k)
+            a, b = od["stats"][k], oh["stats"][k]
+            nanmask = isnan.(a) .& isnan.(b) # fwhm of an empty mode is NaN on both
+            @test all(nanmask .| isapprox.(a, b; rtol=tol, atol=0))
+        end
+        @test Set(keys(od["stats"])) == Set(keys(oh["stats"]))
         # statistics every third step: same propagation, a subset of the recorded points
         op = propagate(JLArray; stats_period=3, allow_device_stats=true)
         @test relerr(op["Eω"], oh["Eω"]) < 1e-10

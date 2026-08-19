@@ -349,13 +349,25 @@ closure, which `RK45.make_prop!` evaluates into a host buffer and uploads per st
 fields come back through `Luna.HostOutput`.
 
 **Statistics on a device run.** `Stats.collect_stats` returns a `StatsCollector` which
-accepts the *device* array itself (`Luna.device_stats`): it copies it into its own host
-buffer for the ordinary host statistics (the modal state is small: 0.26 MB at nt=8192)
-and hands the device array to statistics flagged `Stats.wants_state` (a `StateStat`);
-`Stats.mode_reconstruction_error(::TransModalFixed)` is one and evaluates the transform on
-the device state directly, so nothing round-trips. `Output.PeriodicStats(statsfun, k)`
-(`prop_capillary(...; stats_period=k)`) evaluates the statistics only every ``k``-th
-accepted step. `prop_capillary` passes `allow_device_stats=true` for the modal case.
+accepts the *device* array itself (`Luna.device_stats`). The analytic field is computed on
+the device (`plan_analytic` device methods), and every default statistic is
+**device-capable** (`Stats.device_capable`): `ω0`, `energy`, `energy_λ` (weighted
+reductions; the `RealGrid` energy functional's Simpson weights are reconstructed and
+verified against `Fields.energyfuncs` at construction), `peakpower`, `peakintensity` (the
+on-axis field is one small GEMM against the cached on-axis mode matrix, `OnAxisModes`),
+`fwhm_t` (|E|² formed on the device and copied down for the host crossing search — the only
+remaining per-step copy, nt×M reals), `fwhm_r` (now, on both backends, from the ``M×M`` mode
+coherency matrix ``G = EᴴE`` — one GEMM — with the half-maximum root found on the host by
+evaluating only the mode fields, instead of re-synthesising the spectrum at every trial
+radius), `electrondensity` (on-axis field GEMM, the device ionisation rate of the
+transform's batched plasma response, one reduction for the final integral) and
+`mode_reconstruction_error` (`wants_state`: the transform on the device state, the on-axis
+reference with its own batched responses on the device, all norms as device reductions).
+Field-free statistics (density, pressure, ZDW, …) are wrapped in `FieldFree`. Only if a
+user-supplied (host-only) statistic is present does the collector also keep a host copy
+of the state. `Output.PeriodicStats(statsfun, k)` (`prop_capillary(...; stats_period=k)`)
+evaluates the statistics only every ``k``-th accepted step. `prop_capillary` passes
+`allow_device_stats=true` for the modal case.
 
 **Lazy loading and world age.** `arraytype=:cuda` (`Luna.resolve_arraytype`) loads
 CUDA.jl with `Base.require` so that a scan script can request a GPU without importing
@@ -964,11 +976,12 @@ the record.
   a CPU. Loop synthesis GEMM → responses → projection GEMM over column blocks (the FFTs are
   on the modal side and unaffected). Effort M. (The fused CPU column above removes most of
   the CPU-side buffers.)
-- [ ] **P1 — Modal statistics on device.** Effort M (~300–400 lines in `Stats.jl`, a
-  device method per field-touching statistic returning scalars). Measured on the H200
-  (§5.6): the default statistics cost +9 ms/step on `vuv` and ~50 ms/step on `ctc` — several
-  times the GPU work of a step — so device runs must use lean statistics today; making the
-  defaults device-native removes that constraint.
+- [x] **P1 — Modal statistics on device.** Done (§3.7): all default statistics run on the
+  device state (weighted reductions, on-axis GEMMs, the device rate, device FFT for the
+  analytic field; `fwhm_t` copies |E|² down for the host crossing search; `fwhm_r` via the
+  mode coherency matrix on both backends), no host copy of the state unless a user
+  statistic needs one. Was: +9 ms/step on `vuv`, ~50 ms/step on `ctc` on the H200. To be
+  measured on the next GPU run (the "default stats" rows of the production timing).
 - [ ] **P1 — GPU parameter scans** (§5.5, §5.6): the H200 rehearsal showed one process at
   12.7 s/point (400 points ≈ 85 min) and *no* gain from four processes sharing the GPU
   (host-bound). Next: the batched-state propagation of all points at once (per-column
