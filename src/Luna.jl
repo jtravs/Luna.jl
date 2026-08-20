@@ -87,7 +87,7 @@ makefilename = Scans.makefilename
 addvariable! = Scans.addvariable!
 
 export Utils, Scans, Output, Maths, PhysData, Grid, RK45, Modes, Capillary, RectModes,
-       Nonlinear, Ionisation, NonlinearRHS, LinearOps, Stats, Polarisation,
+       Nonlinear, Ionisation, NonlinearRHS, LinearOps, Boundaries, Stats, Polarisation,
        Tools, Plotting, Raman, Antiresonant, Fields, Processing, Interface, SFA,
        prop_capillary, prop_gnlse, Pulses, Scan, runscan, makefilename, addvariable!,
        StepIndexFibre, SimpleFibre

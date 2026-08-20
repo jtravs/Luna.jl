@@ -1,3 +1,14 @@
+"""
+    NonlinearRHS
+
+The right-hand side of the propagation equation: transforms which take the frequency-domain
+field `E(ω)` to the nonlinear polarisation `Pₙₗ(ω)` for each modal decomposition
+`Luna` supports.
+
+Each transform also band-limits `Pₙₗ` to the simulation band. That is part of the
+definition of the equation being solved and is separate from the absorbing boundaries
+applied to the field itself, which live in [`Boundaries`](@ref Luna.Boundaries).
+"""
 module NonlinearRHS
 import FFTW
 import Hankel
