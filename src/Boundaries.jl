@@ -5,11 +5,12 @@ Absorbing boundaries with **rate semantics**.
 
 Luna's spectral and temporal absorbing boundaries used to be applied by multiplying the
 solution by a fixed profile `W` after every accepted step. That makes the cumulative
-absorption `W^N`, where `N` is the number of steps the adaptive controller happens to
-take — so the answer depended on `rtol` and never converged. (With the step counts of a
-typical run, `W^N` is not a taper at all: it is a brick wall at the edge of the flat
-region, which is why the old scheme eroded genuine spectral wings.) An absorbing boundary
-must instead have an absorption *coefficient per unit propagation distance* `α`, so that
+absorption `W^N`, where `N` is the number of steps the adaptive controller happens to take,
+so the answer depended on `rtol`. Tightening the tolerance does not converge on the taper
+the profile describes: at the step counts of a typical run `W^N` is not a taper at all but a
+brick wall at the edge of the flat region, and that brick wall is the limit it approaches.
+It is why the old scheme eroded genuine spectral wings. An absorbing boundary must instead
+have an absorption *coefficient per unit propagation distance* `α`, so that
 traversing a distance `L` attenuates by a fixed factor however that path is subdivided.
 
 `α` here is a **power** absorption coefficient, as everywhere else in Luna (`Modes.α`,
@@ -31,13 +32,32 @@ machinery can do *exactly*:
 - `α_t` is diagonal in `t`, so it cannot ride the propagator. It is applied as an
   exponential split-step factor `exp(-α_t Δz/2)` in `Luna.run`'s `stepfun`. Those factors
   telescope exactly to `exp(-α_t L/2)` regardless of the step layout, so the *total*
-  absorption is still a rate. (This is a first-order Lie splitting, but the commutator is
-  supported only inside the collar, where the field is being destroyed anyway.)
+  absorption is still a rate. Interleaving the two parts this way would only be exact if
+  they commuted, which they do not; the resulting error is first order in the step size and
+  is confined to the collar, where the field is being destroyed anyway.
 
 The *hard* band limit — the 0/1 part of the spectral window — is not applied here at all.
 `NonlinearRHS` zeroes the nonlinear polarisation outside `grid.sidx` and the linear operator
 is zero there, so once the field has been band-limited at the start of `Luna.run` nothing
 can put anything back.
+
+# Step size
+
+`Luna.run` caps `max_dz` (and `init_dz`) at the reference length `ℓ`. This is not about
+accuracy, it is about not confusing the step-size controller.
+
+RK45 works in the interaction picture, and `fbar!` back-propagates the right-hand side with
+`exp(-linop Δz)` — which, for a linop that decays, means it *amplifies* by `exp(+α Δz/2)`.
+The elements it amplifies most are at the band edge, where the absorber is deepest. Those
+elements are not independent of the rest, because `RK45.weaknorm` sums the error estimate
+over every element and divides by the global norm of the solution, so an amplified band-edge
+element can come to dominate the error estimate and drive the controller into repeated
+rejections.
+
+What saves it is that the nonlinear drive at the band edge is itself proportional to
+`ωwin = exp(-α ℓ/2)`. The amplified drive therefore scales as `exp(α(Δz - ℓ)/2)`, which
+stays below 1 for any `α` as long as `Δz ≤ ℓ`. Hence the cap, which costs nothing in
+practice: it requires at least `boundary_N` steps, and real runs take far more.
 
 See also `Luna.run`'s `boundary` keyword argument.
 """
@@ -55,25 +75,14 @@ const DEFAULT_N = 20
 "Default minimum temporal collar width, as a fraction of the full time window."
 const DEFAULT_TCOLLAR = 0.05
 
-#= Cap on α*ℓ, i.e. on the depth of the absorber over one reference length. α is a power
-   coefficient, so the field is attenuated by at most exp(-MAX_αℓ/2) over ℓ.
+"""
+Cap on `α*ℓ`, the depth of the absorber over one reference length.
 
-   RK45's `fbar!` back-propagates the RHS with exp(-linop*Δz), i.e. it *amplifies* by
-   exp(+α Δz) for a decaying linop. Two things follow.
-
-   First, α must be finite: the tapers reach exactly 0 at the band edge, and Inf*0 = NaN.
-
-   Second — and this is the constraint that actually binds — the amplified elements must
-   not pollute the step-size controller. `RK45.weaknorm` sums abs2(yerr) over *all*
-   elements and divides by the global ‖y‖, and it is evaluated in the interaction-picture
-   frame, before `prop!_maybe`. So an amplified band-edge element is not independent of the
-   rest: it can dominate the error estimate and drive the controller into repeated
-   rejections. The saving grace is that the nonlinear drive is itself ∝ ωwin = exp(-α ℓ),
-   so the amplified drive scales as exp(α(Δz - ℓ)) — bounded by 1 as long as Δz ≤ ℓ, for
-   any α. `Luna.run` therefore caps `max_dz` (and `init_dz`) at ℓ, and this constant then
-   only has to keep exp(α Δz/2) ≤ exp(MAX_αℓ/2) finite. exp(30) ≈ 1e13, and the
-   corresponding floor on the profile, exp(-30) ≈ 1e-13, is far below anything physically
-   meaningful. =#
+Two jobs. It keeps `α` finite at all — the tapers reach exactly zero at the band edge, and
+`Inf*0` is `NaN` — and, given the step-size cap described in the module docstring, it keeps
+`exp(α Δz/2)` finite in the interaction picture. At 60 the field is attenuated by at most
+`exp(-30) ≈ 1e-13` over one reference length, far below anything physically meaningful.
+"""
 const MAX_αℓ = 60.0
 
 """
@@ -375,11 +384,9 @@ clearer to hand them back than to mutate them from inside a branch:
 
 - `linop` gains the spectral absorber, which the interaction-picture propagator then applies
   exactly (see [`addloss`](@ref)).
-- `max_dz` is capped at the reference length `ℓ`, and `init_dz` with it. RK45's `fbar!`
-  amplifies the RHS by `exp(+α Δz/2)` while the nonlinear drive it acts on is ∝ `exp(-α ℓ/2)`,
-  so the amplified band-edge elements stay bounded — and stay small in `weaknorm`'s global
-  sum — only while `Δz ≤ ℓ`. This costs nothing in practice: it requires at least `N` steps
-  and real runs take far more.
+- `max_dz` is capped at the reference length `ℓ`, and `init_dz` with it, so that the
+  step-size controller is not thrown by the amplified band-edge elements the interaction
+  picture produces. See "Step size" in the module docstring.
 """
 function setup(boundary, grid, linop, Eω, Et, FT, output, z0, max_dz, init_dz;
                N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR)
