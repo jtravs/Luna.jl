@@ -74,8 +74,25 @@ const MAX_αℓ = 30.0
     reflength(grid, N, ℓ)
 
 The absorber reference length in metres. `ℓ` wins if given; otherwise `zmax/N`.
+
+Both are validated here so that every call site is protected. A non-positive length is not
+merely useless, it is silently destructive: `ℓ == 0` makes [`rate`](@ref) evaluate `0/0` in
+the interior and fills the grid with NaN, and `ℓ < 0` inverts the clamp bounds so that
+`clamp` returns the (negative) upper bound everywhere — an absorber which amplifies, over
+the whole grid rather than just the collar. To switch the absorbers off, use
+`boundary=:none`.
 """
-reflength(grid, N, ℓ) = isnothing(ℓ) ? grid.zmax/N : float(ℓ)
+function reflength(grid, N, ℓ)
+    if isnothing(ℓ)
+        (N > 0 && isfinite(N)) || error(
+            "boundary_N must be finite and positive, got $N")
+        grid.zmax/N
+    else
+        (ℓ > 0 && isfinite(ℓ)) || error(
+            "boundary_length must be finite and positive, got $ℓ")
+        float(ℓ)
+    end
+end
 
 """
     rate(W, ℓ)

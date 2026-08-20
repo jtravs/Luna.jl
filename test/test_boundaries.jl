@@ -1,7 +1,7 @@
+using Luna
 import Test: @test, @testset, @test_throws
 import FFTW
 import LinearAlgebra: mul!, ldiv!
-import Luna
 import Luna: Grid, Boundaries, Maths, RK45, Output, Processing, PhysData
 import Luna.Interface: prop_capillary_args
 import Logging
@@ -282,12 +282,23 @@ dl = abs(bandE(legacyfine)[end] - Elegacy[end])/Elegacy[end]
 end
 
 @testset "run interface" begin
+grid = Grid.EnvGrid(0.1, 800e-9, (400e-9, 2e-6), 1e-12)
+
 @test_throws ErrorException Logging.with_logger(Logging.NullLogger()) do
-    grid = Grid.EnvGrid(0.1, 800e-9, (400e-9, 2e-6), 1e-12)
     FT = FFTW.plan_fft(zeros(ComplexF64, length(grid.t)))
     Luna.run(zeros(ComplexF64, length(grid.ω)), grid,
              zeros(ComplexF64, length(grid.ω)), (nl, Eω, z) -> fill!(nl, 0), FT,
              Output.MemoryOutput(0, grid.zmax, 3); boundary=:nonsense)
+end
+
+#= A non-positive reference length is silently destructive rather than merely useless -- it
+   NaNs the whole grid or turns the absorber into a gain -- so reject it at the one place
+   every call site goes through. =#
+@test Boundaries.reflength(grid, 20, nothing) == grid.zmax/20
+@test Boundaries.reflength(grid, 20, 0.05) == 0.05
+for bad in (0, -1, Inf, NaN)
+    @test_throws ErrorException Boundaries.reflength(grid, bad, nothing)
+    @test_throws ErrorException Boundaries.reflength(grid, 20, bad)
 end
 
 # the chosen mode is recorded, so a saved run can be reproduced
