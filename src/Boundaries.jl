@@ -9,26 +9,28 @@ absorption `W^N`, where `N` is the number of steps the adaptive controller happe
 take — so the answer depended on `rtol` and never converged. (With the step counts of a
 typical run, `W^N` is not a taper at all: it is a brick wall at the edge of the flat
 region, which is why the old scheme eroded genuine spectral wings.) An absorbing boundary
-must instead have an absorption *rate per unit propagation distance* `α`, so that
-traversing a distance `L` attenuates by `exp(-αL)` however that path is subdivided.
+must instead have an absorption *coefficient per unit propagation distance* `α`, so that
+traversing a distance `L` attenuates by a fixed factor however that path is subdivided.
 
-This module turns the historical taper profiles into rates,
+`α` here is a **power** absorption coefficient, as everywhere else in Luna (`Modes.α`,
+`LinearOps`): power falls as `exp(-αL)`, the field as `exp(-αL/2)`, and a linear operator
+carries `-α/2`. This module turns the historical taper profiles into such coefficients,
 
-    α(x) = -log(W(x)) / ℓ
+    α(x) = -2 log(W(x)) / ℓ
 
-where `ℓ` is a reference length: propagating through `ℓ` attenuates the field by exactly
-the historical profile once. `ℓ` defaults to `zmax/N`, i.e. "the historical window is
-applied `N` times over the whole propagation".
+where `ℓ` is a reference length: propagating through `ℓ` attenuates the *field* by exactly
+the historical profile once, since the profiles were applied to the field. `ℓ` defaults to
+`zmax/N`, i.e. "the historical window is applied `N` times over the whole propagation".
 
 The two rates are then applied by different mechanisms, chosen by what the existing
 machinery can do *exactly*:
 
 - `α_ω` is diagonal in ω, so it is folded into the linear operator ([`addloss`](@ref)) and
-  the interaction-picture propagator applies `exp(-α_ω Δz)` exactly, for whatever
+  the interaction-picture propagator applies `exp(-α_ω Δz/2)` exactly, for whatever
   sub-interval the stepper uses, at no extra cost, and consistently with dense output.
 - `α_t` is diagonal in `t`, so it cannot ride the propagator. It is applied as an
-  exponential split-step factor `exp(-α_t Δz)` in `Luna.run`'s `stepfun`. Those factors
-  telescope exactly to `exp(-α_t L)` regardless of the step layout, so the *total*
+  exponential split-step factor `exp(-α_t Δz/2)` in `Luna.run`'s `stepfun`. Those factors
+  telescope exactly to `exp(-α_t L/2)` regardless of the step layout, so the *total*
   absorption is still a rate. (This is a first-order Lie splitting, but the commutator is
   supported only inside the collar, where the field is being destroyed anyway.)
 
@@ -51,7 +53,8 @@ const DEFAULT_N = 20
 "Default minimum temporal collar width, as a fraction of the full time window."
 const DEFAULT_TCOLLAR = 0.05
 
-#= Cap on α*ℓ, i.e. on the depth of the absorber over one reference length.
+#= Cap on α*ℓ, i.e. on the depth of the absorber over one reference length. α is a power
+   coefficient, so the field is attenuated by at most exp(-MAX_αℓ/2) over ℓ.
 
    RK45's `fbar!` back-propagates the RHS with exp(-linop*Δz), i.e. it *amplifies* by
    exp(+α Δz) for a decaying linop. Two things follow.
@@ -66,9 +69,10 @@ const DEFAULT_TCOLLAR = 0.05
    rejections. The saving grace is that the nonlinear drive is itself ∝ ωwin = exp(-α ℓ),
    so the amplified drive scales as exp(α(Δz - ℓ)) — bounded by 1 as long as Δz ≤ ℓ, for
    any α. `Luna.run` therefore caps `max_dz` (and `init_dz`) at ℓ, and this constant then
-   only has to keep exp(α Δz) ≤ exp(MAX_αℓ) finite. exp(30) ≈ 1e13, and the corresponding
-   floor on the profile, exp(-30) ≈ 1e-13, is far below anything physically meaningful. =#
-const MAX_αℓ = 30.0
+   only has to keep exp(α Δz/2) ≤ exp(MAX_αℓ/2) finite. exp(30) ≈ 1e13, and the
+   corresponding floor on the profile, exp(-30) ≈ 1e-13, is far below anything physically
+   meaningful. =#
+const MAX_αℓ = 60.0
 
 """
     reflength(grid, N, ℓ)
@@ -98,16 +102,17 @@ end
     rate(W, ℓ)
 
 Convert an apodisation profile `W ∈ [0, 1]` (1 in the interior, falling to 0 at the
-boundary) into a field-amplitude absorption rate in 1/m, such that propagating through `ℓ`
-attenuates the field by `W`. Exactly zero where `W == 1`, and clamped at
-`MAX_αℓ/ℓ` so that `W == 0` gives a large but finite rate.
+boundary) into a power absorption coefficient in 1/m, such that propagating through `ℓ`
+attenuates the *field* by `W` — that is, `exp(-αℓ/2) == W`, since the historical profiles
+multiplied the field. Exactly zero where `W == 1`, and clamped at `MAX_αℓ/ℓ` so that
+`W == 0` gives a large but finite coefficient.
 """
-rate(W, ℓ) = clamp.(.-log.(W) ./ ℓ, 0.0, MAX_αℓ/ℓ)
+rate(W, ℓ) = clamp.(.-2 .* log.(W) ./ ℓ, 0.0, MAX_αℓ/ℓ)
 
 """
     spectral_rate(grid; N=DEFAULT_N, ℓ=nothing)
 
-Field-amplitude absorption rate in 1/m across the frequency grid, derived from
+Power absorption coefficient in 1/m across the frequency grid, derived from
 `grid.ωwin`. Exactly zero outside `grid.sidx`, where the linear operator is zero by
 construction and the hard mask [`ωmask`](@ref) applies instead.
 """
@@ -159,7 +164,7 @@ end
 """
     temporal_rate(grid; N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR)
 
-Field-amplitude absorption rate in 1/m across the time grid.
+Power absorption coefficient in 1/m across the time grid.
 """
 temporal_rate(grid; N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR) =
     rate(tprofile(grid; collar), reflength(grid, N, ℓ))
@@ -180,10 +185,11 @@ the polarisation, and the linear operator is zero there — nothing else removes
 """
     addloss(linop, α)
 
-Add the field-amplitude absorption rate `α` (a vector over ω) to a linear operator,
-returning a linop of the same kind, so that `RK45.make_prop!` dispatch and
-`Luna.linoptype` are unchanged. Handles both forms Luna uses: a materialised
-`AbstractArray` and a closure `linop!(out, z)`.
+Add the power absorption coefficient `α` (a vector over ω) to a linear operator as
+`-α/2`, which is how loss enters a linop everywhere in Luna (see `LinearOps`). Returns a
+linop of the same kind, so that `RK45.make_prop!` dispatch and `Luna.linoptype` are
+unchanged. Handles both forms Luna uses: a materialised `AbstractArray` and a closure
+`linop!(out, z)`.
 
 ω is axis 1 for every linop shape — `(Nω,)` mode-averaged, `(Nω, nmodes)` multimode,
 `(Nω, q.N)` radial, `(Nω, Nky, Nkx)` free-space — so one broadcast covers all of them.
@@ -193,12 +199,12 @@ The array method **allocates a copy** rather than subtracting in place:
 identical fibre, i.e. the same linop is deliberately reused across `Luna.run` calls, and an
 in-place subtraction would compound the absorber on every reuse.
 """
-addloss(linop::AbstractArray, α) = linop .- α
+addloss(linop::AbstractArray, α) = linop .- α./2
 
 function addloss(linop!, α)
     function linop_absorbing!(out, z)
         linop!(out, z)
-        out .-= α
+        out .-= α./2
         out
     end
 end
@@ -243,10 +249,12 @@ function walkoff_check(grid, L, αt, collarwidth; quantile=0.95, threshold=1e-2)
     τq = τ[clamp(ceil(Int, quantile*length(τ)), 1, length(τ))]
     τq > 0 || return nothing
     zcross = collarwidth/τq # distance to walk across the collar
-    # mean rate through the collar, i.e. what such a component actually experiences
+    #= Mean coefficient through the collar, i.e. what such a component actually
+       experiences. αt is a power coefficient and `threshold` is a field retention, hence
+       the factor of 2. =#
     collar = filter(>(0), αt)
     isempty(collar) && return nothing
-    att = exp(-sum(collar)/length(collar)*zcross)
+    att = exp(-sum(collar)/length(collar)*zcross/2)
     if att > threshold
         Logging.@warn(@sprintf(
             "Temporal absorbing boundary may be too weak: a component walking off at \

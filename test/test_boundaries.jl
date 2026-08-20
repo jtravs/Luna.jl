@@ -21,9 +21,10 @@ grid = Grid.RealGrid(0.3, 800e-9, (150e-9, 4e-6), 1e-12)
 @test all(α .>= 0)
 @test all(α[grid.ωwin .== 1] .== 0)
 @test maximum(α) <= Boundaries.MAX_αℓ/ℓ*(1 + 1e-12)
-# the rate reproduces the profile over one reference length, where it is not clamped
-unclamped = grid.ωwin .> exp(-Boundaries.MAX_αℓ)
-@test isapprox(exp.(-α[unclamped].*ℓ), grid.ωwin[unclamped]; rtol=1e-12)
+#= α is a power coefficient, so the field over one reference length goes as exp(-αℓ/2) and
+   that is what must reproduce the profile, where it is not clamped. =#
+unclamped = grid.ωwin .> exp(-Boundaries.MAX_αℓ/2)
+@test isapprox(exp.(-α[unclamped].*ℓ./2), grid.ωwin[unclamped]; rtol=1e-12)
 
 #= Telescoping: this is the whole point. Applying exp(-α dz) over any partition of [0, L]
    gives exactly exp(-α L), so the absorption cannot depend on the step layout. =#
@@ -31,7 +32,7 @@ i = findfirst(x -> 0 < x < 1, grid.ωwin)
 for n in (3, 17, 200)
     dzs = rand(n)
     dzs .*= 0.3/sum(dzs)
-    @test isapprox(prod(exp.(-α[i].*dzs)), exp(-α[i]*0.3); rtol=1e-12)
+    @test isapprox(prod(exp.(-α[i].*dzs./2)), exp(-α[i]*0.3/2); rtol=1e-12)
 end
 
 # ωwin is exactly zero outside the simulation band, so the hard mask is grid.sidx
@@ -70,7 +71,7 @@ for sz in ((Nω,), (Nω, 4), (Nω, 8), (Nω, 8, 6))
     @test size(La) == size(L)
     @test imag(La) == imag(L) # dispersion untouched
     trailing = ntuple(_ -> 1, length(sz) - 1)
-    @test real(La)[:, trailing...] ≈ real(L)[:, trailing...] .- α
+    @test real(La)[:, trailing...] ≈ real(L)[:, trailing...] .- α./2 # linops carry -α/2
     # the closure form must agree with the array form
     Lc! = (out, z) -> (out .= L)
     Lac! = Boundaries.addloss(Lc!, α)
@@ -100,7 +101,7 @@ for n in (2, 7, 1000)
     end
     @test isapprox(many, onestep; rtol=1e-12)
 end
-@test isapprox(abs.(onestep), exp.(-α.*0.3); rtol=1e-12)
+@test isapprox(abs.(onestep), exp.(-α.*0.3./2); rtol=1e-12)
 end
 
 @testset "temporal absorber converges to the rate limit" begin
@@ -130,7 +131,7 @@ function bare_run(; kwargs...)
 end
 reldiff(a, b) = sqrt(sum(abs2, a .- b))/sqrt(sum(abs2, b))
 
-expected = (FT*((FT \ Eω0) .* exp.(-αt.*grid.zmax))) .* mask
+expected = (FT*((FT \ Eω0) .* exp.(-αt.*grid.zmax./2))) .* mask
 coarse = reldiff(bare_run(init_dz=1e-3), expected)                      # 20 steps
 fine = reldiff(bare_run(init_dz=1e-5, max_dz=grid.zmax/500), expected)  # 500 steps
 @test coarse < 1e-3

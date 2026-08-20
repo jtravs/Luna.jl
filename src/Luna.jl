@@ -486,7 +486,7 @@ function run(Eω, grid,
             Eω .*= ωmask # idempotent hard band limit, so no rate treatment needed
             if Δz > 0
                 @inbounds for i in tidcs
-                    tfac[i] = exp(-αt[i]*Δz)
+                    tfac[i] = exp(-αt[i]*Δz/2) # αt is a power coefficient, tfac hits the field
                 end
                 ldiv!(Et, FT, Eω) # NB: for a RealGrid rfft plan this destroys Eω
                 Et .*= tfac
