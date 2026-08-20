@@ -45,6 +45,7 @@ module Boundaries
 
 import ..Maths
 import ..Grid
+import LinearAlgebra: mul!, ldiv!
 import Logging
 import Printf: @sprintf
 
@@ -251,6 +252,163 @@ function walkoff_check(grid, L, αt, collarwidth; quantile=0.95, threshold=1e-2)
             τq*1e15/1e3, collarwidth*1e15, zcross*1e3, att))
     end
     nothing
+end
+
+# --------------------------------------------------------------------------- application
+
+#= The three ways a boundary can be applied per accepted step. Each is a functor rather than
+   a closure so that `setup` has one return type per mode, the state each needs is named,
+   and a new kind of boundary (the spatial windows a free-space simulation wants) is another
+   struct rather than another branch inside `Luna.run`. Each ends by calling `output`,
+   because that is what `RK45.solve` expects of a `stepfun`. =#
+
+"""
+    RateAbsorber(αt, Et, FT, output, z0)
+
+Applies the temporal absorber as `exp(-αt Δz/2)` over the distance actually travelled.
+Successive factors telescope to `exp(-αt L/2)` however the solver subdivides the
+propagation, which is the whole point of rate semantics. The spectral absorber is not here:
+it rides the propagator, having been folded into the linear operator by [`addloss`](@ref).
+"""
+struct RateAbsorber{tT, fT, oT}
+    αt::Vector{Float64}
+    tidcs::Vector{Int} # only the collar is ever ≠ 1, so only those need updating each step
+    tfac::Vector{Float64}
+    Et::tT
+    FT::fT
+    output::oT
+    zprev::Base.RefValue{Float64}
+end
+
+RateAbsorber(αt, Et, FT, output, z0) = RateAbsorber(
+    αt, findall(>(0), αt), ones(Float64, length(αt)), Et, FT, output, Ref(float(z0)))
+
+function (b::RateAbsorber)(Eω, z, dz, interpolant)
+    Δz = z - b.zprev[]
+    b.zprev[] = z
+    if Δz > 0
+        @inbounds for i in b.tidcs
+            b.tfac[i] = exp(-b.αt[i]*Δz/2) # αt is a power coefficient, tfac hits the field
+        end
+        #= An inverse real FFT overwrites its input, so between these two lines Eω holds
+           whatever FFTW left there and must not be read; the forward transform refills it. =#
+        ldiv!(b.Et, b.FT, Eω)
+        b.Et .*= b.tfac
+        mul!(Eω, b.FT, b.Et)
+    end
+    b.output(Eω, z, dz, interpolant)
+end
+
+"""
+    LegacyAbsorber(grid, Et, FT, output)
+
+The historical scheme: multiply the solution by the fixed profiles once per accepted step.
+Kept only so that results from before rate semantics can be reproduced exactly.
+"""
+struct LegacyAbsorber{gT, tT, fT, oT}
+    grid::gT
+    Et::tT
+    FT::fT
+    output::oT
+end
+
+function (b::LegacyAbsorber)(Eω, z, dz, interpolant)
+    Eω .*= b.grid.ωwin
+    ldiv!(b.Et, b.FT, Eω) # destroys Eω, see RateAbsorber
+    b.Et .*= b.grid.twin
+    mul!(Eω, b.FT, b.Et)
+    b.output(Eω, z, dz, interpolant)
+end
+
+"""
+    NoAbsorber(output)
+
+No boundary at all. The field is still band-limited once at the start of `Luna.run` and the
+nonlinear polarisation is still band-limited in `NonlinearRHS`, but nothing stops energy
+wrapping around the time window or piling up at the edge of the frequency window.
+"""
+struct NoAbsorber{oT}
+    output::oT
+end
+
+(b::NoAbsorber)(Eω, z, dz, interpolant) = b.output(Eω, z, dz, interpolant)
+
+"""
+    linop_array(linop, Eω, z)
+
+The linear operator as an array, materialising the z-dependent (closure) form at `z`. The
+linop has the same shape as the field, which is how `RK45.make_prop!` allocates its own
+buffer.
+"""
+linop_array(linop::AbstractArray, Eω, z) = linop
+function linop_array(linop!, Eω, z)
+    out = similar(Eω)
+    linop!(out, z)
+    out
+end
+
+"Report the absorbing-boundary configuration."
+function log_setup(grid, ℓ, collar)
+    w = tcollarwidth(grid, collar)
+    trange = maximum(grid.t) - minimum(grid.t)
+    #= The clamp in `rate` is not worth reporting: it bites only where the profile is
+       already below exp(-30), and even there the attenuation over the whole propagation is
+       exp(-30 zmax/ℓ). What is worth reporting is the strength the user actually chose, so
+       quote the attenuation over the propagation at the half-way point of a taper. =#
+    Logging.@info(@sprintf(
+        "Absorbing boundaries: rate-based, reference length %.3g m (%.3g applications of \
+         the window profile over %.3g m; a 50%% point of the taper attenuates by %.1e over \
+         the propagation). Temporal collar %.3g fs, %.1f%% of the time window.",
+        ℓ, grid.zmax/ℓ, grid.zmax, 0.5^(grid.zmax/ℓ), w*1e15, 100*w/trange))
+end
+
+"""
+    setup(boundary, grid, linop, Eω, Et, FT, output, z0, max_dz, init_dz;
+          N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR)
+
+Everything `Luna.run` needs in order to apply absorbing boundaries, as a named tuple
+`(; stepfun, linop, max_dz, init_dz, ℓ)`. `ℓ` is the reference length actually used, or
+`nothing` for the modes which do not have one.
+
+Three of those are returned because setting up an absorber genuinely changes them, and it is
+clearer to hand them back than to mutate them from inside a branch:
+
+- `linop` gains the spectral absorber, which the interaction-picture propagator then applies
+  exactly (see [`addloss`](@ref)).
+- `max_dz` is capped at the reference length `ℓ`, and `init_dz` with it. RK45's `fbar!`
+  amplifies the RHS by `exp(+α Δz/2)` while the nonlinear drive it acts on is ∝ `exp(-α ℓ/2)`,
+  so the amplified band-edge elements stay bounded — and stay small in `weaknorm`'s global
+  sum — only while `Δz ≤ ℓ`. This costs nothing in practice: it requires at least `N` steps
+  and real runs take far more.
+"""
+function setup(boundary, grid, linop, Eω, Et, FT, output, z0, max_dz, init_dz;
+               N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR)
+    ℓabs = nothing
+    if boundary === :rate
+        ℓabs = reflength(grid, N, ℓ)
+        if max_dz > ℓabs
+            Logging.@info(@sprintf(
+                "Reducing max_dz from %.3g m to the absorber reference length %.3g m.",
+                max_dz, ℓabs))
+            max_dz = ℓabs
+        end
+        init_dz = min(init_dz, max_dz)
+        αt = temporal_rate(grid; N, ℓ, collar)
+        walkoff_check(grid, linop_array(linop, Eω, z0), αt, tcollarwidth(grid, collar))
+        linop = addloss(linop, spectral_rate(grid; N, ℓ))
+        log_setup(grid, ℓabs, collar)
+        stepfun = RateAbsorber(αt, Et, FT, output, z0)
+    elseif boundary === :legacy
+        Logging.@warn(
+            "boundary=:legacy applies the absorbing boundaries once per accepted step, " *
+            "so the absorption depends on the step count and the result depends on rtol.")
+        stepfun = LegacyAbsorber(grid, Et, FT, output)
+    elseif boundary === :none
+        stepfun = NoAbsorber(output)
+    else
+        error("boundary must be :rate, :legacy or :none, not $boundary")
+    end
+    (; stepfun, linop, max_dz, init_dz, ℓ=ℓabs)
 end
 
 end

@@ -3,7 +3,6 @@ import FFTW
 import Hankel
 import Logging
 import LinearAlgebra: mul!, ldiv!
-import Printf: @sprintf
 Logging.disable_logging(Logging.BelowMinLevel)
 
 """
@@ -337,20 +336,6 @@ end
 linoptype(l::AbstractArray) = "constant"
 linoptype(l) = "variable"
 
-"""
-    linop_array(linop, Eω, z)
-
-The linear operator as an array, materialising the z-dependent (closure) form at `z`. The
-linop has the same shape as the field, which is how `RK45.make_prop!` allocates its own
-buffer.
-"""
-linop_array(linop::AbstractArray, Eω, z) = linop
-function linop_array(linop!, Eω, z)
-    out = similar(Eω)
-    linop!(out, z)
-    out
-end
-
 gridtype(g::Grid.RealGrid) = "field-resolved"
 gridtype(g::Grid.EnvGrid) = "envelope"
 gridtype(g) = "unknown"
@@ -378,22 +363,6 @@ sym2string(sym::Symbol) = string(sym)
 sym2string(other) = other
 
 save_modeinfo_maybe(output, t) = nothing
-
-"Report the absorbing-boundary configuration."
-function log_boundary(grid, N, ℓ, collar)
-    l = Boundaries.reflength(grid, N, ℓ)
-    w = Boundaries.tcollarwidth(grid, collar)
-    trange = maximum(grid.t) - minimum(grid.t)
-    #= The clamp in Boundaries.rate is not worth reporting: it bites only where the profile
-       is already below exp(-30), and even there the attenuation over the whole propagation
-       is exp(-30 zmax/ℓ). What is worth reporting is the strength the user actually chose,
-       so quote the attenuation over the propagation at the half-way point of a taper. =#
-    Logging.@info(@sprintf(
-        "Absorbing boundaries: rate-based, reference length %.3g m (%.3g applications of \
-         the window profile over %.3g m; a %.0f%% point of the taper attenuates by %.1e \
-         over the propagation). Temporal collar %.3g fs, %.1f%% of the time window.",
-        l, grid.zmax/l, grid.zmax, 50, 0.5^(grid.zmax/l), w*1e15, 100*w/trange))
-end
 
 """
     run(Eω, grid, linop, transform, FT, output; kwargs...)
@@ -433,9 +402,6 @@ function run(Eω, grid,
              boundary=:rate, boundary_N=Boundaries.DEFAULT_N, boundary_length=nothing,
              tcollar=Boundaries.DEFAULT_TCOLLAR)
 
-    boundary in (:rate, :legacy, :none) || error(
-        "boundary must be :rate, :legacy or :none, not $boundary")
-
     Et = FT \ Eω
 
     # check_cache does nothing except for HDF5Outputs
@@ -445,9 +411,13 @@ function run(Eω, grid,
         Eω, z0, init_dz = Eωc, zc, dzc
     end
 
-    #= NOTE: everything below must come after check_cache, which can move z0 and init_dz:
-       zprev seeds the distance the temporal absorber is applied over. =#
-    ℓabs = Boundaries.reflength(grid, boundary_N, boundary_length)
+    #= NOTE: this must come after check_cache, which can move z0 and init_dz: the temporal
+       absorber measures the distance it is applied over from z0. =#
+    absorber = Boundaries.setup(boundary, grid, linop, Eω, Et, FT, output, z0,
+                                max_dz, init_dz;
+                                N=boundary_N, ℓ=boundary_length, collar=tcollar)
+    stepfun = absorber.stepfun
+    linop, max_dz, init_dz = absorber.linop, absorber.max_dz, absorber.init_dz
 
     #= Band-limit the field once, here, rather than after every step. `NonlinearRHS` zeroes
        the nonlinear polarisation outside `grid.sidx` and the linear operator is zero there,
@@ -457,67 +427,10 @@ function run(Eω, grid,
        first step anyway. =#
     boundary === :legacy || (Eω[.!grid.sidx, ntuple(_ -> :, ndims(Eω) - 1)...] .= 0)
 
-    stepfun = if boundary === :rate
-        #= The stepper must resolve the absorber's reference length. RK45's fbar! amplifies
-           the RHS by exp(+α Δz) while the nonlinear drive it acts on is ∝ exp(-α ℓ), so the
-           amplified band-edge elements stay bounded — and stay small in weaknorm's global
-           sum — only while Δz ≤ ℓ. This costs nothing in practice: it just requires at
-           least boundary_N steps, and real runs take far more. =#
-        if max_dz > ℓabs
-            Logging.@info(@sprintf(
-                "Reducing max_dz from %.3g m to the absorber reference length %.3g m.",
-                max_dz, ℓabs))
-            max_dz = ℓabs
-        end
-        init_dz = min(init_dz, max_dz)
-
-        αω = Boundaries.spectral_rate(grid; N=boundary_N, ℓ=boundary_length)
-        αt = Boundaries.temporal_rate(grid; N=boundary_N, ℓ=boundary_length,
-                                      collar=tcollar)
-        Boundaries.walkoff_check(grid, linop_array(linop, Eω, z0), αt,
-                                 Boundaries.tcollarwidth(grid, tcollar))
-        linop = Boundaries.addloss(linop, αω)
-        log_boundary(grid, boundary_N, boundary_length, tcollar)
-
-        # only the collar entries are ever ≠ 1, so only those need updating each step
-        tidcs = findall(>(0), αt)
-        tfac = ones(Float64, length(grid.t))
-        zprev = Ref(float(z0))
-        function stepfun_rate(Eω, z, dz, interpolant)
-            #= The absorption applied here is exp(-αt*Δz) over the distance actually
-               travelled, so successive factors telescope to exp(-αt*L) no matter how the
-               solver subdivides the propagation. =#
-            Δz = z - zprev[]
-            zprev[] = z
-            if Δz > 0
-                @inbounds for i in tidcs
-                    tfac[i] = exp(-αt[i]*Δz/2) # αt is a power coefficient, tfac hits the field
-                end
-                ldiv!(Et, FT, Eω) # NB: for a RealGrid rfft plan this destroys Eω
-                Et .*= tfac
-                mul!(Eω, FT, Et)
-            end
-            output(Eω, z, dz, interpolant)
-        end
-    elseif boundary === :legacy
-        Logging.@warn(
-            "boundary=:legacy applies the absorbing boundaries once per accepted step, " *
-            "so the absorption depends on the step count and the result depends on rtol.")
-        function stepfun_legacy(Eω, z, dz, interpolant)
-            Eω .*= grid.ωwin
-            ldiv!(Et, FT, Eω)
-            Et .*= grid.twin
-            mul!(Eω, FT, Et)
-            output(Eω, z, dz, interpolant)
-        end
-    else
-        stepfun_none(Eω, z, dz, interpolant) = output(Eω, z, dz, interpolant)
-    end
-
     output(Grid.to_dict(grid), group="grid")
     st = simtype(grid, transform, linop)
     st["boundary"] = string(boundary)
-    boundary === :rate && (st["boundary_length"] = string(ℓabs))
+    boundary === :rate && (st["boundary_length"] = string(absorber.ℓ))
     output(st, group="simulation_type")
     save_modeinfo_maybe(output, transform)
 
