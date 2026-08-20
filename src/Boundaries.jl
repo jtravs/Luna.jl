@@ -34,9 +34,10 @@ machinery can do *exactly*:
   absorption is still a rate. (This is a first-order Lie splitting, but the commutator is
   supported only inside the collar, where the field is being destroyed anyway.)
 
-Separately from both, the *hard* band limit — the 0/1 part of the spectral window — stays a
-per-step multiply. A 0/1 mask is idempotent, so it never suffered from the `W^N` problem,
-and it is not optional: see [`ωmask`](@ref).
+The *hard* band limit — the 0/1 part of the spectral window — is not applied here at all.
+`NonlinearRHS` zeroes the nonlinear polarisation outside `grid.sidx` and the linear operator
+is zero there, so once the field has been band-limited at the start of `Luna.run` nothing
+can put anything back.
 
 See also `Luna.run`'s `boundary` keyword argument.
 """
@@ -114,7 +115,7 @@ rate(W, ℓ) = clamp.(.-2 .* log.(W) ./ ℓ, 0.0, MAX_αℓ/ℓ)
 
 Power absorption coefficient in 1/m across the frequency grid, derived from
 `grid.ωwin`. Exactly zero outside `grid.sidx`, where the linear operator is zero by
-construction and the hard mask [`ωmask`](@ref) applies instead.
+construction and there is nothing left to absorb.
 """
 function spectral_rate(grid; N=DEFAULT_N, ℓ=nothing)
     α = rate(grid.ωwin, reflength(grid, N, ℓ))
@@ -168,19 +169,6 @@ Power absorption coefficient in 1/m across the time grid.
 """
 temporal_rate(grid; N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR) =
     rate(tprofile(grid; collar), reflength(grid, N, ℓ))
-
-"""
-    ωmask(grid)
-
-The hard band limit, as a 0/1 multiplier over ω: `float.(grid.sidx)`.
-
-This is **not** optional and is not part of the graded absorber. `NonlinearRHS.TransModeAvg`
-skips both the normalisation and the `ωwin` multiply outside `grid.sidx`
-(`!t.grid.sidx[i] && continue`), so out-of-band `nl` is the raw, unnormalised transform of
-the polarisation, and the linear operator is zero there — nothing else removes it. Being a
-0/1 mask it is idempotent, so applying it every step was never step-count dependent.
-"""
-ωmask(grid) = float.(grid.sidx)
 
 """
     addloss(linop, α)

@@ -108,14 +108,15 @@ end
 #= Zero RHS and zero linear operator, so the only thing acting on the field is the temporal
    absorber applied in Luna.run's stepfun, whose target is exp(-α_t L) applied once.
 
-   The exponential factors telescope exactly, but the hard band mask is interleaved with
-   them and the two do not commute, so the result approaches exp(-α_t L) as the steps get
-   smaller rather than matching it exactly. That is a splitting error of the same order as
-   the temporal splitting itself, and — unlike the historical scheme — it converges. =#
+   The exponential factors telescope exactly among themselves, but the spectral absorber
+   rides the propagator in between them and the two do not commute, so the result approaches
+   exp(-α_t L/2) as the steps get smaller rather than matching it exactly. That is a
+   splitting error of the same order as the temporal splitting itself, and — unlike the
+   historical scheme — it converges. =#
 grid = Grid.EnvGrid(0.2, 800e-9, (400e-9, 2e-6), 1e-12)
 FT = FFTW.plan_fft(zeros(ComplexF64, length(grid.t)))
 αt = Boundaries.temporal_rate(grid)
-mask = Boundaries.ωmask(grid)
+mask = float.(grid.sidx) # the band limit Luna.run applies once, at the start
 # deliberately wide, so that the field actually overlaps the absorber collar
 Et0 = Maths.gauss.(grid.t, fwhm=0.5*(maximum(grid.t) - minimum(grid.t))) .+ 0im
 Eω0 = (FT*Et0) .* mask
@@ -137,7 +138,7 @@ fine = reldiff(bare_run(init_dz=1e-5, max_dz=grid.zmax/500), expected)  # 500 st
 @test coarse < 1e-3
 @test fine < 10*coarse/25 # converges at least first order in the step size
 
-# :none applies only the (idempotent) hard band limit
+# with nothing driving it and no absorber, :none must leave the field exactly alone
 @test bare_run(boundary=:none) == Eω0
 # :legacy applies the whole window once per step and does not approach the rate limit
 legacy = Logging.with_logger(Logging.NullLogger()) do

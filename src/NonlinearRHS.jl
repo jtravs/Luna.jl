@@ -460,10 +460,7 @@ function (t::TransModeAvg)(nl, Eω, z)
     @. t.Pto *= t.grid.towin
     to_freq!(nl, t.Pωo, t.Pto, t.FT)
     t.norm!(nl, z)
-    for i in eachindex(nl)
-        !t.grid.sidx[i] && continue
-        nl[i] *= t.grid.ωwin[i]
-    end
+    @. nl *= t.grid.ωwin # zero outside the simulation band, where ωwin is exactly 0
 end
 
 function norm_mode_average(grid, βfun!, aeff; shock=true)
@@ -474,7 +471,14 @@ function norm_mode_average(grid, βfun!, aeff; shock=true)
         βfun!(β, z)
         sqrtaeff = sqrt(aeff(z))
         for i in eachindex(nl)
-            !grid.sidx[i] && continue
+            #= β is only filled inside the simulation band, so the normalisation cannot be
+               evaluated outside it. Zero nl there rather than skipping: skipping leaves the
+               raw, unnormalised transform of the polarisation in place, and since the
+               linear operator is also zero out of band, nothing downstream removes it. =#
+            if !grid.sidx[i]
+                nl[i] = 0
+                continue
+            end
             nl[i] *= pre[i]/β[i]*sqrtaeff
         end
     end
@@ -486,7 +490,10 @@ function norm_mode_average_gnlse(grid, aeff; shock=true)
     function norm!(nl, z)
         sqrtaeff = sqrt(aeff(z))
         for i in eachindex(nl)
-            !grid.sidx[i] && continue
+            if !grid.sidx[i] # as in norm_mode_average
+                nl[i] = 0
+                continue
+            end
             nl[i] *= pre[i]*sqrtaeff
         end
     end

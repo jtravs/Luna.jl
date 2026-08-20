@@ -411,11 +411,10 @@ Run the propagation.
       `grid.ωwin` and `grid.twin` after every accepted step. This makes the cumulative
       absorption depend on the step count and hence on `rtol`, so the result does not
       converge as the tolerance is tightened. Provided only to reproduce older results.
-    - `:none` disables the graded absorbers. The hard band limit outside `grid.sidx` is
-      still applied (it is a 0/1 mask, so it never had a step-count dependence), and the
-      nonlinear polarisation is still band-limited in `NonlinearRHS`, but nothing stops
-      energy wrapping around the time window or piling up at the edge of the frequency
-      window.
+    - `:none` disables the absorbers. The nonlinear polarisation is still band-limited in
+      `NonlinearRHS` and the field is still band-limited once at the start, but nothing
+      stops energy wrapping around the time window or piling up at the edge of the
+      frequency window.
 - `boundary_N::Real=$(Boundaries.DEFAULT_N)`: absorber strength, expressed as the number of
     times the historical window profile is applied over the whole propagation length. The
     reference length is `ℓ = zmax/boundary_N`.
@@ -449,7 +448,14 @@ function run(Eω, grid,
     #= NOTE: everything below must come after check_cache, which can move z0 and init_dz:
        zprev seeds the distance the temporal absorber is applied over. =#
     ℓabs = Boundaries.reflength(grid, boundary_N, boundary_length)
-    ωmask = Boundaries.ωmask(grid)
+
+    #= Band-limit the field once, here, rather than after every step. `NonlinearRHS` zeroes
+       the nonlinear polarisation outside `grid.sidx` and the linear operator is zero there,
+       so nothing can put anything back; all this removes is the numerical dust the input
+       transform leaves outside the band. Not for :legacy, which must reproduce the
+       historical scheme exactly -- its per-step `ωwin` multiply does the same job from the
+       first step anyway. =#
+    boundary === :legacy || (Eω[.!grid.sidx, ntuple(_ -> :, ndims(Eω) - 1)...] .= 0)
 
     stepfun = if boundary === :rate
         #= The stepper must resolve the absorber's reference length. RK45's fbar! amplifies
@@ -483,7 +489,6 @@ function run(Eω, grid,
                solver subdivides the propagation. =#
             Δz = z - zprev[]
             zprev[] = z
-            Eω .*= ωmask # idempotent hard band limit, so no rate treatment needed
             if Δz > 0
                 @inbounds for i in tidcs
                     tfac[i] = exp(-αt[i]*Δz/2) # αt is a power coefficient, tfac hits the field
@@ -506,13 +511,7 @@ function run(Eω, grid,
             output(Eω, z, dz, interpolant)
         end
     else
-        #= Even with no absorber the hard band limit has to stay: TransModeAvg leaves the
-           out-of-band part of nl unnormalised and unwindowed, and the linear operator is
-           zero there, so nothing else removes it. =#
-        function stepfun_none(Eω, z, dz, interpolant)
-            Eω .*= ωmask
-            output(Eω, z, dz, interpolant)
-        end
+        stepfun_none(Eω, z, dz, interpolant) = output(Eω, z, dz, interpolant)
     end
 
     output(Grid.to_dict(grid), group="grid")
