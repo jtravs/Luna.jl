@@ -37,6 +37,13 @@ fi
 # (not juliaup: the installer refuses to install into an existing directory)
 mkdir -p "$VOL"/{code,runs,claude,logs}
 
+# Log the bootstrap itself. It was the only script here that printed to the terminal and
+# nowhere else, so a pod problem diagnosed after the tmux pane is gone had no record —
+# and its output includes the GPU identification and the memory-fits table, which is
+# exactly what you want when a later run does not fit.
+COLDLOG="$VOL/logs/coldstart-$(date +%Y%m%d-%H%M%S).log"
+exec > >(tee -a "$COLDLOG") 2>&1
+
 DEPOT_LOCAL=/root/julia_depot
 DEPOT_TAR="$VOL/julia_depot.tar"
 
