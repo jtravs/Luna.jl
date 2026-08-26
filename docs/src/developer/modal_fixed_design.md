@@ -398,6 +398,50 @@ is negligible for the ionisation of the runs studied. `PPT_options=Dict(:sum_int
 restores the literal sum, and then ``n_r\ge256`` is needed. The PPT cache is keyed on the
 effective settings, so a changed default can never load a table computed with the old one.
 
+### 3.9 The general (`RealGrid`) `TransFree` path
+
+`TransFree` has two routes. The **fast path** transforms the solver's state array directly,
+skipping the oversampled buffers; it is what every 3-D envelope run takes and what the
+device support of §2.3 was built for. The **general path** goes through `Eωo`/`Pto`, and
+until this work it was a serial scalar loop per stage, host only.
+
+A **field-resolved (`RealGrid`) free-space propagation can only ever take the general
+path**, for a reason that is not about performance: the inverse of a real-to-complex plan
+*destroys its input*, and on the fast path that input is the solver's own state. (Measured:
+FFTW's `p \ X` copies and so survives it, but `ldiv!(y, p, X)` and `mul!(y, inv(p), X)` do
+not, and cuFFT's C2R is documented as destructive. `TransModalFixed` avoids the same trap
+by always inverting into its own scratch — §3.5.) So the general path had to become as
+capable as the fast one before a 3-D field-resolved run could be threaded, let alone run on
+a device.
+
+It is now written in the same backend-dispatched kernels as the fast path — `copy_scale!`,
+`pointwise_Pt!`/`Et_to_Pt_ordered!`, `_apply_towin!`, `_scale_nl!` — reading the grid
+vectors from the transform's `gv` mirror rather than the host grid. Three consequences:
+
+- **Host**: threaded, including `copy_scale!`, which moves two field-sizes per RHS.
+- **Device**: allowed whenever every response is pointwise or batched and there is no noise
+  field, and refused at construction otherwise rather than deep inside the first RHS. On a
+  device (only) the responses go through `Nonlinear.batched_responses` as
+  `TransModalFixed` does, so a columnwise response with a batched equivalent is substituted
+  silently; doing that on the host too would move existing host results at the ~1e-15 level
+  for no gain.
+- **Memory**: `Pωo` always aliases `Eωo` (the inverse transform consumes it and nothing
+  reads it again), and `Pto` aliases `Eto` when every response is pointwise, exactly as the
+  fast path does — two field-sized buffers instead of four. At 3-D field-resolved production
+  shapes (``n_\omega=513``, ``768^2``) that is 18 GiB not spent.
+
+A new `Et_win` buffer holds the coarse-grid time-domain field when the grid is oversampled,
+so `scratch` never returns `nothing`: `Luna.run` uses it for the apodisation windows instead
+of allocating `FT \ Eω`, and `Luna.setup`'s real free-space method plans the state rfft
+against it — a real-to-complex plan needs a real prototype, which the (complex) state is
+not. `Grid.RealGrid` also gained an opt-in `ffac` keyword (default 6, unchanged): the fine
+grid is sampled at `ffac`×``f_{\max}``, and a response that generates no third harmonic
+needs only 4, which at typical shapes removes the oversampling entirely. It changes ``δω``
+and the realised time window as well, so it is for convergence-checked use only.
+
+The regression gate for all of this is the existing `test/test_perf_bitident.jl` "TransFree
+fast path" testset, which asserts general == fast **bit for bit** on an `EnvGrid`.
+
 ## 4. Accuracy
 
 ### 4.1 Kerr and Raman: exact by construction
@@ -872,10 +916,14 @@ gradient/taper cases no longer pay the host operator (§3.7). Recorded in the ro
 ## 7. Known limitations
 
 - Vector (two-component) Raman is not implemented in any transform (never was).
-- `Kerr_field_nothg`, `Kerr_env_thg` and user-defined columnwise responses run serially
-  on the host and are refused on a device (clear error).
+- `Kerr_env_thg` and user-defined columnwise responses run serially on the host and are
+  refused on a device (clear error). `Kerr_field_nothg` now has a batched form,
+  `KerrFieldNoTHG` — `Kerr_field_nothg(γ3)` with one argument returns it; the two-argument
+  closure is the old columnwise one and is kept for reference.
 - Scalar gas mixtures take the serial columnwise fallback in `Et_to_Pt_ordered!`.
-- Plasma in `TransFree` (3-D free space) on a device is not wired up (the pieces exist).
+- Plasma in `TransFree` (3-D free space) on a device is not wired up: the transform is
+  ready (§3.9), but `PlasmaCumtrapzBatched` needs the `(nto,ny,nx) → (nto,1,ny·nx)`
+  reshape to be reachable from there.
 - `TransModeAvg` (mode-averaged) and `TransRadial` have no device path.
 - Non-scale-invariant ``z``-dependent modes re-evaluate the mode fields on the host per RHS.
 - `StepIndexMode` (`dimlimits = 10a`, kink at ``r=a``) would need a composite rule with a
@@ -994,14 +1042,18 @@ the record.
 
 ### 8.4 Coverage — not yet on a device / not batched
 
-- [ ] **P1 — Plasma in `TransFree` (3-D free space) on GPU.** `PlasmaCumtrapzBatched` and
-  the device `copy_scale!` exist; the general (RealGrid) `TransFree` path needs a device
-  method using them and `Et_to_Pt_ordered!` with `batched_responses`, plus the
-  `(nto,ny,nx) → (nto,1,ny·nx)` reshape. Effort M. Payoff high if 3-D + ionisation runs
-  are on the roadmap.
+- [x] **P1 — the general (RealGrid) `TransFree` path on a device.** Done (§3.9). It is now
+  threaded on the host and runs on a device for any pointwise or batched response, which is
+  what a 3-D field-resolved (`RealGrid`) free-space propagation needs — it can never take
+  the fast path, because the inverse of a real-to-complex plan destroys its input and on
+  the fast path that input is the solver's own state. Plasma in `TransFree` on a device now
+  needs only `PlasmaCumtrapzBatched` to be reachable from there, i.e. nothing in the
+  transform.
 - [x] **P1 — `RamanPolarField` batched.** Done (§3.6).
-- [ ] **P2 — `Kerr_field_nothg`, `Kerr_env_thg` as batched responses** (Hilbert along dim
-  1 / broadcast with a ``t`` vector). Effort S each.
+- [x] **P2 — `Kerr_field_nothg` as a batched response.** Done: `KerrFieldNoTHG` reuses
+  `_analytic_batched!` (the batched `plan_hilbert` shared with `RamanPolarFieldBatched`).
+- [ ] **P2 — `Kerr_env_thg` as a batched response** (broadcast with a ``t`` vector).
+  Effort S.
 - [ ] **P2 — Scalar gas mixtures batched/threaded** in `Et_to_Pt_ordered!` (fill once,
   ordered loop per `(responses_i, ρ_i)`). Effort S.
 - [ ] **P3** — `TransRadial` on device (device Hankel matmul); `TransModeAvg` on device;

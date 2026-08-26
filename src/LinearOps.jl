@@ -131,23 +131,30 @@ and β1 is 1/velocity of the reference frame. With `factored=true`, return a
 one field-sized array less).
 """
 function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
-                          n::AbstractArray, β1::Number; factored::Bool=false)
+                          n::AbstractArray, β1::Number; factored::Bool=false,
+                          arraytype=Array)
     kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
     idcs = CartesianIndices((length(xygrid.ky), length(xygrid.kx)))
     k2 = zero(grid.ω)
     k2[grid.sidx] .= (n[grid.sidx] .* grid.ω[grid.sidx] ./ PhysData.c).^2
-    factored && return FactoredFreeLinop(copy(grid.ω), k2, kperp2, float(β1), 0.0, false)
+    if factored
+        # A real grid never subtracts a reference phase: it propagates the field itself,
+        # not an envelope about a carrier.
+        l = FactoredFreeLinop(copy(grid.ω), k2, kperp2, float(β1), 0.0, false)
+        return arraytype === Array ? l : Adapt.adapt(arraytype, l)
+    end
+    _check_materialised_linop(arraytype)
     out = zeros(ComplexF64, (length(grid.ω), length(xygrid.ky), length(xygrid.kx)))
     _fill_linop_xy!(out, grid, β1, k2, kperp2, idcs)
     return out
 end
 
 function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid, nfun;
-                          factored::Bool=false)
+                          factored::Bool=false, arraytype=Array)
     n = zero(grid.ω)
     n[grid.sidx] = nfun.(2π*PhysData.c./grid.ω[grid.sidx])
     β1 = PhysData.dispersion_func(1, nfun)(grid.referenceλ)
-    make_const_linop(grid, xygrid, n, β1; factored)
+    make_const_linop(grid, xygrid, n, β1; factored, arraytype)
 end
 
 function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,

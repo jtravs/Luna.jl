@@ -42,7 +42,19 @@ end
 "Kerr response for real field"
 Kerr_field(γ3) = KerrField(γ3)
 
-"Kerr response for real field but without THG"
+"""
+    Kerr_field_nothg(γ3, n)
+    Kerr_field_nothg(γ3)
+
+Kerr response for a real field but without THG: `P = (3/4) ε₀ γ₃ |E_a|² E`, where `E_a` is
+the analytic signal of `E`.
+
+The two-argument form takes the time-grid length `n` and returns a closure over a
+column-length `Maths.plan_hilbert` — it is evaluated one transverse column at a time and is
+host-only. The one-argument form returns a [`KerrFieldNoTHG`](@ref), which computes the same
+thing for every column at once and runs threaded on the host and on a device; prefer it for
+anything larger than a single column.
+"""
 function Kerr_field_nothg(γ3, n)
     E = Array{Float64}(undef, n)
     hilbert = Maths.plan_hilbert(E)
@@ -51,6 +63,94 @@ function Kerr_field_nothg(γ3, n)
             out .+= ρ*3/4*ε_0*γ3.*abs2.(hilbert(E)).*E
         end
     end
+end
+
+Kerr_field_nothg(γ3) = KerrFieldNoTHG(γ3)
+
+"""
+    KerrFieldNoTHG(γ3)
+
+Kerr response for a real field with the third harmonic (and the counter-rotating terms)
+removed: `P = (3/4) ε₀ γ₃ |E_a|² E` with `E_a` the analytic signal of `E`. This carries the
+same physics content as the envelope response [`KerrEnv`](@ref) evaluated on a
+carrier-resolved field, so an envelope-versus-field comparison using it isolates
+*representation* error with nothing else changed.
+
+Batched (see [`batched`](@ref)): the analytic signal of every column is computed with one
+batched complex FFT pair — the batched form of `Maths.plan_hilbert`, shared with
+[`RamanPolarFieldBatched`](@ref) — so the response is threaded over columns on the host and
+is two transforms plus one broadcast on a device. It performs the same floating-point
+operations in the same order as the columnwise closure `Kerr_field_nothg(γ3, n)`; only the
+FFT algorithm differs, so the two agree to rounding accuracy (~1e-15 relative) rather than
+bit-exactly.
+
+!!! note "Relation to [`KerrField`](@ref)"
+    Writing `E = (E_a + E_a*)/2`, the fundamental-band content of `E³` is exactly
+    `(3/4)Re(|E_a|²E_a) = (3/4)|E_a|²E`. So on a grid whose window excludes the third
+    harmonic entirely, this response and `KerrField` are the same operator; they differ
+    only where the fundamental and third-harmonic bands overlap.
+
+The work array and its plans are allocated lazily on the field's array type at the first
+call, when the transverse grid size is known.
+"""
+mutable struct KerrFieldNoTHG{T}
+    γ3::T
+    C::Any    # (nt, ncol) complex work array holding the analytic signal
+    cFT::Any  # in-place complex plan along dim 1 of C
+    cIFT::Any # its inverse (in-place)
+end
+
+KerrFieldNoTHG(γ3) = KerrFieldNoTHG(γ3, nothing, nothing, nothing)
+
+batched(::KerrFieldNoTHG) = true
+
+function (K::KerrFieldNoTHG)(out, Et, ρ)
+    nt = size(Et, 1)
+    size(Et, 2) == 1 || ndims(Et) != 2 ||
+        error("vector (multi-polarisation) KerrFieldNoTHG is not implemented")
+    ncol = length(Et) ÷ nt
+    Etr = reshape(Et, nt, ncol)
+    outr = reshape(out, nt, ncol)
+    # The buffer is keyed on the array TYPE as well as the shape: one response object
+    # applied first to a host field and then to a device one (an A/B check, say) must
+    # reallocate rather than hand device data to a host buffer, which fails deep inside a
+    # broadcast with an unhelpful scalar-indexing error.
+    if K.C === nothing || size(K.C) != (nt, ncol) ||
+            Base.typename(typeof(K.C)).wrapper !== Base.typename(typeof(Et)).wrapper
+        # The work buffer follows the field: `similar` puts it on the same device, and the
+        # plans are made by the matching planner.
+        K.C = similar(Et, ComplexF64, (nt, ncol))
+        Utils.loadFFTwisdom(Utils.backend(Et))
+        K.cFT = Utils.plan_fft!_backend(K.C, 1)
+        K.cIFT = Utils.plan_ifft!_backend(K.C, 1)
+        Utils.saveFFTwisdom(Utils.backend(Et))
+    end
+    # Same scalar factor, formed in the same order, as the columnwise closure above.
+    _kerr_nothg!(outr, Etr, ρ*3/4*ε_0*K.γ3, K.C, K.cFT, K.cIFT)
+    out
+end
+
+# function barrier: the buffer/plan fields are loosely typed on the struct
+_kerr_nothg!(out, Et, fac, C, cFT, cIFT) =
+    _kerr_nothg!(Utils.backend(out), out, Et, fac, C, cFT, cIFT)
+
+function _kerr_nothg!(::Utils.CPUBackend, out, Et, fac, C, cFT, cIFT)
+    _analytic_batched!(Utils.CPUBackend(), C, Et, cFT, cIFT)
+    Utils.tforeach(size(Et, 2); ntotal=length(out)) do i
+        @inbounds begin
+            ocol = view(out, :, i)
+            Ecol = view(Et, :, i)
+            Ccol = view(C, :, i)
+            @. ocol += fac*abs2(Ccol)*Ecol
+        end
+    end
+    nothing
+end
+
+function _kerr_nothg!(::Utils.DeviceBackend, out, Et, fac, C, cFT, cIFT)
+    _analytic_batched!(Utils.DeviceBackend(), C, Et, cFT, cIFT)
+    @. out += fac*abs2(C)*Et
+    nothing
 end
 
 function KerrScalarEnv!(out, E, fac)

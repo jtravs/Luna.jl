@@ -424,24 +424,114 @@ if have_jlarrays
         # the transform must not modify its input (the solver relies on this)
         @test isequal(Array(Eωkd), Eωk)
 
-        # Unsupported combinations must fail loudly rather than crawl or silently
-        # fall back to the host
-        @test_throws ErrorException NonlinearRHS.TransFree(
+        # The GENERAL path also runs on a device (it is the only path a RealGrid can
+        # take), and must agree with the host's general path.
+        tgh = NonlinearRHS.TransFree(
+            grid, xygrid, th.FT, responses, densityfun,
+            NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true);
+            fastpath=false)
+        tgd = NonlinearRHS.TransFree(
             grid, xygrid, td.FT, responses, densityfun,
             NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true,
                                          arraytype=JLArray);
             arraytype=JLArray, fastpath=false)
-        rgrid = Grid.RealGrid(5e-3, 800e-9, (400e-9, 2000e-9), 100e-15)
+        @test tgd.Eωo isa JLArray
+        @test tgd.Pωo === tgd.Eωo        # the polarisation reuses the field's spectrum
+        @test tgd.Pto === tgd.Eto        # ...and Kerr is pointwise, so does the time buffer
+        nlgh = similar(Eωk); nlgd = JLArray(similar(Eωk))
+        Eωkgd = JLArray(copy(Eωk))
+        tgh(nlgh, Eωk, 0.0)
+        tgd(nlgd, Eωkgd, 0.0)
+        @test isequal(nlgh, nlh)                       # general == fast on the host
+        @test isapprox(Array(nlgd), nlgh; rtol=1e-10)
+        @test isequal(Array(Eωkgd), Eωk)
+
+        # A columnwise response with no batched equivalent cannot run on a device, and
+        # must be refused at construction rather than deep inside the first RHS.
+        colresp = (Nonlinear.Kerr_env_thg(PhysData.γ3_gas(:Ar), 2π*PhysData.c/800e-9,
+                                          grid.to),)
         @test_throws ErrorException NonlinearRHS.TransFree(
-            rgrid, xygrid, td.FT, responses, densityfun,
-            NonlinearRHS.const_norm_free(rgrid, xygrid, nfun; factored=true,
+            grid, xygrid, td.FT, colresp, densityfun,
+            NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true,
+                                         arraytype=JLArray);
+            arraytype=JLArray, fastpath=false)
+        @test_throws ErrorException NonlinearRHS.Et_to_Pt_ordered!(
+            td.Eto, td.Eto, colresp, 1.0, td.idcs)
+        # ...whereas a columnwise response that HAS one is substituted silently, which is
+        # what makes RamanPolarEnv usable on a device at all.
+        rr = Luna.Raman.raman_response(grid.to, :N2)
+        traman = NonlinearRHS.TransFree(
+            grid, xygrid, td.FT, (responses..., Nonlinear.RamanPolarEnv(grid.to, rr)),
+            densityfun,
+            NonlinearRHS.const_norm_free(grid, xygrid, nfun; factored=true,
                                          arraytype=JLArray);
             arraytype=JLArray)
-        # a columnwise response cannot be evaluated on a device
-        rr = Luna.Raman.raman_response(grid.to, :N2)
-        @test_throws ErrorException NonlinearRHS.Et_to_Pt_ordered!(
-            td.Eto, td.Eto, (Nonlinear.RamanPolarEnv(grid.to, rr),),
-            1.0, td.idcs)
+        @test traman.resp[2] isa Nonlinear.RamanPolarEnvBatched
+    end
+
+    @testset "RealGrid free-space device path" begin
+        import Luna: Grid, LinearOps, NonlinearRHS, PhysData, Nonlinear, Fields
+        JLArray = JLArrays.JLArray
+        # A real (field-resolved) 3-D free-space propagation on a device. Unlike the
+        # envelope path this is always the general path: the inverse of a real-to-complex
+        # plan destroys its input, which on the fast path would be the solver's state.
+        gas, pres, λ0, τ, w0, energy, L = :Ar, 4, 800e-9, 30e-15, 100e-6, 30e-6, 5e-3
+        rgrid = Grid.RealGrid(L, λ0, (400e-9, 2000e-9), 100e-15)
+        xyg = Grid.FreeGrid(400e-6, 8)
+        @test length(rgrid.to) != length(rgrid.t)   # this grid IS oversampled
+        nf = PhysData.ref_index_fun(gas, pres)
+        dfun = let d0 = PhysData.density(gas, pres); z -> d0 end
+        # the no-THG response is the batched one; the plain field Kerr is pointwise
+        # `mkresp` builds a FRESH response per transform: a batched response owns lazily
+        # allocated buffers on the array type of the field it first saw, so sharing one
+        # object between a host and a device transform is a usage error.
+        for mkresp in (γ3 -> (Nonlinear.Kerr_field(γ3),),
+                       γ3 -> (Nonlinear.Kerr_field_nothg(γ3),))
+            function mk(A)
+                Eto = Luna.device_zeros(A, Float64,
+                                        (length(rgrid.to), length(xyg.y), length(xyg.x)))
+                FTo = Utils.plan_rfft_backend(Eto, (1, 2, 3))
+                NonlinearRHS.TransFree(
+                    rgrid, xyg, FTo, mkresp(PhysData.γ3_gas(gas)), dfun,
+                    NonlinearRHS.const_norm_free(rgrid, xyg, nf; factored=true,
+                                                 arraytype=A);
+                    arraytype=A, Eto)
+            end
+            th, td = mk(Array), mk(JLArray)
+            @test Utils.backend(td.Eto) isa Utils.DeviceBackend
+            @test td.Et_win !== nothing && size(td.Et_win, 1) == length(rgrid.t)
+            @test NonlinearRHS.scratch(td) === td.Et_win
+            @test eltype(td.Eto) === Float64
+            rng = Random.Xoshiro(7)
+            Eωk = 1e4 .* randn(rng, ComplexF64, length(rgrid.ω), length(xyg.y),
+                               length(xyg.x))
+            nlh = similar(Eωk); nld = JLArray(similar(Eωk))
+            Eωkd = JLArray(copy(Eωk))
+            th(nlh, Eωk, 0.0)
+            td(nld, Eωkd, 0.0)
+            @test isapprox(Array(nld), nlh; rtol=1e-10)
+            @test isequal(Array(Eωkd), Eωk)   # the state must survive the RHS
+        end
+
+        # ...and end to end, through Luna.setup / Luna.run.
+        function propagate_real(A)
+            lo = LinearOps.make_const_linop(rgrid, xyg, nf; factored=true, arraytype=A)
+            nfn = NonlinearRHS.const_norm_free(rgrid, xyg, nf; factored=true, arraytype=A)
+            resp = (Nonlinear.Kerr_field_nothg(PhysData.γ3_gas(gas)),)
+            inp = Fields.GaussGaussField(λ0=λ0, τfwhm=τ, energy=energy, w0=w0)
+            Eω, tr, FT = Luna.setup(rgrid, xyg, dfun, nfn, resp, inp; arraytype=A)
+            @test (A === Array) == !(Utils.isdevice(Eω))
+            zs = collect(range(0, L, 3))
+            o = Output.MemoryOutput(Output.GridCondition(zs, 3), "Eω", "z")
+            Luna.run(Eω, rgrid, lo, tr, FT, o; max_dz=Inf, init_dz=L/50, rtol=1e-8,
+                     step_on=zs)
+            o.data["Eω"], o.data["z"]
+        end
+        Eh, zh = propagate_real(Array)
+        Ed, zd = propagate_real(JLArray)
+        @test Ed isa Array                 # saves come back on the host
+        @test isapprox(zd, zh; rtol=1e-10)
+        @test sqrt(sum(abs2, Ed .- Eh)/sum(abs2, Eh)) < 1e-10
     end
 
     @testset "unscaled inverse plan and the fused pointwise RHS" begin

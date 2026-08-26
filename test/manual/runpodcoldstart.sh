@@ -369,6 +369,18 @@ julia --project="$DEV" -e '
     bw = 2 * sizeof(a) * reps / t / 1e9
     println("  copy BW     : ", round(bw, digits=0), " GB/s",
             "   (H100 ~3350, H200 ~4800 peak)")
+
+    # What this card can actually hold, for the 3-D TG-FROG campaigns. The envelope rule
+    # of thumb is 10 x the state array; the FIELD-RESOLVED path is not covered by it (its
+    # state is twice as long in omega and its nonlinear grid twice as long again in time),
+    # so quote the measured budgets at the 40 um / N=768 production shape.
+    gib = CUDA.total_memory()/2^30
+    println("  fits (3-D TG-FROG at N=768, 40 um):")
+    for (what, need) in (("envelope", 24), ("field :thg or :nothg+ffac4", 65),
+                         ("field :nothg (the campaign arm)", 92))
+        println("      ", rpad(what, 32), need > 0.92gib ? "NO  " : "yes ",
+                "(~", need, " GiB)")
+    end
 ' || warn "GPU check failed"
 
 # ----------------------------------------------------------------- summary --
@@ -382,6 +394,20 @@ else
     _mem_str="no cgroup limit visible — free(1) shows the HOST, not your slice"
 fi
 
+# HOST RAM is a real constraint for the 3-D free-space campaigns, and it is easy to miss
+# on a pod chosen for its GPU. `build_setup` builds the beamlets on the host and holds the
+# unmasked HE11 field, the three masked beamlets, their pre-summed gate pair and the
+# window all at once — at the 40 µm production shape (N = 768) that is ~12 GiB in the
+# envelope mode and ~25 GiB in FIELD mode, where every field is twice as long in ω.
+_hostwarn=""
+if [ "${POD_MEM_GB:-0}" -gt 0 ] && [ "${POD_MEM_GB}" -lt 32 ]; then
+    _hostwarn="  NOTE: ${POD_MEM_GB} GB host RAM is tight for the N=768 campaigns
+        (build_setup peaks at ~12 GiB envelope / ~25 GiB field mode, on the HOST).
+        ModelPNPS's field-mode driver passes beamlets_on_host=true, which keeps two
+        more fields resident there for the whole run. If a run dies during setup
+        rather than on the card, this is why."
+fi
+
 cat <<EOF
 
   project   $DEV
@@ -389,7 +415,8 @@ cat <<EOF
   runs      $VOL/runs
   logs      $VOL/logs
 
-  host slice   ${POD_CPUS} vCPU (cgroup), ${_mem_str} RAM
+${_hostwarn:+$_hostwarn
+}  host slice   ${POD_CPUS} vCPU (cgroup), ${_mem_str} RAM
                JULIA_NUM_THREADS=${JULIA_NUM_THREADS}  (LUNA_THREADS= to override)
                JULIA_NUM_PRECOMPILE_TASKS=${JULIA_NUM_PRECOMPILE_TASKS}
   volume       ${_vol_used} in use (quota not visible to df)
@@ -405,7 +432,15 @@ cat <<EOF
     cd \$LUNA_DEV && claude
 
   GPU tests + benchmarks (CUDA only; results under /workspace/runs/<timestamp>/):
-    bash /workspace/code/Luna.jl/test/manual/h200_gpu_suite.sh
+    bash /workspace/code/Luna.jl/test/manual/h200_gpu_suite.sh          # modal transform
+    bash /workspace/code/ModelPNPS.jl/examples/h200_modelpnps_suite.sh # 3-D TG-FROG
+
+  Field-resolved (RealGrid) TG-FROG — the 1 fs envelope-vs-field question. Heavier than
+  it looks: ~92 GiB on the card at the 40 µm production shape with the default response,
+  so H200-only (:thg or FFAC=4 cut it to ~65 GiB and fit an 80 GB H100). Benchmark it
+  before committing to a scan, and always dry-run the scan first:
+    STEPS=fieldbench bash /workspace/code/ModelPNPS.jl/examples/h200_modelpnps_suite.sh
+    PNPS_DRYRUN=1 bash /workspace/code/ModelPNPS.jl/examples/h200_field_mode.sh
 
   To get commits back to your laptop without any credentials on this pod:
     git remote add pod ssh://root@<IP>:<PORT>/workspace/code/Luna.jl

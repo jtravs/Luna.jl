@@ -23,7 +23,7 @@ struct RealGrid <: TimeGrid
 end
 
 """
-    RealGrid(zmax, referenceλ, λ_lims, trange; δt=1)
+    RealGrid(zmax, referenceλ, λ_lims, trange, δt=1; ffac=6)
 
 Time grid for simulations with real-valued (field-resolved) fields
 
@@ -34,11 +34,37 @@ Time grid for simulations with real-valued (field-resolved) fields
 - `trange::Real` : Total extent of the time window required
 - `δt::Real` : Sample spacing in time. The value actually used is either δt or the value
     required to satisfy `trange` and `λ_lims`, whichever is smaller.
+
+# Keyword arguments
+- `ffac::Real = 6` : the *fine* (nonlinear) grid is sampled at `ffac` times the maximum
+    frequency of the window. The default 6 is what a cubic response needs: `E³` reaches
+    three times the highest frequency present, so the fine Nyquist must sit above `3ωmax`.
+
+    A response that generates no third harmonic — `|E_a|²E` from the analytic signal, e.g.
+    [`Nonlinear.Kerr_field_nothg`](@ref Luna.Nonlinear.Kerr_field_nothg) — reaches only
+    `2ωmax - ωmin`, for which `ffac = 4` suffices. The fine grid then typically needs no
+    more samples than the propagated one, so the crop lands on its last sample and the
+    oversampling disappears (`length(to) == length(t)`): roughly half the memory and half
+    the transform cost per right-hand side.
+
+    !!! warning "`ffac` changes the whole grid, not just the fine one"
+        `δto` sets `trange_even = samples*δto` and hence `δω`, so a different `ffac` gives a
+        different spectral resolution, a different realised time window and in general a
+        different `length(ω)`. Two `ffac` values are two different grids that both satisfy
+        the request, not a coarse and a fine version of one grid — compare them as physical
+        spectra on their common band, never array-to-array.
+
+    So this is opt-in: pick a non-default value only alongside a convergence check against
+    the default, and only for a response that genuinely generates no third harmonic. Values
+    below 2 are refused (the fine grid would not resolve the window itself).
 """
-function RealGrid(zmax, referenceλ, λ_lims, trange, δt=1)
+function RealGrid(zmax, referenceλ, λ_lims, trange, δt=1; ffac=6)
+    ffac >= 2 || throw(ArgumentError(
+        "ffac must be at least 2 (the fine grid has to resolve the frequency window "*
+        "itself); got $ffac"))
     f_lims = PhysData.c./λ_lims
     Logging.@info @sprintf("Freq limits %.2f - %.2f PHz", f_lims[2]*1e-15, f_lims[1]*1e-15)
-    δto = min(1/(6*maximum(f_lims)), δt) # 6x maximum freq, or user-defined if finer
+    δto = min(1/(ffac*maximum(f_lims)), δt) # ffac x maximum freq, or user-defined if finer
     samples = 2^(ceil(Int, log2(trange/δto))) # samples for fine grid (power of 2)
     trange_even = δto*samples # keep frequency window fixed, expand time window as necessary
     Logging.@info @sprintf("Samples needed: %.2f, samples: %d, δt = %.2f as",
@@ -55,8 +81,14 @@ function RealGrid(zmax, referenceλ, λ_lims, trange, δt=1)
     ωmax = 2π*maximum(f_lims)
     ωmax_win = 1.1*ωmax
 
-    cropidx = findfirst(x -> x>ωmax_win, ωo)
-    cropidx = 2^(ceil(Int, log2(cropidx))) + 1 # make coarse grid power of 2 as well
+    # The propagated grid is cropped just above the apodisation window and rounded up to a
+    # power of two (plus the DC bin). Both steps can run past the fine grid — the crop
+    # index when the fine Nyquist is itself below ωmax_win, the rounding when the crop
+    # already lies in the top half — so clamp to the fine grid, which is 2^k + 1 long and
+    # therefore preserves the power-of-two property. At the default ffac = 6 neither
+    # branch is reached; at ffac = 4 the clamp is what makes to == t.
+    cropidx = something(findfirst(x -> x>ωmax_win, ωo), length(ωo))
+    cropidx = min(2^(ceil(Int, log2(cropidx))) + 1, length(ωo))
     ω = ωo[1:cropidx]
     δt = π/maximum(ω)
     tsamples = (cropidx-1)*2

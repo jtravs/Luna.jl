@@ -72,6 +72,24 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                 @test isapprox(Array(z), Array(xc); rtol=1e-12)
                 # inv should be memoised rather than re-planned per call
                 @test inv(p) === ip
+
+                # r2c/c2r, which the field-resolved (RealGrid) path uses. The forward
+                # transform must preserve its real input (`Luna.run` windows in a scratch
+                # buffer and transforms it back), and the INVERSE is the one that does
+                # not — which is exactly why a RealGrid can never take the TransFree fast
+                # path, where the input would be the solver's state. Assert the
+                # round-trip rather than the destruction: destroying the input is
+                # permitted, not promised.
+                xr = CuArray(randn(16, 8, 8))
+                xrc = copy(xr)
+                pr = Utils.plan_rfft_backend(xr, (1, 2, 3))
+                yr = similar(xr, ComplexF64, size(pr * xr))
+                LinearAlgebra.mul!(yr, pr, xr)
+                @test Array(xr) == Array(xrc)
+                ipr = inv(pr)
+                zr = similar(xr)
+                LinearAlgebra.mul!(zr, ipr, yr)
+                @test isapprox(Array(zr), Array(xrc); rtol=1e-12)
             end
 
             @testset "factor broadcast vs adapted-struct broadcast" begin
@@ -139,6 +157,47 @@ if get(ENV, "LUNA_TEST_CUDA", "") == "1"
                     @test Ed isa Array          # saves come back on the host
                     rel = sqrt(sum(abs2, Ed .- Eh) / sum(abs2, Eh))
                     @info "CUDA vs host" raman relL2=rel
+                    @test rel < 1e-8
+                end
+            end
+
+            @testset "RealGrid free-space end to end" begin
+                # The field-resolved 3-D path, which always takes TransFree's GENERAL
+                # route. JLArrays cannot catch what this can: its c2r shim transforms
+                # out of place and so silently tolerates an aliasing mistake that cuFFT
+                # would not, and it interprets kernels on the host rather than compiling
+                # them.
+                function propagate_real(arraytype; nothg=true, N=16, saveN=3)
+                    λ0, L, gas, pres = 800e-9, 5e-3, :Ar, 4
+                    grid = Grid.RealGrid(L, λ0, (400e-9, 2000e-9), 100e-15)
+                    xygrid = Grid.FreeGrid(400e-6, N)
+                    densityfun = let d = PhysData.density(gas, pres); z -> d end
+                    nfun = PhysData.ref_index_fun(gas, pres)
+                    γ3 = PhysData.γ3_gas(gas)
+                    # a fresh response per transform: a batched response owns buffers on
+                    # the array type of the field it first saw
+                    responses = nothg ? (Nonlinear.Kerr_field_nothg(γ3),) :
+                                        (Nonlinear.Kerr_field(γ3),)
+                    linop = LinearOps.make_const_linop(grid, xygrid, nfun;
+                                                       factored=true, arraytype)
+                    normfun = NonlinearRHS.const_norm_free(grid, xygrid, nfun;
+                                                           factored=true, arraytype)
+                    inputs = Fields.GaussGaussField(λ0=λ0, τfwhm=30e-15, energy=30e-6,
+                                                    w0=100e-6)
+                    Eω, transform, FT = Luna.setup(grid, xygrid, densityfun, normfun,
+                                                   responses, inputs; arraytype)
+                    zs = collect(range(0, grid.zmax, saveN))
+                    output = Output.MemoryOutput(Output.GridCondition(zs, saveN), "Eω", "z")
+                    Luna.run(Eω, grid, linop, transform, FT, output;
+                             max_dz=Inf, init_dz=L/50, rtol=1e-8, step_on=zs)
+                    output.data["Eω"]
+                end
+                for nothg in (true, false)      # batched response / pointwise response
+                    Eh = propagate_real(Array; nothg)
+                    Ed = propagate_real(CuArray; nothg)
+                    @test Ed isa Array
+                    rel = sqrt(sum(abs2, Ed .- Eh) / sum(abs2, Eh))
+                    @info "CUDA vs host (RealGrid free space)" nothg relL2=rel
                     @test rel < 1e-8
                 end
             end

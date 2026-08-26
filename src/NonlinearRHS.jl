@@ -101,9 +101,12 @@ function _copy_scale!(::Utils.DeviceBackend, dest, source, N, scale)
     nothing
 end
 
+# Threaded over the trailing indices, with the leading (contiguous) axis innermost, so each
+# thread walks its own memory. Elementwise, so the result does not depend on the chunking.
 function _cpsc_core(dest, source, N, scale, idcs)
-    for i in idcs
-        for j = 1:N
+    Utils.tforeach(length(idcs); ntotal=N*length(idcs)) do ii
+        i = idcs[ii]
+        @inbounds for j = 1:N
             dest[j, i] = scale * source[j, i]
         end
     end
@@ -1065,8 +1068,18 @@ and the output. If additionally all responses are pointwise
 (see [`Nonlinear.pointwise`](@ref Luna.Nonlinear.pointwise)), the polarisation overwrites
 `Eto` in place and `Pto` is `nothing` too. Both fast paths are bit-identical to the
 general path; disable with the constructor keyword `fastpath=false`.
+
+# General path
+A real (`RealGrid`) field cannot take the fast path — the inverse of a real-to-complex plan
+destroys its input, which on the fast path would be the solver's own state array — so it
+always goes through the oversampled buffers. That path is fully backend-dispatched: it uses
+the same threaded/device kernels as the fast path (`copy_scale!`, `Et_to_Pt_ordered!` or
+`pointwise_Pt!`, `_apply_towin!`, `_scale_nl!`) and runs on a device provided every response
+is pointwise or batched and there is no noise field. `Pωo` always aliases `Eωo`, and `Pto`
+aliases `Eto` when every response is pointwise, so the general path costs two field-sized
+buffers rather than four.
 """
-mutable struct TransFree{FTT, iFTT, nT, rT, gT, gvT, xygT, dT, tT, pT, oT, iT, eT, nlT}
+mutable struct TransFree{FTT, iFTT, nT, rT, gT, gvT, xygT, dT, tT, pT, oT, iT, eT, nlT, wT}
     FT::FTT # 3D Fourier transform (space to k-space and time to frequency)
     IFT::iFTT # explicit inverse of FT on a device, `nothing` on the host (see below)
     normfun::nT # Function which returns normalisation factor
@@ -1075,14 +1088,18 @@ mutable struct TransFree{FTT, iFTT, nT, rT, gT, gvT, xygT, dT, tT, pT, oT, iT, e
     gv::gvT # grid vectors (ω and the apodisation windows) on the buffers' array type
     xygrid::xygT
     densityfun::dT # callable which returns density
-    Pto::pT # buffer for oversampled time-domain NL polarisation, or nothing (fast path, all-pointwise)
+    Pto::pT # buffer for oversampled time-domain NL polarisation; `nothing` (fast path) or
+            # `=== Eto` (general path) when every response is pointwise and it may alias
     Eto::tT # buffer for oversampled time-domain field
     Eωo::oT # buffer for oversampled frequency-domain field, or nothing (fast path)
-    Pωo::oT # buffer for oversampled frequency-domain NL polarisation, or nothing (fast path)
+    Pωo::oT # oversampled frequency-domain NL polarisation: `=== Eωo` on the general path
+            # (the inverse transform consumes Eωo), or nothing (fast path)
     scale::Float64 # scale factor to be applied during oversampling
     idcs::iT # iterating over these slices Eto/Pto into Vectors, one at each position
     Et_noise::eT # time-domain noise for modified shot-noise model, or nothing
     Et_nl::nlT # buffer for field+noise passed to Et_to_Pt!, or nothing
+    Et_win::wT # (nt, ny, nx) window-application scratch on the COARSE grid, or nothing
+               # when the grid is not oversampled (Eto already has that shape)
 end
 
 function show(io::IO, t::TransFree)
@@ -1114,35 +1131,60 @@ free-space propagation.
   transform on a device; the grid vectors are mirrored to the same type (see
   [`Luna.GridVectors`](@ref Luna.GridVectors)) and an explicit inverse FFT plan is stored, because
   `ldiv!` through a device plan's `ScaledPlan` would otherwise be built per call.
+- `Eto=nothing`: adopt this `(nto, ny, nx)` array as the oversampled time-domain buffer
+  instead of allocating one. `Luna.setup`'s real free-space method passes the very array it
+  planned this `FT` against, so the plan prototype and the transform's buffer are one
+  allocation rather than two — 9 GiB at field-resolved production shapes. The buffer's
+  contents are irrelevant (the first act of every RHS evaluation is to overwrite it), which
+  is what makes it safe to hand over an array an FFTW planner has scribbled on.
 """
 function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
-                   noise_field=nothing, fastpath=true, arraytype=Array)
+                   noise_field=nothing, fastpath=true, arraytype=Array, Eto=nothing)
     Ny = length(xygrid.y)
     Nx = length(xygrid.x)
-    # The fast path is only exact (and only safe: c2r ldiv! would destroy its input) for
-    # complex (envelope) fields on a non-oversampled grid without a noise field.
+    # The fast path is only exact (and only safe: c2r ldiv! would destroy its input, and on
+    # the fast path that input is the solver's own state) for complex (envelope) fields on a
+    # non-oversampled grid without a noise field.
     fast = (fastpath && TT <: Complex && length(grid.ωo) == length(grid.ω)
             && scale == 1 && isnothing(noise_field))
-    if !fast && any(r -> Nonlinear.batched(r), responses)
-        error("Batched responses (e.g. RamanPolarEnvBatched) require the TransFree fast"*
-              " path: an EnvGrid without oversampling or a noise field. Use the"*
-              " columnwise response type instead.")
-    end
     ondevice = arraytype !== Array
-    if ondevice && !fast
-        error("Device (GPU) propagation requires the TransFree fast path: an EnvGrid"*
-              " without oversampling or a noise field, and fastpath=true. The general"*
-              " path uses columnwise kernels which cannot run on a device.")
+    # On a device a columnwise response cannot run at all, so substitute its batched
+    # equivalent where one exists — the same thing TransModalFixed does. Deliberately
+    # device-only: on the host the columnwise forms work, and swapping them silently would
+    # move existing host results at the ~1e-15 level.
+    responses = ondevice ? Nonlinear.batched_responses(responses; arraytype) : responses
+    if ondevice
+        isnothing(noise_field) || error(
+            "device propagation with a noise field is not supported: the noise field is "*
+            "generated and transformed on the host.")
+        _device_responses_ok(responses) || error(
+            "device propagation requires every response to be pointwise "*
+            "(`Nonlinear.pointwise`) or batched (`Nonlinear.batched`); got "*
+            "$(join(map(r -> string(typeof(r)), responses), ", ")). Columnwise responses "*
+            "cannot run on a device.")
     end
-    Eto = Luna.device_zeros(arraytype, TT, (length(grid.to), Ny, Nx))
+    if isnothing(Eto)
+        Eto = Luna.device_zeros(arraytype, TT, (length(grid.to), Ny, Nx))
+    else
+        (eltype(Eto) === TT && size(Eto) == (length(grid.to), Ny, Nx)) || error(
+            "the supplied Eto buffer is $(eltype(Eto)) $(size(Eto)); this grid needs "*
+            "$TT $((length(grid.to), Ny, Nx))")
+    end
+    allpointwise = all(Nonlinear.pointwise, responses)
     if fast
         Eωo = nothing
         Pωo = nothing
-        Pto = all(Nonlinear.pointwise, responses) ? nothing : similar(Eto)
+        Pto = allpointwise ? nothing : similar(Eto)
     else
-        Eωo = zeros(ComplexF64, (length(grid.ωo), Ny, Nx))
-        Pωo = similar(Eωo)
-        Pto = similar(Eto)
+        Eωo = Luna.device_zeros(arraytype, ComplexF64, (length(grid.ωo), Ny, Nx))
+        # The polarisation's forward transform reuses the field's spectral buffer: the
+        # inverse transform above consumes `Eωo` (a c2r transform destroys it outright) and
+        # nothing reads it again, and the next call refills it from scratch. At 3-D
+        # field-resolved production shapes that is 9 GiB not spent.
+        Pωo = Eωo
+        # ...and when every response is pointwise the polarisation may overwrite the field
+        # buffer, exactly as the fast path does.
+        Pto = allpointwise ? Eto : similar(Eto)
     end
     idcs = CartesianIndices((Ny, Nx))
     # Precompute time-domain noise in real space:
@@ -1158,13 +1200,27 @@ function TransFree(TT, scale, grid, xygrid, FT, responses, densityfun, normfun;
         Et_noise = nothing
         Et_nl = nothing
     end
+    # `Luna.run` needs a COARSE-grid time-domain buffer to apply the apodisation windows in.
+    # When the grid is not oversampled that is `Eto` itself (see `scratch`); when it is, own
+    # the buffer here rather than letting `Luna.run` allocate it with `FT \ Eω`. On a real
+    # grid that expression applies a c2r transform to the solver's state, which FFTW happens
+    # to survive (it copies) but which is not a property to rely on through a device FFT
+    # library. It also gives `Luna.setup` a real prototype to plan the state rfft against.
+    Et_win = length(grid.to) == length(grid.t) ? nothing :
+             Luna.device_zeros(arraytype, TT, (length(grid.t), Ny, Nx))
     # The host path keeps using `ldiv!(dest, FT, src)` exactly as before; only the device
     # path needs the inverse plan materialised up front.
     IFT = ondevice ? inv(FT) : nothing
     gv = Luna.gridvectors(grid, arraytype)
     TransFree(FT, IFT, normfun, responses, grid, gv, xygrid, densityfun,
-              Pto, Eto, Eωo, Pωo, scale, idcs, Et_noise, Et_nl)
+              Pto, Eto, Eωo, Pωo, scale, idcs, Et_noise, Et_nl, Et_win)
 end
+
+# A tuple of tuples (gas mixtures) never satisfies this — `pointwise`/`batched` fall back to
+# `false` for a Tuple — which is the intended answer: those go through the columnwise
+# fallback of `Et_to_Pt_ordered!`.
+_device_responses_ok(responses) =
+    all(r -> Nonlinear.pointwise(r) || Nonlinear.batched(r), responses)
 
 function TransFree(grid::Grid.RealGrid, args...; kwargs...)
     N = length(grid.ω)
@@ -1189,7 +1245,9 @@ buffer exists. `Luna.run` reuses it as its window-application scratch instead of
 allocating another field-sized array.
 """
 scratch(t) = nothing
-scratch(t::TransFree) = length(t.grid.to) == length(t.grid.t) ? t.Eto : nothing
+# `Et_win` exists exactly when the grid is oversampled; otherwise `Eto` already has the
+# coarse shape and is dead between RHS evaluations.
+scratch(t::TransFree) = isnothing(t.Et_win) ? t.Eto : t.Et_win
 scratch(t::TransModalFixed) = t.Et_scratch
 
 """
@@ -1218,22 +1276,37 @@ function (t::TransFree)(nl, Eωk, z)
     end
 end
 
-function _trans_free_general!(::Utils.CPUBackend, nl, t::TransFree, Eωk, z)
+"""
+General path: oversample into `Eωo`, transform, respond, window, transform back and crop.
+
+Every stage is a backend-dispatched kernel shared with the fast path — `copy_scale!`,
+`pointwise_Pt!`/`Et_to_Pt_ordered!`, `_apply_towin!`, `_scale_nl!` — so this is threaded on
+the host and runs on a device. It performs the same floating-point operations in the same
+order as the version that preceded it (which was one serial scalar loop per stage), and the
+`fastpath=false` bit-identity test covers that.
+"""
+function trans_free_general!(nl, t::TransFree, Eωk, z)
+    ρ = t.densityfun(z)
+    N = length(t.grid.ω)
     fill!(t.Eωo, 0)
-    copy_scale!(t.Eωo, Eωk, length(t.grid.ω), t.scale)
-    ldiv!(t.Eto, t.FT, t.Eωo) # transform (ω, ky, kx) -> (t, y, x)
-    # Modified shot-noise: compute field+noise in separate buffer (Et_nl) so the
+    copy_scale!(t.Eωo, Eωk, N, t.scale)
+    _to_time!(t.Eto, t, t.Eωo) # transform (ω, ky, kx) -> (t, y, x)
+    # Modified shot-noise: compute field+noise in a separate buffer (Et_nl) so the
     # propagating field (Eto) is never contaminated.
+    Eresp = t.Eto
     if !isnothing(t.Et_noise)
         @. t.Et_nl = t.Eto + t.Et_noise
-        Et_to_Pt!(t.Pto, t.Et_nl, t.resp, t.densityfun(z), t.idcs)
-    else
-        Et_to_Pt!(t.Pto, t.Eto, t.resp, t.densityfun(z), t.idcs)
+        Eresp = t.Et_nl
     end
-    @. t.Pto *= t.grid.towin # apodisation
+    if t.Pto === t.Eto # all responses pointwise: the polarisation overwrites the field
+        pointwise_Pt!(t.Pto, Eresp, t.resp, ρ)
+    else
+        Et_to_Pt_ordered!(t.Pto, Eresp, t.resp, ρ, t.idcs)
+    end
+    _apply_towin!(Utils.backend(t.Pto), t.Pto, t.gv.towin, t.idcs) # apodisation
     mul!(t.Pωo, t.FT, t.Pto) # transform (t, y, x) -> (ω, ky, kx)
-    copy_scale!(nl, t.Pωo, length(t.grid.ω), 1/t.scale)
-    nl .*= t.grid.ωwin .* (-im.*t.grid.ω)./(2 .* t.normfun(z))
+    copy_scale!(nl, t.Pωo, N, 1/t.scale)
+    _scale_nl!(Utils.backend(nl), nl, t, t.normfun(z))
 end
 
 # Fast path: no oversampling (scale == 1), complex field, no noise — the oversampled
@@ -1341,17 +1414,6 @@ end
 _scale_nl!(::Utils.DeviceBackend, nl, t::TransFree, norm) = error(
     "device propagation needs a factored normalisation (`const_norm_free(...; "*
     "factored=true)`); got a $(typeof(norm)).")
-
-trans_free_general!(nl, t::TransFree, Eωk, z) =
-    _trans_free_general!(Utils.backend(nl), nl, t, Eωk, z)
-
-# The general path uses columnwise kernels and the scalar `copy_scale!` loops, neither of
-# which can run on a device. The constructor already refuses this combination; this is
-# the backstop.
-_trans_free_general!(::Utils.DeviceBackend, nl, t::TransFree, Eωk, z) = error(
-    "the general TransFree path cannot run on a device: it uses columnwise response "*
-    "evaluation and scalar oversampling copies. Use an EnvGrid without oversampling "*
-    "and without a noise field.")
 
 """
     FreeNorm

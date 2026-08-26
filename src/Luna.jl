@@ -350,25 +350,66 @@ function setup(grid::Grid.EnvGrid, q::Hankel.QDHT,
     Eωk, transform, FT
 end
 
+"""
+    setup(grid::RealGrid, xygrid::FreeGrid, densityfun, normfun, responses, inputs;
+          noise_field=nothing, fastpath=true, arraytype=Array)
+
+Set up a 3D free-space field-resolved (real) propagation, returning `(Eωk, transform, FT)`.
+
+`arraytype` behaves as for the [`EnvGrid` method](@ref Luna.setup): the default `Array` is
+the host, and a GPU array type puts the transform buffers and the state on that device.
+A real field always takes `TransFree`'s general path — the inverse of a real-to-complex plan
+destroys its input, which on the fast path would be the solver's own state — so the device
+run additionally requires every response to be pointwise or batched, and no noise field.
+
+The state plan is real-to-complex and so needs a *real* prototype, which the state array is
+not. It is therefore planned against the transform's own coarse-grid scratch buffer, as the
+modal setup does, and the fine-grid plan's prototype is handed to the transform as its `Eto`
+buffer — so neither plan costs a field-sized array of its own.
+"""
 function setup(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
-               densityfun, normfun, responses, inputs; noise_field=nothing)
+               densityfun, normfun, responses, inputs;
+               noise_field=nothing, fastpath=true, arraytype=Array)
     Logging.@info("Setting up and planning FFTs...")
     flush(stderr)
-    Utils.loadFFTwisdom()
+    ondevice = arraytype !== Array
     x = xygrid.x
     y = xygrid.y
-    xr = Array{Float64}(undef, length(grid.t), length(y), length(x))
-    FT = FFTW.plan_rfft(xr, (1, 2, 3), flags=settings["fftw_flag"])
-    Eωk = zeros(ComplexF64, length(grid.ω), length(y), length(x))
-    doinputs_fs!(Eωk, grid, xygrid, FT, inputs)
-    xo = Array{Float64}(undef, length(grid.to), length(y), length(x))
-    FTo = FFTW.plan_rfft(xo, (1, 2, 3), flags=settings["fftw_flag"])
+    # As in the EnvGrid method: a device run whose caller supplies the state itself needs
+    # neither the host prototype nor the host plan, and at production shapes those are
+    # several GiB plus a discarded 3-D planning pass.
+    hostbuild = !(ondevice && _no_inputs(inputs))
+    if hostbuild
+        Utils.loadFFTwisdom() # host wisdom: the input field is built on the host
+        xr = Array{Float64}(undef, length(grid.t), length(y), length(x))
+        FTh = FFTW.plan_rfft(xr, (1, 2, 3), flags=settings["fftw_flag"])
+        Eωk = zeros(ComplexF64, length(grid.ω), length(y), length(x))
+        doinputs_fs!(Eωk, grid, xygrid, FTh, inputs)
+    else
+        FTh = nothing
+        Eωk = device_zeros(arraytype, ComplexF64,
+                           (length(grid.ω), length(y), length(x)))
+    end
+    ondevice && (Eωk = Adapt.adapt(arraytype, Eωk))
+    # The fine-grid plan and the transform's fine-grid buffer are the same array.
+    if !ondevice && length(grid.to) == length(grid.t)   # (host ⇒ hostbuild)
+        FTo, Eto = FTh, nothing # not oversampled: the two plans would be identical
+    else
+        Eto = device_zeros(arraytype, Float64, (length(grid.to), length(y), length(x)))
+        FTo = Utils.plan_rfft_backend(Eto, (1, 2, 3))
+    end
     transform = NonlinearRHS.TransFree(grid, xygrid, FTo,
                                        responses, densityfun, normfun;
-                                       noise_field)
-    inv(FT) # create inverse FT plans now, so wisdom is saved
-    inv(FTo)
-    Utils.saveFFTwisdom()
+                                       noise_field, fastpath, arraytype, Eto)
+    # A real state plan needs a real prototype; `scratch` is the transform's coarse-grid
+    # time-domain buffer, already on the device if there is one.
+    FT = ondevice ? NonlinearRHS._plan_forward(NonlinearRHS.scratch(transform), (1, 2, 3)) :
+                    FTh
+    if hostbuild
+        inv(FTh) # create inverse FT plans now, so wisdom is saved
+        ondevice || FTo === FTh || inv(FTo)
+        Utils.saveFFTwisdom()
+    end
     Logging.@info("Setup finished.")
     flush(stderr)
     Eωk, transform, FT
