@@ -11,7 +11,20 @@
 set -euo pipefail
 
 VOL=/workspace
-JULIA_CHANNEL=1.12
+# EXACT version, not the rolling `1.12` channel. The depot tarball and the dev project's
+# Manifest both record the stdlib versions of the Julia that built them; when the channel
+# moves a patch release under them, every package whose cache mentions a stdlib is
+# invalidated — Julia says "N dependencies precompiled but different versions are
+# currently loaded" and then recompiles them in the NEXT process, and the one after that.
+# Measured on 2026-08-26, when the channel moved 1.12.6 -> 1.12.7 under a 6.1 GB depot
+# that restored fine: Luna recompiled twice (716 s, then 130 s again in the first suite
+# process) and the whole CUDA stack — Pkg, REPL, LLVM, GPUCompiler, CUDA, cuBLAS, cuFFT,
+# 28 packages — rebuilt from scratch inside test_cuda.jl for another 216 s. About 6-8
+# minutes of a 40-minute session, none of it doing any work.
+#
+# Bump this deliberately, and run `runpodcoldstart.sh save` afterwards so the new depot
+# is the one the next pod restores.
+JULIA_CHANNEL=1.12.7
 LUNA_URL=https://github.com/jtravs/Luna.jl.git
 LUNA_BRANCH=modal-fixed
 PNPS_URL=https://github.com/LupoLab/ModelPNPS.jl.git
@@ -331,6 +344,24 @@ else
     julia --project="$DEV" -e 'using Pkg; Pkg.instantiate()'
 fi
 
+# A Manifest resolved under a different Julia carries that Julia's stdlib versions, and
+# every package cache that mentions one is then invalid — see the JULIA_CHANNEL note.
+# `Pkg.resolve()` rewrites those entries in one go; without it each subsequent process
+# rediscovers the mismatch and recompiles its own share. Non-fatal: a failed resolve is
+# worth a warning, not an aborted bootstrap.
+_vstamp="$DEV/.julia_version"
+_vnow=$(julia -e 'print(VERSION)')
+if [ ! -f "$_vstamp" ] || [ "$(cat "$_vstamp" 2>/dev/null)" != "$_vnow" ]; then
+    if [ -f "$_vstamp" ]; then
+        warn "Manifest was resolved under Julia $(cat "$_vstamp"), now running $_vnow"
+        warn "re-resolving so the stdlib versions match — otherwise every later process"
+        warn "recompiles its own share of the depot (minutes, repeatedly)"
+    fi
+    julia --project="$DEV" -e 'using Pkg; Pkg.resolve()' \
+        || warn "Pkg.resolve failed — if precompilation churns below, that is why"
+    printf '%s' "$_vnow" > "$_vstamp"
+fi
+
 # Non-fatal: a broken gpu branch shouldn't abort the whole bootstrap.
 julia --project="$DEV" -e 'using Pkg; Pkg.precompile()' \
     || warn "precompile failed — drop into the REPL and debug interactively"
@@ -429,6 +460,8 @@ ${_hostwarn:+$_hostwarn
   volume       ${_vol_used} in use (quota not visible to df)
   depot        ${_depot_gb} GB across ${_depot_files} files (container disk;
                persist with: bash $0 save   → $DEPOT_TAR)
+
+  julia        $(julia -e 'print(VERSION)') (pinned: JULIA_CHANNEL=$JULIA_CHANNEL)
 
   Total cold start: $((SECONDS-t0))s
   (If this is under ~5 min on a warm volume, a custom Docker image
