@@ -442,6 +442,23 @@ and the realised time window as well, so it is for convergence-checked use only.
 The regression gate for all of this is the existing `test/test_perf_bitident.jl` "TransFree
 fast path" testset, which asserts general == fast **bit for bit** on an `EnvGrid`.
 
+**Measured on an H200 (139.8 GiB, CUDA 13.3), 2026-08-26.** Host-versus-device agreement on
+a `RealGrid` free-space propagation is ``7\times10^{-15}`` for the batched no-THG response
+and ``9\times10^{-15}`` for the pointwise `KerrField` (`test_cuda.jl`, "RealGrid free-space
+end to end"); through ModelPNPS's 3-D TG-FROG setup and extraction it is
+``2\times10^{-13}``. At that campaign's production shape (``n_\omega = 513``, ``768^2``,
+fine grid 2048) a delay point costs **6.0× the envelope per step** at identical step counts
+— 61.1 s against 10.3 s for 57 steps each. The extra is this path's, and specifically the
+no-THG response's: an 18 GiB complex analytic-signal buffer and two 1-D FFT passes over it
+per RHS, on top of the oversampled `Eωo`/`Eto` the general path needs anyway. A laptop
+gives ~3× for the same comparison, because there the fixed per-point costs dilute it; the
+per-step figure is the one to plan with.
+
+The resident total is 96.9 GiB at that shape, against a per-buffer model that predicts 96.9
+(`ModelPNPS.memory_budget`). Note that the response's analytic buffer is allocated lazily,
+on the **first RHS** rather than at setup — so a card with room after setup can still fail
+on the first step.
+
 ## 4. Accuracy
 
 ### 4.1 Kerr and Raman: exact by construction
