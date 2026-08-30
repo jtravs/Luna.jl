@@ -490,4 +490,133 @@ function make_linop(grid::Grid.EnvGrid, modes, λ0; ref_mode=1, thg=false)
 end
 
 
+
+#=================================================#
+#=========  UNITARY PHASE OF THE LINOP  ==========#
+#=================================================#
+
+"""
+    AbstractUnitaryPhase
+
+Callable which fills an array with the accumulated **unitary** phase of a linear operator,
+`Φ(ω, z) = ∫₀ᶻ imag(linop(ω, z')) dz'`, i.e. the phase the linear operator would impart in
+the absence of loss or gain. Subtypes implement `(p::AbstractUnitaryPhase)(out, z)`, which
+**mutates** `out` and returns it.
+
+This is the propagator required by the modified shot-noise model: the noise field must feel
+dispersion (unitary, and the phase evolution of the medium's own vacuum modes) but neither
+loss nor gain. See [`unitary_phase`](@ref) and
+[`NonlinearRHS.ModifiedNoise`](@ref Luna.NonlinearRHS.ModifiedNoise).
+"""
+abstract type AbstractUnitaryPhase end
+
+"""
+    ConstUnitaryPhase(dφ)
+
+[`AbstractUnitaryPhase`](@ref) for a `z`-invariant linear operator, for which
+`Φ(ω, z) = imag(linop)·z` exactly.
+"""
+struct ConstUnitaryPhase{aT<:AbstractArray} <: AbstractUnitaryPhase
+    dφ::aT # imag(linop), i.e. dΦ/dz, constant in z
+end
+
+(p::ConstUnitaryPhase)(out, z) = (@. out = p.dφ * z; out)
+
+"""
+    TabulatedUnitaryPhase(z, Φ, dΦ)
+
+[`AbstractUnitaryPhase`](@ref) for a `z`-dependent linear operator. `Φ` and `dΦ` hold the
+accumulated phase and its derivative `imag(linop)` on the uniform node grid `z`, stacked
+along the last dimension. Between nodes the phase is interpolated with a cubic Hermite, which
+uses both the tabulated value and the tabulated derivative and so matches the accuracy of the
+node integration. Outside `[z[1], z[end]]` it extrapolates linearly, which is needed because
+the integrator overshoots `grid.zmax` on its final step.
+"""
+struct TabulatedUnitaryPhase{aT<:AbstractArray} <: AbstractUnitaryPhase
+    z::LinRange{Float64, Int}
+    Φ::aT
+    dΦ::aT
+end
+
+function (p::TabulatedUnitaryPhase)(out, z)
+    zs = p.z
+    nz = length(zs)
+    d = ndims(p.Φ)
+    if z >= zs[end] # linear extrapolation past the end of the table
+        Φk = selectdim(p.Φ, d, nz)
+        dk = selectdim(p.dΦ, d, nz)
+        δ = z - zs[end]
+        @. out = Φk + dk*δ
+        return out
+    elseif z <= zs[1]
+        Φk = selectdim(p.Φ, d, 1)
+        dk = selectdim(p.dΦ, d, 1)
+        δ = z - zs[1]
+        @. out = Φk + dk*δ
+        return out
+    end
+    δz = step(zs)
+    k = min(floor(Int, (z - zs[1])/δz) + 1, nz-1)
+    s = (z - zs[k])/δz
+    # cubic Hermite basis
+    s2 = s*s
+    s3 = s2*s
+    h00 = 2s3 - 3s2 + 1
+    h10 = δz*(s3 - 2s2 + s)
+    h01 = -2s3 + 3s2
+    h11 = δz*(s3 - s2)
+    Φk = selectdim(p.Φ, d, k)
+    Φk1 = selectdim(p.Φ, d, k+1)
+    dk = selectdim(p.dΦ, d, k)
+    dk1 = selectdim(p.dΦ, d, k+1)
+    @. out = h00*Φk + h10*dk + h01*Φk1 + h11*dk1
+    out
+end
+
+"""
+    unitary_phase(linop, grid, sz=size(linop); nz=nothing)
+
+Create an [`AbstractUnitaryPhase`](@ref) for the linear operator `linop`, which may be either
+a constant array or a mutating function `linop!(out, z)`. `sz` is the size of the array
+`linop!` fills (equal to `size(linop)` in the constant case, and to the size of the noise
+field in general).
+
+For a `z`-dependent `linop!`, the accumulated phase is tabulated on `nz` uniform nodes over
+`[0, grid.zmax]`, each interval integrated by Simpson's rule (so `linop!` is evaluated
+`2nz-1` times in total, once per node and once per midpoint). `nz` defaults to a value chosen
+from a ~64 MB budget for the two tables, clamped to `[33, 401]`.
+"""
+unitary_phase(linop::AbstractArray, grid, sz=size(linop); nz=nothing) =
+    ConstUnitaryPhase(imag.(linop))
+
+function unitary_phase(linop!, grid, sz; nz=nothing)
+    nz = isnothing(nz) ? _default_phase_nz(prod(sz)) : nz
+    zs = LinRange(0.0, float(grid.zmax), nz)
+    δz = step(zs)
+    Φ = zeros(Float64, (sz..., nz))
+    dΦ = zeros(Float64, (sz..., nz))
+    d = ndims(Φ)
+    lo = Array{ComplexF64}(undef, sz)
+    mid = zeros(Float64, sz)
+    linop!(lo, zs[1])
+    dk = selectdim(dΦ, d, 1)
+    @. dk = imag(lo)
+    for k = 1:nz-1
+        linop!(lo, zs[k] + δz/2)
+        @. mid = imag(lo)
+        linop!(lo, zs[k+1])
+        dk = selectdim(dΦ, d, k)
+        dk1 = selectdim(dΦ, d, k+1)
+        @. dk1 = imag(lo)
+        # Simpson over [z[k], z[k+1]]
+        Φk = selectdim(Φ, d, k)
+        Φk1 = selectdim(Φ, d, k+1)
+        @. Φk1 = Φk + δz/6*(dk + 4*mid + dk1)
+    end
+    TabulatedUnitaryPhase(zs, Φ, dΦ)
+end
+
+"Number of tabulation nodes which keeps the two phase tables within `maxbytes`."
+_default_phase_nz(n; maxbytes=64*2^20) = Int(clamp(fld(maxbytes, 16*max(n, 1)), 33, 401))
+
 end
