@@ -75,6 +75,9 @@ const DEFAULT_N = 20
 "Default minimum temporal collar width, as a fraction of the full time window."
 const DEFAULT_TCOLLAR = 0.05
 
+"Fraction of the pulse the temporal absorber may remove before `Luna.run` warns about it."
+const DEFAULT_WARNFRAC = 1e-3
+
 """
 Cap on `α*ℓ`, the depth of the absorber over one reference length.
 
@@ -207,62 +210,6 @@ function addloss(linop!, α)
     end
 end
 
-"""
-    walkoff_check(grid, L, αt, collarwidth; quantile=0.95, threshold=1e-2)
-
-Warn if the temporal absorber is too weak for the group-delay walk-off the simulation can
-produce.
-
-The absorber's job in time is to kill energy before it wraps around the periodic time
-window. A component walking off at `τ` (s/m) crosses the collar in `collarwidth/τ` metres,
-so the relevant figure of merit is the attenuation over that distance. `τ` is read off the
-linear operator: `imag(linop) = -(β - β₁ω)`, so `-d imag(L)/dω` is the group delay per unit
-length relative to the reference frame. A high quantile over `grid.sidx` is used rather
-than the maximum, because β₁ diverges at the band edges.
-
-The default `threshold` is a *field* retention of 1e-2, i.e. 1e-4 in intensity — roughly
-where wraparound starts to be visible on a log-scale spectral plot. A tighter threshold
-warns about wraparound far below any level that could matter.
-
-This is a diagnostic only — a bad estimate costs a spurious log line, not a wrong answer.
-"""
-function walkoff_check(grid, L, αt, collarwidth; quantile=0.95, threshold=1e-2)
-    ω = grid.ω
-    length(ω) > 2 || return nothing
-    #= Group delay per unit length, on the ω midpoints; keep only pairs fully inside the
-       simulation band, and only finite values. Only the first trailing slice is used — for
-       a multimode or free-space linop that is the fundamental mode or zero transverse
-       wavevector, which is representative, and scanning the whole array would mean tens of
-       millions of points for a large 3-D grid. =#
-    τ = Float64[]
-    dωs = diff(ω)
-    lead = ntuple(_ -> 1, max(ndims(L) - 1, 0))
-    for i = 1:length(ω)-1
-        (grid.sidx[i] && grid.sidx[i+1]) || continue
-        v = abs((imag(L[i+1, lead...]) - imag(L[i, lead...]))/dωs[i])
-        isfinite(v) && push!(τ, v)
-    end
-    isempty(τ) && return nothing
-    sort!(τ)
-    τq = τ[clamp(ceil(Int, quantile*length(τ)), 1, length(τ))]
-    τq > 0 || return nothing
-    zcross = collarwidth/τq # distance to walk across the collar
-    #= Mean coefficient through the collar, i.e. what such a component actually
-       experiences. αt is a power coefficient and `threshold` is a field retention, hence
-       the factor of 2. =#
-    collar = filter(>(0), αt)
-    isempty(collar) && return nothing
-    att = exp(-sum(collar)/length(collar)*zcross/2)
-    if att > threshold
-        Logging.@warn(@sprintf(
-            "Temporal absorbing boundary may be too weak: a component walking off at \
-             %.3g fs/mm crosses the %.3g fs collar in %.3g mm and is only attenuated by \
-             %.1e. Increase boundary_N, widen trange, or increase tcollar.",
-            τq*1e15/1e3, collarwidth*1e15, zcross*1e3, att))
-    end
-    nothing
-end
-
 # --------------------------------------------------------------------------- application
 
 #= The three ways a boundary can be applied per accepted step. Each is a functor rather than
@@ -281,16 +228,21 @@ it rides the propagator, having been folded into the linear operator by [`addlos
 """
 struct RateAbsorber{tT, fT, oT}
     αt::Vector{Float64}
-    tidcs::Vector{Int} # only the collar is ever ≠ 1, so only those need updating each step
+    tidcs::Vector{Int} # only the collar is ever ≠ 1, so only those need touching each step
     tfac::Vector{Float64}
     Et::tT
     FT::fT
     output::oT
     zprev::Base.RefValue{Float64}
+    removed::Base.RefValue{Float64} # running total of |E|² taken out of the collar
+    reference::Base.RefValue{Float64} # |E|² over the whole window, at the first step
+    warned::Base.RefValue{Bool}
+    warnfrac::Float64
 end
 
-RateAbsorber(αt, Et, FT, output, z0) = RateAbsorber(
-    αt, findall(>(0), αt), ones(Float64, length(αt)), Et, FT, output, Ref(float(z0)))
+RateAbsorber(αt, Et, FT, output, z0; warnfrac=DEFAULT_WARNFRAC) = RateAbsorber(
+    αt, findall(>(0), αt), ones(Float64, length(αt)), Et, FT, output, Ref(float(z0)),
+    Ref(0.0), Ref(0.0), Ref(false), warnfrac)
 
 function (b::RateAbsorber)(Eω, z, dz, interpolant)
     Δz = z - b.zprev[]
@@ -302,10 +254,50 @@ function (b::RateAbsorber)(Eω, z, dz, interpolant)
         #= An inverse real FFT overwrites its input, so between these two lines Eω holds
            whatever FFTW left there and must not be read; the forward transform refills it. =#
         ldiv!(b.Et, b.FT, Eω)
-        b.Et .*= b.tfac
+        b.reference[] == 0 && (b.reference[] = sum(abs2, b.Et))
+        #= Apply the collar and measure what it took out, in one pass. Only the collar can
+           change, so this also does less work than multiplying the whole array. The trailing
+           index covers every field shape: none for mode-averaged, modes, or transverse. =#
+        removed = 0.0
+        @inbounds for J in CartesianIndices(size(b.Et)[2:end]), i in b.tidcs
+            before = abs2(b.Et[i, J])
+            b.Et[i, J] *= b.tfac[i]
+            removed += before - abs2(b.Et[i, J])
+        end
+        b.removed[] += removed
         mul!(Eω, b.FT, b.Et)
+        warn_maybe(b, z)
     end
     b.output(Eω, z, dz, interpolant)
+end
+
+"""
+    warn_maybe(b::RateAbsorber, z)
+
+Warn, once, if the temporal absorber has eaten a noticeable fraction of the pulse.
+
+This is a measurement of what the boundary actually removed, not a prediction from the
+dispersion. A prediction cannot work well here: at setup time the only thing available is
+the group delay across the simulation band, and on a broadband grid that is dominated by
+the band edges — where a capillary has an enormous group delay and nothing but shot noise
+to carry it. Such a check fires on almost every realistic run, and a warning which is
+usually wrong is one people learn to ignore.
+
+What the user needs to know is whether light they care about is leaving the time window,
+and the absorber is the thing that finds out. Measuring costs nothing extra, since the
+collar is being multiplied anyway, and it fires when it becomes true rather than
+speculating beforehand.
+"""
+function warn_maybe(b::RateAbsorber, z)
+    (b.warned[] || b.reference[] == 0) && return nothing
+    frac = b.removed[]/b.reference[]
+    frac > b.warnfrac || return nothing
+    b.warned[] = true
+    Logging.@warn(@sprintf(
+        "Temporal absorbing boundary has removed %.2g%% of the pulse by z = %.3g m. Light \
+         is reaching the edge of the time window and being absorbed; if that is not \
+         intended, widen `trange`. (Reported once.)", 100frac, z))
+    nothing
 end
 
 """
@@ -342,20 +334,6 @@ end
 
 (b::NoAbsorber)(Eω, z, dz, interpolant) = b.output(Eω, z, dz, interpolant)
 
-"""
-    linop_array(linop, Eω, z)
-
-The linear operator as an array, materialising the z-dependent (closure) form at `z`. The
-linop has the same shape as the field, which is how `RK45.make_prop!` allocates its own
-buffer.
-"""
-linop_array(linop::AbstractArray, Eω, z) = linop
-function linop_array(linop!, Eω, z)
-    out = similar(Eω)
-    linop!(out, z)
-    out
-end
-
 "Report the absorbing-boundary configuration."
 function log_setup(grid, ℓ, collar)
     w = tcollarwidth(grid, collar)
@@ -372,8 +350,8 @@ function log_setup(grid, ℓ, collar)
 end
 
 """
-    setup(boundary, grid, linop, Eω, Et, FT, output, z0, max_dz, init_dz;
-          N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR)
+    setup(boundary, grid, linop, Et, FT, output, z0, max_dz, init_dz;
+          N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR, warnfrac=DEFAULT_WARNFRAC)
 
 Everything `Luna.run` needs in order to apply absorbing boundaries, as a named tuple
 `(; stepfun, linop, max_dz, init_dz, ℓ)`. `ℓ` is the reference length actually used, or
@@ -388,8 +366,8 @@ clearer to hand them back than to mutate them from inside a branch:
   step-size controller is not thrown by the amplified band-edge elements the interaction
   picture produces. See "Step size" in the module docstring.
 """
-function setup(boundary, grid, linop, Eω, Et, FT, output, z0, max_dz, init_dz;
-               N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR)
+function setup(boundary, grid, linop, Et, FT, output, z0, max_dz, init_dz;
+               N=DEFAULT_N, ℓ=nothing, collar=DEFAULT_TCOLLAR, warnfrac=DEFAULT_WARNFRAC)
     ℓabs = nothing
     if boundary === :rate
         ℓabs = reflength(grid, N, ℓ)
@@ -401,10 +379,9 @@ function setup(boundary, grid, linop, Eω, Et, FT, output, z0, max_dz, init_dz;
         end
         init_dz = min(init_dz, max_dz)
         αt = temporal_rate(grid; N, ℓ, collar)
-        walkoff_check(grid, linop_array(linop, Eω, z0), αt, tcollarwidth(grid, collar))
         linop = addloss(linop, spectral_rate(grid; N, ℓ))
         log_setup(grid, ℓabs, collar)
-        stepfun = RateAbsorber(αt, Et, FT, output, z0)
+        stepfun = RateAbsorber(αt, Et, FT, output, z0; warnfrac)
     elseif boundary === :legacy
         Logging.@warn(
             "boundary=:legacy applies the absorbing boundaries once per accepted step, " *

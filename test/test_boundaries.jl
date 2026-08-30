@@ -281,6 +281,40 @@ dl = abs(bandE(legacyfine)[end] - Elegacy[end])/Elegacy[end]
 @test dr < 0.05
 @test dl > 0.1        # the mechanism is genuinely exercised
 @test dl > 10*dr
+
+#= The absorber reports what it removed. This has to fire here -- the DW really is being
+   eaten -- and it has to stay quiet when nothing reaches the boundary. The old diagnostic
+   predicted from the group delay across the band instead of measuring, which on a grid
+   running to 4 um is dominated by band-edge components carrying nothing but shot noise, so
+   it warned on runs where the absorber never touched anything real. =#
+warnings = String[]
+mutable struct CollectWarnings <: Logging.AbstractLogger; msgs::Vector{String}; end
+Logging.min_enabled_level(::CollectWarnings) = Logging.Info
+Logging.shouldlog(::CollectWarnings, args...) = true
+Logging.catch_exceptions(::CollectWarnings) = false
+function Logging.handle_message(l::CollectWarnings, lvl, msg, _m, g, id, file, line; kw...)
+    occursin("Temporal absorbing boundary", string(msg)) && push!(l.msgs, string(msg))
+    nothing
+end
+
+function warnings_from(; trange, flength)
+    lg = CollectWarnings(String[])
+    Logging.with_logger(lg) do
+        Eω, grid, linop, transform, FT, output = prop_capillary_args(
+            50e-6, flength, :Ar, 0.4; λ0=800e-9, energy=29e-6, τfwhm=10e-15,
+            λlims=(150e-9, 4e-6), trange, saveN=11, plasma=false,
+            rng=MersenneTwister(1234))
+        Luna.run(Eω, grid, linop, transform, FT, output)
+    end
+    lg.msgs
+end
+
+# the DW is well into the collar by 2 m, so this must warn -- exactly once
+warned = warnings_from(trange=100e-15, flength=ZMAX)
+@test length(warned) == 1
+@test occursin("removed", warned[1])
+# stop before the DW gets there and there is nothing to report
+@test isempty(warnings_from(trange=100e-15, flength=0.3))
 end
 
 @testset "run interface" begin

@@ -415,7 +415,7 @@ function run(Eω, grid,
 
     #= NOTE: this must come after check_cache, which can move z0 and init_dz: the temporal
        absorber measures the distance it is applied over from z0. =#
-    absorber = Boundaries.setup(boundary, grid, linop, Eω, Et, FT, output, z0,
+    absorber = Boundaries.setup(boundary, grid, linop, Et, FT, output, z0,
                                 max_dz, init_dz;
                                 N=boundary_N, ℓ=boundary_length, collar=tcollar)
     stepfun = absorber.stepfun
