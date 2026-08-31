@@ -59,7 +59,7 @@ function display_fig(fig)
 end
 
 function cmap_white(cmap; N=2^12, n=8)
-    cm = Makie.to_colormap(cmap, n)
+    cm = Makie.categorical_colors(cmap, n)
     cm[1] = Makie.RGBAf(1, 1, 1, 1)
     result = Vector{Makie.RGBAf}(undef, N)
     for i in 1:N
@@ -77,7 +77,7 @@ function cmap_white(cmap; N=2^12, n=8)
 end
 
 function cmap_colours(num, cmap=:viridis; cmin=0, cmax=0.8)
-    cm = Makie.to_colormap(cmap, 256)
+    cm = Makie.categorical_colors(cmap, 256)
     n = range(cmin, cmax; length=num)
     [cm[clamp(round(Int, v * 255) + 1, 1, 256)] for v in n]
 end
@@ -152,16 +152,15 @@ function prop_2D(output, specaxis=:f;
     multimode, modelabels = get_modes(output)
 
     if multimode
-        figs = _prop2D_mm(modelabels, modeidcs(modes, modelabels), t, z, specx, It, Iω,
-                         speclabel, speclims, trange, dBmin, window_str(bandpass);
-                         kwargs...)
+        return _prop2D_mm(modelabels, modeidcs(modes, modelabels), t, z, specx, It, Iω,
+                          speclabel, speclims, trange, dBmin, window_str(bandpass);
+                          kwargs...)
     else
-        fig = _prop2D_sm(t, z, specx, It, Iω,
-                         speclabel, speclims, trange, dBmin, window_str(bandpass);
-                         kwargs...)
-        figs = [fig]
+        # return the figure directly (not a vector) to match the matplotlib backends
+        return _prop2D_sm(t, z, specx, It, Iω,
+                          speclabel, speclims, trange, dBmin, window_str(bandpass);
+                          kwargs...)
     end
-    figs
 end
 
 function _prop2D_sm(t, z, specx, It, Iω, speclabel, speclims, trange, dBmin, bpstr; kwargs...)
@@ -363,14 +362,6 @@ function _plot_slice_mm(x, y, z, modestrs, xlabel, ylabel, log10=false;
     Makie.axislegend(ax, framevisible=false)
     display_fig(pfig)
     pfig
-end
-
-function spectrogram(output, zslice=maximum(output["z"]), specaxis=:λ;
-                      trange, N, fw, λrange=(150e-9, 2000e-9), log=false, dBmin=-40,
-                      surface3d=false,
-                      kwargs...)
-    t, Et, zactual = getEt(output, zslice; trange=trange)
-    spectrogram(t, Et, specaxis; trange, N, fw, λrange, log, dBmin, surface3d, kwargs...)
 end
 
 function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;

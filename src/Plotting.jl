@@ -35,6 +35,61 @@ function cmap_white(cmap; N=2^12, n=8)
 end
 
 """
+    cmap_colours(num, cmap="viridis"; cmin=0, cmax=0.8)
+
+Make an array of `num` different colours that follow the colourmap `cmap` between the
+values `cmin` and `cmax`.
+"""
+cmap_colours(args...; kwargs...) = getext().cmap_colours(args...; kwargs...)
+
+"""
+    subplotgrid(N, portrait=true; title=nothing)
+
+Create a figure with `N` subplots laid out in a grid that is as close to square as
+possible. If `portrait` is `true`, try to lay out the grid in portrait orientation
+(taller than wide), otherwise landscape (wider than tall).
+
+For the matplotlib backends this returns `(fig, axs)`. For the Makie backend it instead
+returns `(idcs, width, height)`, where `idcs` are grid indices to place `Makie.Axis`
+objects at and `width`/`height` is the recommended figure size.
+"""
+subplotgrid(args...; kwargs...) = getext().subplotgrid(args...; kwargs...)
+
+"""
+    cornertext(ax, text; corner="ul", pad=0.02, xpad=nothing, ypad=nothing, kwargs...)
+
+Place `text` in the axes `ax` in the corner defined by `corner`. Padding can be
+defined for `x` and `y` together via `pad` or separately via `xpad` and `ypad`.
+
+Possible values for `corner` are `ul`, `ur`, `ll`, `lr` where the first letter
+defines upper/lower and the second defines left/right.
+"""
+cornertext(args...; kwargs...) = getext().cornertext(args...; kwargs...)
+
+"""
+    auto_fwhm_arrows(ax, x, y; color, arrowlength=nothing, hpad=0, linewidth=1,
+                     text=nothing, units="fs", kwargs...)
+
+Draw FWHM arrows on an axis, indicating the full-width at half-maximum of the data `y(x)`.
+"""
+auto_fwhm_arrows(args...; kwargs...) = getext().auto_fwhm_arrows(args...; kwargs...)
+
+"""
+    add_fwhm_legends(ax, unit)
+
+Enhance the legend of `ax` by appending the FWHM of each plotted line to its label.
+Only available for the matplotlib backends.
+"""
+add_fwhm_legends(args...; kwargs...) = getext().add_fwhm_legends(args...; kwargs...)
+
+"""
+    displayall()
+
+`display` all currently open figures. Only available for the matplotlib backends.
+"""
+displayall(args...; kwargs...) = getext().displayall(args...; kwargs...)
+
+"""
     get_modes(output)
 
 Determine whether `output` contains a multimode simulation, and if so, return the names
@@ -145,7 +200,7 @@ case when there is any point where the lines are different by more than a factor
 function should_log10(A, tolfac=10)
     mi = minimum(A; dims=2)
     ma = maximum(A; dims=2)
-    any(ma./mi .> 10)
+    any(ma./mi .> tolfac)
 end
 
 window_str(::Nothing) = ""

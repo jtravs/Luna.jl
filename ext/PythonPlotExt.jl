@@ -1,5 +1,5 @@
 module PythonPlotExt
-import PythonPlot: ColorMap, Figure, pyplot
+import PythonPlot: ColorMap, Figure, pyplot, matplotlib
 import PythonCall: pyconvert
 const plt = pyplot
 convertany(x) = pyconvert(Any, x)

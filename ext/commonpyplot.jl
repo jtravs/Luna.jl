@@ -1,10 +1,17 @@
 # Common implementation for PyPlotExt and PythonPlotExt.
 # Expects the including module to define:
 #   plt          - the plotting module (PyPlot.plt or PythonPlot.pyplot)
+#   matplotlib   - the matplotlib module
 #   ColorMap     - the ColorMap constructor
 #   Figure       - the Figure type
 #   convertany(x)    - identity for PyPlot, pyconvert(Any, x) for PythonPlot
 #   convertarray(x)  - identity for PyPlot, pyconvert(Array, x) for PythonPlot
+#
+# When editing this file, keep in mind the key difference between the two backends:
+# PyPlot (via PyCall) auto-converts Python return values to Julia types (1-based
+# indexing), while PythonPlot (via PythonCall) returns raw Py objects, which keep
+# Python semantics (0-based indexing). Avoid indexing into return values of
+# matplotlib calls; iterate (or use first/zip) or convert explicitly instead.
 
 import Luna: Maths, PhysData, Processing
 import Luna.PhysData: wlfreq, c, ε_0
@@ -23,7 +30,7 @@ import Base: display
 """
 function displayall()
     for fign in plt.get_fignums()
-        fig = plt.figure(fign)
+        fig = Figure(plt.figure(fign))
         display(fig)
     end
 end
@@ -34,13 +41,13 @@ function cmap_white(cmap; N=2^12, n=8)
     vals = collect(range(0, 1, length=n))
     vals_i = collect(range(0, 1, length=N))
     cm = ColorMap(cmap)
-    clist = cm(vals)
+    clist = convertarray(cm(vals))
     clist[1, :] = [1, 1, 1, 1]
     clist_i = Array{Float64}(undef, (N, 4))
     for ii in 1:4
         clist_i[:, ii] .= Maths.BSpline(vals, clist[:, ii]).(vals_i)
     end
-    ColorMap(clist_i)
+    ColorMap(matplotlib.colors.ListedColormap(clist_i))
 end
 
 """
@@ -66,7 +73,9 @@ function subplotgrid(N, portrait=true; colw=4, rowh=2.5, title=nothing)
     cols = ceil(Int, sqrt(N))
     rows = ceil(Int, N/cols)
     portrait && ((rows, cols) = (cols, rows))
-    fig, axs = plt.subplots(rows, cols, num=title)
+    # clear=true: re-use (and clear) an existing figure with the same title rather than
+    # erroring, which matplotlib ≥3.7 does by default for duplicate figure labels
+    fig, axs = plt.subplots(rows, cols, num=title, clear=true)
     axs = convertany(axs)
     ndims(axs) > 1 && (axs = permutedims(axs, (2, 1)))
     if cols*rows > N
@@ -79,38 +88,28 @@ function subplotgrid(N, portrait=true; colw=4, rowh=2.5, title=nothing)
 end
 
 function stats(z, pstats, fstats, multimode, modes; kwargs...)
-    Npl = length(pstats)
-    if Npl > 0
-        pfig, axs = subplotgrid(Npl, title="Pulse stats")
+    figs = Any[]
+    for (stats_i, title, always_log) in ((pstats, "Pulse stats", true),
+                                         (fstats, "Other stats", false))
+        Npl = length(stats_i)
+        Npl > 0 || continue
+        fig, axs = subplotgrid(Npl, title=title)
         for n in 1:Npl
             ax = axs[n]
-            data, label = pstats[n]
+            data, label = stats_i[n]
             multimode && (ndims(data) > 1) && (data = data')
             ax.plot(z, data; kwargs...)
             ax.set_xlabel("Distance (cm)")
             ax.set_ylabel(label)
-            multimode && (ndims(data) > 1) && ax.semilogy()
-            multimode && (ndims(data) > 1) && ax.legend(modes, frameon=false)
+            if multimode && (ndims(data) > 1)
+                (always_log || should_log10(data)) && ax.semilogy()
+                ax.legend(modes, frameon=false)
+            end
         end
-        pfig.tight_layout()
+        fig.tight_layout()
+        push!(figs, Figure(fig))
     end
-
-    Npl = length(fstats)
-    if Npl > 0
-        ffig, axs = subplotgrid(Npl, title="Other stats")
-        for n in 1:Npl
-            ax = axs[n]
-            data, label = fstats[n]
-            multimode && (ndims(data) > 1) && (data = data')
-            ax.plot(z, data; kwargs...)
-            ax.set_xlabel("Distance (cm)")
-            ax.set_ylabel(label)
-            multimode && (ndims(data) > 1) && should_log10(data) && ax.semilogy()
-            multimode && (ndims(data) > 1) && ax.legend(modes, frameon=false)
-        end
-        ffig.tight_layout()
-    end
-    [convertany(pfig), convertany(ffig)]
+    figs
 end
 
 function prop_2D(output, specaxis=:f;
@@ -316,19 +315,21 @@ function spec_1D(output, zslice=maximum(output["z"]), specaxis=:λ;
     Figure(sfig)
 end
 
-dashes = [(0, (10, 1)),
-          (0, (5, 1)),
-          (0, (1, 0.5)),
-          (0, (1, 0.5, 1, 0.5, 3, 1)),
-          (0, (5, 1, 1, 1))]
+const dashes = [(0, (10, 1)),
+                (0, (5, 1)),
+                (0, (1, 0.5)),
+                (0, (1, 0.5, 1, 0.5, 3, 1)),
+                (0, (5, 1, 1, 1))]
 
 function _plot_slice_mm(ax, x, y, z, modestrs, log10=false, fwhm=false; kwargs...)
     pfun = (log10 ? ax.semilogy : ax.plot)
     for sidx = 1:size(y, 3) # iterate over z-slices
         zs = @sprintf("%.2f cm", z[sidx]*100)
-        line = pfun(x, y[:, 1, sidx]; label="$zs ($(modestrs[1]))", kwargs...)[1]
+        # first(...) rather than [1]: PythonPlot returns a Py list (0-based indexing)
+        line = first(pfun(x, y[:, 1, sidx]; label="$zs ($(modestrs[1]))", kwargs...))
         for midx = 2:size(y, 2) # iterate over modes
-            pfun(x, y[:, midx, sidx], linestyle=dashes[midx], color=line.get_color(),
+            pfun(x, y[:, midx, sidx], linestyle=dashes[mod1(midx-1, length(dashes))],
+                 color=line.get_color(),
                  label="$zs ($(modestrs[midx]))"; kwargs...)
         end
     end
@@ -336,7 +337,10 @@ end
 
 function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
                      trange, N, fw, λrange=(150e-9, 2000e-9), log=false, dBmin=-40,
+                     surface3d=false,
                      kwargs...)
+    surface3d && @warn("3D surface spectrograms are only supported by the Makie backend; "*
+                       "falling back to a 2D spectrogram.")
     ω = Maths.rfftfreq(t)[2:end]
     tmin, tmax = extrema(trange)
     tg = collect(range(tmin, tmax, length=N))
@@ -359,8 +363,8 @@ function spectrogram(t::AbstractArray, Et::AbstractArray, specaxis=:λ;
 end
 
 function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
-    e = convertarray(Processing.energy(output; bandpass=bandpass))
-    eall = convertarray(Processing.energy(output))
+    e = Processing.energy(output; bandpass=bandpass)
+    eall = Processing.energy(output)
 
     multimode, modestrs = get_modes(output)
     if multimode
@@ -380,17 +384,19 @@ function energy(output; modes=nothing, bandpass=nothing, figsize=(7, 5))
         e0 = eall[1]
     end
 
-    z = convertarray(output["z"])*100
+    z = output["z"]*100
+    # shape (nz,) or (nz, nmodes): matplotlib plots one line per column
+    edata = ndims(e) > 1 ? permutedims(e) : e
 
     fig = plt.figure()
     ax = plt.axes()
-    ax.plot(z, 1e6*e')
+    ax.plot(z, 1e6*edata)
     ax.set_xlim(extrema(z)...)
     ax.set_ylim(ymin=0)
     ax.set_xlabel("Distance (cm)")
     ax.set_ylabel("Energy (μJ)")
     rax = ax.twinx()
-    rax.plot(z, 100*(e/e0)', linewidth=0)
+    rax.plot(z, 100*(edata./e0), linewidth=0)
     lims = convertany(ax.get_ylim())
     rax.set_ylim(100/(1e6*e0).*lims)
     rax.set_ylabel("Conversion efficiency (%)")
@@ -440,12 +446,11 @@ function add_fwhm_legends(ax, unit)
     leg = ax.get_legend()
     texts = leg.get_texts()
     handles, labels = ax.get_legend_handles_labels()
-    handles = convertany(handles)
-    for (ii, line) in enumerate(handles)
-        xy = line.get_xydata()
-        xy = convertany(xy)
+    # zip rather than indexing: PyPlot returns 1-based Julia vectors here but
+    # PythonPlot returns 0-based Py lists; iteration works identically for both
+    for (line, t) in zip(handles, texts)
+        xy = convertarray(line.get_xydata())
         fw = Maths.fwhm(xy[:, 1], xy[:, 2])
-        t = texts[ii-1]
         s = convertany(t.get_text())
         s *= @sprintf(" [%.2f %s]", fw, unit)
         t.set_text(s)
