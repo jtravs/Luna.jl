@@ -129,11 +129,19 @@ Make constant linear operator for full 3D propagation. `n` is the refractive ind
 and β1 is 1/velocity of the reference frame. With `factored=true`, return a
 [`FactoredFreeLinop`](@ref) instead of the materialised array (bit-identical results,
 one field-sized array less).
+
+With `frozen_transverse=true`, replace `k_z(ω, k⊥)` by `k_z(ω, 0)`: every k⊥ component
+receives the same ω-dependent phase, so the transverse field pattern is frozen exactly
+at its input form while temporal dispersion runs unchanged — a diffraction-ablation
+diagnostic, not physics. Implemented as `kperp2 → zero(kperp2)` at construction; the
+element math, the factored/materialised equivalence and everything downstream are
+untouched.
 """
 function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
                           n::AbstractArray, β1::Number; factored::Bool=false,
-                          arraytype=Array)
+                          arraytype=Array, frozen_transverse::Bool=false)
     kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
+    frozen_transverse && (kperp2 = zero(kperp2))
     idcs = CartesianIndices((length(xygrid.ky), length(xygrid.kx)))
     k2 = zero(grid.ω)
     k2[grid.sidx] .= (n[grid.sidx] .* grid.ω[grid.sidx] ./ PhysData.c).^2
@@ -150,17 +158,20 @@ function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid,
 end
 
 function make_const_linop(grid::Grid.RealGrid, xygrid::Grid.FreeGrid, nfun;
-                          factored::Bool=false, arraytype=Array)
+                          factored::Bool=false, arraytype=Array,
+                          frozen_transverse::Bool=false)
     n = zero(grid.ω)
     n[grid.sidx] = nfun.(2π*PhysData.c./grid.ω[grid.sidx])
     β1 = PhysData.dispersion_func(1, nfun)(grid.referenceλ)
-    make_const_linop(grid, xygrid, n, β1; factored, arraytype)
+    make_const_linop(grid, xygrid, n, β1; factored, arraytype, frozen_transverse)
 end
 
 function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
                           n::AbstractArray, β1::Number, β0ref::Number;
-                          thg=false, factored::Bool=false, arraytype=Array)
+                          thg=false, factored::Bool=false, arraytype=Array,
+                          frozen_transverse::Bool=false)
     kperp2 = @. (xygrid.kx^2)' + xygrid.ky^2
+    frozen_transverse && (kperp2 = zero(kperp2))
     idcs = CartesianIndices((length(xygrid.ky), length(xygrid.kx)))
     k2 = zero(grid.ω)
     k2[grid.sidx] .= (n[grid.sidx].*grid.ω[grid.sidx]./PhysData.c).^2
@@ -175,7 +186,8 @@ function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid,
 end
 
 function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,
-                          thg=false; factored::Bool=false, arraytype=Array)
+                          thg=false; factored::Bool=false, arraytype=Array,
+                          frozen_transverse::Bool=false)
     n = zero(grid.ω)
     n[grid.sidx] = nfun.(wlfreq.(grid.ω[grid.sidx]))
     β1 = PhysData.dispersion_func(1, nfun)(grid.referenceλ)
@@ -184,7 +196,8 @@ function make_const_linop(grid::Grid.EnvGrid, xygrid::Grid.FreeGrid, nfun,
     else
         β0const = grid.ω0/PhysData.c * nfun(wlfreq(grid.ω0))
     end
-    make_const_linop(grid, xygrid, n, β1, β0const; thg=thg, factored, arraytype)
+    make_const_linop(grid, xygrid, n, β1, β0const; thg=thg, factored, arraytype,
+                     frozen_transverse)
 end
 
 # A materialised linear operator is a whole extra field-sized array on the device, and

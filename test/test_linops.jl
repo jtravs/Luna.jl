@@ -89,6 +89,33 @@ for gi in (grid, grid_thg)
 end
 end
 
+@testset "3D, frozen transverse" begin
+# frozen_transverse=true replaces k_z(ω, k⊥) by k_z(ω, 0): the operator must become
+# transverse-uniform and equal the unfrozen operator's k⊥ = 0 column everywhere, the
+# default (off) must stay bit-identical to the pre-existing behaviour, and the
+# factored/materialised bit-identity guarantee must survive the flag.
+grid = Grid.EnvGrid(1, 800e-9, (400e-9, 2000e-9), 0.2e-12)
+grid_thg = Grid.EnvGrid(1, 800e-9, (400e-9, 2000e-9), 0.2e-12; thg=true)
+rgrid = Grid.RealGrid(1, 800e-9, (400e-9, 2000e-9), 0.2e-12)
+xygrid = Grid.FreeGrid(R, Nx, R, Ny)
+rif = PhysData.ref_index_fun(gas, pres)
+iy0 = findfirst(iszero, xygrid.ky)
+ix0 = findfirst(iszero, xygrid.kx)
+for gi in (grid, grid_thg, rgrid)
+    lref = LinearOps.make_const_linop(gi, xygrid, rif)
+    loff = LinearOps.make_const_linop(gi, xygrid, rif; frozen_transverse=false)
+    @test isequal(loff, lref)
+    lfrz = LinearOps.make_const_linop(gi, xygrid, rif; frozen_transverse=true)
+    lfrzfac = LinearOps.make_const_linop(gi, xygrid, rif; frozen_transverse=true,
+                                         factored=true)
+    @test all(iszero, lfrzfac.kperp2)
+    @test isequal(collect(lfrzfac), lfrz)
+    # transverse-uniform, and equal to the unfrozen k⊥ = 0 column
+    @test all(lfrz .== lfrz[:, iy0:iy0, ix0:ix0])
+    @test isequal(lfrz[:, iy0, ix0], lref[:, iy0, ix0])
+end
+end
+
 @testset "equivalence for fast z-dependent linops" begin
 a = 125e-6
 L = 1
