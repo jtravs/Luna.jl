@@ -82,6 +82,14 @@ ans.savefig("spec_1D.svg"); # hide
 
 # ![Spectral-domain (sum)](spec_1D.svg)
 
+# Without the `modes` keyword, all modes are plotted individually: each mode gets a
+# different line style.
+
+Plotting.spec_1D(output; λrange=(150e-9, 1000e-9))
+ans.savefig("spec_1D_modes.svg"); # hide
+
+# ![Spectral-domain (all modes)](spec_1D_modes.svg)
+
 # ## Spectrograms
 #
 # [`Plotting.spectrogram`](@ref) creates a time-frequency spectrogram using the Gabor transform.
@@ -117,3 +125,11 @@ Plotting.energy(output)
 ans.savefig("energy.svg"); # hide
 
 # ![Energy evolution](energy.svg)
+
+# The `modes` and `bandpass` keywords work here too — for example, the total energy in
+# the ultraviolet dispersive wave summed over all modes:
+
+Plotting.energy(output; modes=:sum, bandpass=(220e-9, 270e-9))
+ans.savefig("energy_sum_bp.svg"); # hide
+
+# ![Energy evolution (sum, bandpassed)](energy_sum_bp.svg)

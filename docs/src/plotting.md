@@ -13,7 +13,7 @@ using Luna, PythonPlot
 **Installation:**
 ```julia
 using Pkg
-Pkg.add(["PythonPlot", "PythonCall"])
+Pkg.add("PythonPlot")
 ```
 
 ### Makie (native Julia)
@@ -217,36 +217,38 @@ cm = Plotting.cmap_white("viridis")
 Plotting.prop_2D(output; cmap=cm)
 ```
 
-### `cmap_colours` (matplotlib backends)
+### `cmap_colours`
 
 Generate an array of colours sampled from a colourmap, useful for custom multi-line plots.
 
 ```julia
-colours = cmap_colours(5, "viridis"; cmin=0.1, cmax=0.9)
+colours = Plotting.cmap_colours(5, "viridis"; cmin=0.1, cmax=0.9)
 ```
 
-### `subplotgrid` (matplotlib backends)
+### `subplotgrid`
 
-Create a figure with subplots laid out in a near-square grid.
+Create a figure with subplots laid out in a near-square grid. With the matplotlib
+backends this returns `(fig, axs)`; with the Makie backend it instead returns grid
+indices and a recommended figure size (see the docstring).
 
 ```julia
-fig, axs = subplotgrid(6)  # creates a 3×2 grid
+fig, axs = Plotting.subplotgrid(6)  # creates a 3×2 grid (matplotlib backends)
 ```
 
-### `cornertext` (matplotlib backends)
+### `cornertext`
 
 Place text in a corner of an axis.
 
 ```julia
-cornertext(ax, "a)"; corner="ul")  # upper-left
+Plotting.cornertext(ax, "a)"; corner="ul")  # upper-left
 ```
 
-### `auto_fwhm_arrows` (matplotlib backends)
+### `auto_fwhm_arrows`
 
 Draw FWHM arrows with annotations on a plot.
 
 ```julia
-auto_fwhm_arrows(ax, t, power; text=:right, units="fs")
+Plotting.auto_fwhm_arrows(ax, t, power; text=:right, units="fs")
 ```
 
 ## Custom plots with `Processing`

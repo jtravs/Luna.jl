@@ -46,7 +46,7 @@ This will install and precompile Luna and all its dependencies. For plotting you
 
 ```julia
 ]
-add PythonPlot PythonCall
+add PythonPlot
 ```
 For a native Julia experience with advanced features (e.g. interactive 3D spectrograms), you can use [Makie](https://docs.makie.org/) instead (`CairoMakie` for static output, `GLMakie` for interactive windows, `WGLMakie` for VSCode/Jupyter). See the [plotting documentation](http://lupo-lab.com/Luna.jl/dev/plotting.html) for details.
 
