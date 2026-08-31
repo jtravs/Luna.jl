@@ -350,14 +350,22 @@ end
         open(qfile * "_item2_lock", "w") do io
             write(io, "1 some.other.host")
         end
-        scan = Scan("scantest_queue_stale", Scans.QueueExec(0, qfile; stale_age=0.2); var=v)
         idcs_run = Int[]
         fscan = (scanidx, vi) -> push!(idcs_run, scanidx)
-        # not yet stale: this worker runs the other points and leaves point 2 alone
+        # with the default stale_age (600 s) the lock cannot go stale during this test,
+        # however slow the machine: this worker runs the other points and leaves point 2
+        # alone
+        scan = Scan("scantest_queue_stale", Scans.QueueExec(0, qfile); var=v)
         runscan(fscan, scan)
         @test sort(idcs_run) == [1, 3, 4]
         @test isfile(qfile)
-        sleep(2) # let the lock file age beyond 5*stale_age = 1 second
+        HDF5.h5open(qfile) do file
+            @test read(file["qdata"])[2] == 1 # still marked as in progress
+        end
+        # with a tiny stale_age, the lock file (never refreshed since its creation above)
+        # is now long stale, so point 2 is taken over and re-run
+        sleep(2) # make sure the lock file is older than 5*stale_age = 1 second
+        scan = Scan("scantest_queue_stale", Scans.QueueExec(0, qfile; stale_age=0.2); var=v)
         # (Pidfile itself warns when taking over a stale lock file, so don't assert logs)
         runscan(fscan, scan)
         @test count(==(2), idcs_run) == 1
