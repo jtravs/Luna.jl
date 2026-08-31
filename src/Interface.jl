@@ -918,13 +918,34 @@ which is what [`Processing.withnoise`](@ref Luna.Processing.withnoise) needs to 
 noise background from a saved file. That array is half the size of `Eω`, so it is off by
 default.
 
+If `output` already contains a noise field, this is a cached `HDF5Output` being resumed, and
+the recorded realisation is adopted for the rest of the propagation instead (the `rng`
+argument is ignored, with a message saying so). That matters more here than it would for
+`shotnoise=:input`, where the noise enters only the initial condition and is therefore
+carried by the cached field: the modified model uses the noise at *every* step, so continuing
+with a fresh draw would splice two different realisations together and leave the already-saved
+planes inconsistent with the recorded one.
+
 Does nothing unless the modified shot-noise model is in use.
 """
 function savenoise(output, transform, grid, saveN, save_noise)
     noise = hasfield(typeof(transform), :noise) ? transform.noise : nothing
     isnothing(noise) && return
-    output("noise_field", noise.Eω0)
+    if haskey(output, "noise_field")
+        saved = output["noise_field"]
+        size(saved) == size(noise.Eω0) || error(
+            "the noise field saved in this output has size $(size(saved)) but this "*
+            "simulation needs $(size(noise.Eω0)) -- the output belongs to a different "*
+            "simulation")
+        noise.Eω0 .= saved
+        noise.lastz[] = NaN
+        @info("Adopting the noise realisation already recorded in the output; the `rng` "*
+              "argument is ignored when resuming a cached run.")
+    else
+        output("noise_field", noise.Eω0)
+    end
     save_noise || return
+    haskey(output, "noise_phase") && return # already recorded, and a function of the draw
     Φ = zeros(Float64, (size(noise.Eω0)..., saveN))
     d = ndims(Φ)
     for (i, z) in enumerate(range(0, stop=grid.zmax, length=saveN))

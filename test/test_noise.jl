@@ -123,19 +123,18 @@ end
 end
 
 @testset "Tabulated unitary phase" begin
-    # z-dependent linear operator (pressure gradient): the accumulated phase is tabulated
-    # and must agree with a direct quadrature of imag(linop).
+    # z-dependent linear operators: the accumulated phase is tabulated by adaptive
+    # bisection, and must agree with a direct quadrature of imag(linop) to the tolerance the
+    # refinement was asked for. Luna's own profiles are the awkward cases -- a p0 = 0
+    # gradient has a 1/√z cusp in dp/dz at the entrance and a multi-section fill has a
+    # derivative discontinuity at every junction -- so all of them are exercised here.
     grid = Grid.RealGrid(0.2, 800e-9, (400e-9, 2e-6), 200e-15)
-    coren, _ = Capillary.gradient(:He, 0.2, 5.0, 0.1)
-    mode = Capillary.MarcatiliMode(100e-6, coren; loss=true)
-    linop!, _ = LinearOps.make_linop(grid, mode, grid.referenceλ)
-    phase = LinearOps.unitary_phase(linop!, grid, (length(grid.ω),))
-    @test phase isa LinearOps.TabulatedUnitaryPhase
+    nω = length(grid.ω)
 
-    function refphase(z; n=201) # composite Simpson, n odd
+    function refphase(linop!, z; n=2001) # composite Simpson, n odd
         zs = range(0, z, length=n)
-        buf = Array{ComplexF64}(undef, length(grid.ω))
-        acc = zeros(Float64, length(grid.ω))
+        buf = Array{ComplexF64}(undef, nω)
+        acc = zeros(Float64, nω)
         for (i, zz) in enumerate(zs)
             w = (i == 1 || i == n) ? 1.0 : (iseven(i) ? 4.0 : 2.0)
             linop!(buf, zz)
@@ -144,15 +143,51 @@ end
         acc .* (step(zs)/3)
     end
 
-    φ = zeros(Float64, length(grid.ω))
-    for z in (0.05, 0.13)
-        phase(φ, z)
-        @test maximum(abs, φ .- refphase(z)) < 1e-6
+    linops = Dict(
+        # smooth gradient
+        "gradient" => Capillary.gradient(:He, 0.2, 5.0, 0.5)[1],
+        # p0 = 0: dp/dz diverges as 1/√z at the entrance
+        "cusp" => Capillary.gradient(:He, 0.2, 0.0, 5.0)[1],
+        # multi-section fill: a derivative discontinuity at each junction
+        "kinks" => Capillary.gradient(:He, [0.0, 0.07, 0.13, 0.2], [0.0, 6.0, 1.0, 3.0])[1],
+    )
+    φ = zeros(Float64, nω)
+    for (name, coren) in linops
+        mode = Capillary.MarcatiliMode(100e-6, coren; loss=true)
+        linop!, _ = LinearOps.make_linop(grid, mode, grid.referenceλ)
+        phase = LinearOps.unitary_phase(linop!, grid, (nω,))
+        @test phase isa LinearOps.TabulatedUnitaryPhase
+        # the refinement met the tolerance it was asked for...
+        @test phase.err <= phase.atol
+        # ...and the measured error is a good estimate of the true one, which is what
+        # justifies reporting it. 10x headroom covers the midpoint estimate being slightly
+        # optimistic and the reference quadrature's own error at the cusp/kinks.
+        for z in (0.05, 0.13, 0.2)
+            phase(φ, z)
+            @test maximum(abs, φ .- refphase(linop!, z)) < 10*phase.atol
+        end
     end
-    # the integrator overshoots grid.zmax on its final step, so evaluation past the end of
-    # the table must extrapolate rather than fail
-    phase(φ, 0.21)
-    @test maximum(abs, φ .- refphase(0.21)) < 1e-4
+
+    # a kinked taper, with a static fill. Unlike a gas gradient, whose pressure profile is
+    # clamped beyond the fibre, a taper keeps changing past zmax -- so this is the case that
+    # needs the table to cover the integrator's overshoot with real nodes.
+    afun(z) = z < 0.1 ? 100e-6 : 100e-6 - 40e-6*(z - 0.1)/0.1
+    linop!, _ = LinearOps.make_linop(
+        grid, Capillary.MarcatiliMode(afun, :He, 5.0; loss=true), grid.referenceλ)
+    phase = LinearOps.unitary_phase(linop!, grid, (nω,))
+    @test phase.err <= phase.atol
+    @test phase.z[end] > grid.zmax # the overshoot margin is tabulated, not extrapolated
+    for z in (0.13, 0.2, 0.205)
+        phase(φ, z)
+        @test maximum(abs, φ .- refphase(linop!, z)) < 10*phase.atol
+    end
+    # past the margin it falls back to linear extrapolation rather than failing
+    phase(φ, 0.5)
+    @test all(isfinite, φ)
+    # a tolerance the caller asks for is honoured
+    coarse = LinearOps.unitary_phase(linop!, grid, (nω,); atol=1e-3)
+    @test coarse.err <= 1e-3
+    @test length(coarse.z) < length(phase.z) # ... with fewer nodes
 end
 
 @testset "Multimode modified noise integration" begin
@@ -409,6 +444,24 @@ end
     @test_throws ErrorException Processing.withnoise(out2)
     # ... or the transform, which always works
     @test Processing.withnoise(out2, transform) ≈ E
+end
+
+@testset "Cached resume adopts the recorded noise" begin
+    # The modified model uses the noise at every step, so resuming a cached run with a fresh
+    # draw would splice two realisations together and leave the already-saved planes
+    # inconsistent with the recorded noise field.
+    fpath = joinpath(mktempdir(), "noise_resume.h5")
+    out = prop_capillary(noise_args...; noise_kwargs..., shotnoise=:modified,
+                         rng=Random.MersenneTwister(42), filepath=fpath)
+    saved = out["noise_field"]
+    @test any(!iszero, saved)
+    # setting up again on the same file finds the cache, and must adopt the recorded draw
+    # rather than the different one its own rng would produce
+    _, _, _, transform, _, out2 = Interface.prop_capillary_args(
+        noise_args...; noise_kwargs..., shotnoise=:modified,
+        rng=Random.MersenneTwister(7), filepath=fpath)
+    @test transform.noise.Eω0 == saved
+    @test out2["noise_field"] == saved
 end
 
 @testset "rtol/atol are threaded to the integrator" begin
