@@ -13,7 +13,7 @@ grid = Grid.RealGrid(0, λ0, (10e-9, 1500e-9), 4*τfwhm)
 It = Maths.gauss.(grid.t; fwhm=τfwhm) .* Ipeak
 Et = Tools.intensity_to_field.(It) .* cos.(grid.t .* wlfreq(λ0))
 
-irf! = Ionisation.ionrate_fun!_PPTcached(gas, λ0)
+irf! = Ionisation.IonRatePPTCached(gas, λ0)
 
 D = SFA.sfa_dipole(grid.t, Et, gas, λ0; gate=true, depletion=true, irf!)
 eV = PhysData.ħ .* grid.ω ./ PhysData.electron
@@ -23,7 +23,7 @@ gab = Maths.gabor(grid.t, D, tg, 300e-18)
 ##
 IpeV = PhysData.ionisation_potential(gas; unit=:eV)
 # Ponderomotive energy:
-Up = PhysData.electron^2 * maximum(Et)^2/(4*PhysData.m_e * wlfreq(λ0)^2) 
+Up = PhysData.electron^2 * maximum(Et)^2/(4*PhysData.m_e * wlfreq(λ0)^2)
 UpeV = Up/PhysData.electron
 # Cutoff law:
 cutoffeV = IpeV + 3.17UpeV

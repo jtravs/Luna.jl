@@ -125,7 +125,7 @@ pyplot.plot(zout.*1e2, energy.*1e6)
 pyplot.xlabel("Distance [cm]")
 pyplot.ylabel("Energy [μJ]")
 
-jw = Plotting.cmap_white("jet", 512, 10)
+jw = Plotting.cmap_white("jet"; N=512, n=10)
 fig = pyplot.figure()
 fig.set_size_inches(12, 4)
 for ii in 1:3

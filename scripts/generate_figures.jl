@@ -110,11 +110,11 @@ end
 println("  Generating scan spectrum figure...")
 npress = length(pressures)
 fig, axs = plt.subplots(1, npress, figsize=(4*npress, 3), layout="constrained")
-im = nothing 
+im = nothing
 for (pidx, pressure) in enumerate(pressures)
-    ax = npress == 1 ? axs : axs[pidx-1] 
+    ax = npress == 1 ? axs : axs[pidx-1]
     data = 10 * Maths.log10_norm(Iλ[:, :, pidx])
-    im = ax.pcolormesh(λ * 1e9, energies * 1e6, data';
+    global im = ax.pcolormesh(λ * 1e9, energies * 1e6, data';
         vmin=-40, vmax=0, cmap="viridis", rasterized=true)
     ax.set_xlim(100, 1200)
     ax.set_xlabel("Wavelength (nm)")
